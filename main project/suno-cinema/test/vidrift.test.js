@@ -9,6 +9,8 @@ import {
   parseVidriftMessage,
   parseAnyPlayerMessage,
   buildVidriftCommand,
+  isDirectStreamUrl,
+  fetchStreamSources,
 } from '../src/utils/vidrift.js';
 
 test('parseDirectTarget handles TMDB movie, TMDB TV, AniList URLs, and shorthands', () => {
@@ -151,4 +153,45 @@ test('buildPlayerEmbedUrl & parseAnyPlayerMessage support VidLink No-Redirect an
     parseAnyPlayerMessage({ origin: 'https://evil.example', data: { type: 'MEDIA_DATA' } }),
     null
   );
+});
+
+test('isDirectStreamUrl identifies genuine stream URLs and rejects HTML/embed URLs', () => {
+  assert.equal(isDirectStreamUrl('https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8'), true);
+  assert.equal(isDirectStreamUrl('https://cph-p2p-msl.akamaized.net/hls/live/2000341/test/master.m3u8'), true);
+  assert.equal(isDirectStreamUrl('https://example.com/video.mp4'), true);
+  assert.equal(isDirectStreamUrl('/api/proxy/hls?url=https%3A%2F%2Fexample.com%2Fstream.m3u8'), true);
+  assert.equal(isDirectStreamUrl('blob:http://localhost:3000/12345'), true);
+
+  // Rejects HTML pages and embed player origins
+  assert.equal(isDirectStreamUrl('https://embed.vidrift.net/embed/movie/26815?brand=Suno+Cinema'), false);
+  assert.equal(isDirectStreamUrl('https://vidlink.pro/movie/26815'), false);
+  assert.equal(isDirectStreamUrl('https://example.com/embed/player.html'), false);
+  assert.equal(isDirectStreamUrl('https://example.com/index.html'), false);
+  assert.equal(isDirectStreamUrl(''), false);
+  assert.equal(isDirectStreamUrl(null), false);
+  assert.equal(isDirectStreamUrl(undefined), false);
+});
+
+test('buildPlayerEmbedUrl safely falls back to VidLink when provider is hls-direct', () => {
+  const url = buildPlayerEmbedUrl(
+    { mediaType: 'movie', tmdbId: '26815' },
+    { provider: 'hls-direct', themeId: 'cyberpunk' }
+  );
+  assert.ok(url.startsWith(VIDLINK_ORIGIN));
+  assert.ok(url.includes('/movie/26815'));
+  assert.equal(url.includes(VIDRIFT_ORIGIN), false);
+});
+
+test('fetchStreamSources provides direct HLS sources with client and proxy fallbacks', async () => {
+  const itemWithHls = {
+    id: 'movie:test-bbb',
+    tmdbId: 'test-bbb',
+    mediaType: 'movie',
+    title: 'Big Buck Bunny',
+    hlsStreamUrl: 'https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8',
+  };
+  const sources = await fetchStreamSources(itemWithHls);
+  assert.ok(Array.isArray(sources));
+  assert.ok(sources.some((s) => s.id === 'catalog-hls' && s.type === 'hls' && s.direct === true));
+  assert.ok(sources.some((s) => s.id === 'vidlink-shield' && s.sandboxed === true));
 });

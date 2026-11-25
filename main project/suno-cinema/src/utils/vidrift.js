@@ -37,6 +37,33 @@ export const THEME_ACCENT_HEX = {
 };
 
 /**
+ * Checks whether a given URL is a direct media stream (HLS m3u8, MP4, or proxied HLS stream)
+ * and not an HTML webpage or iframe embed player.
+ * @param {string} url
+ * @returns {boolean}
+ */
+export function isDirectStreamUrl(url) {
+  if (!url || typeof url !== 'string') return false;
+  const trimmed = url.trim();
+  if (
+    trimmed.includes('embed.vidrift.net') ||
+    trimmed.includes('vidlink.pro') ||
+    trimmed.includes('/embed/') ||
+    trimmed.endsWith('.html') ||
+    trimmed.endsWith('.htm')
+  ) {
+    return false;
+  }
+  return (
+    trimmed.includes('.m3u8') ||
+    trimmed.includes('.mp4') ||
+    trimmed.includes('/api/proxy/hls') ||
+    trimmed.startsWith('blob:') ||
+    trimmed.startsWith('data:video/')
+  );
+}
+
+/**
  * Resolve theme accent hex (6 chars, no leading #) for embed branding.
  * @param {string} themeId
  * @returns {string}
@@ -190,12 +217,13 @@ export async function fetchStreamSources(item, options = {}) {
 
   // 2. Client-side fallback sources
   const list = [];
-  if (item.hlsStreamUrl) {
+  const directStream = item.hlsStreamUrl || (item.hlsUrl && isDirectStreamUrl(item.hlsUrl) ? item.hlsUrl : '');
+  if (directStream) {
     list.push({
       id: 'catalog-hls',
       name: 'Direct HLS Stream (Zero Ads)',
       type: 'hls',
-      url: item.hlsStreamUrl,
+      url: directStream,
       quality: '1080p UHD',
       shielded: true,
       direct: true,
@@ -345,7 +373,7 @@ export function buildVidlinkEmbedUrl(item, options = {}) {
  */
 export function buildPlayerEmbedUrl(item, options = {}) {
   const provider = options.provider || 'vidlink';
-  if (provider === 'vidlink') {
+  if (provider === 'vidlink' || provider === 'hls-direct') {
     return buildVidlinkEmbedUrl(item, options);
   }
   return buildVidriftEmbedUrl(item, options);

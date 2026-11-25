@@ -26,6 +26,9 @@ function sendJson(res, statusCode, payload) {
   res.writeHead(statusCode, {
     'Content-Type': 'application/json; charset=utf-8',
     'Cache-Control': 'no-store',
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
+    'Access-Control-Allow-Headers': '*',
   });
   res.end(body);
 }
@@ -565,6 +568,15 @@ export function createSunoCinemaServer(rootDir = ROOT_DIR) {
     }
 
     if (pathname === '/api/resolve/stream') {
+      if (req.method === 'OPTIONS') {
+        res.writeHead(204, {
+          'Access-Control-Allow-Origin': '*',
+          'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
+          'Access-Control-Allow-Headers': '*',
+        });
+        return res.end();
+      }
+
       const tmdbId = reqUrl.searchParams.get('tmdbId') || '';
       const imdbId = reqUrl.searchParams.get('imdbId') || '';
       const anilistId = reqUrl.searchParams.get('anilistId') || '';
@@ -598,7 +610,7 @@ export function createSunoCinemaServer(rootDir = ROOT_DIR) {
           (anilistId && String(x.anilistId) === String(anilistId))
       );
 
-      if (localItem?.hlsStreamUrl) {
+      if (localItem?.hlsStreamUrl && (!directUrl || directUrl !== localItem.hlsStreamUrl)) {
         sources.push({
           id: 'catalog-hls',
           name: 'Direct HLS Stream (Zero Ads)',

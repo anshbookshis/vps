@@ -101,13 +101,21 @@ test('Suno Cinema HTTP server serves UI assets, catalog API, search, TV seasons,
     const streamData = await resolveResp.json();
     assert.equal(streamData.ok, true);
     assert.ok(Array.isArray(streamData.sources));
+    assert.ok(streamData.sources.some((s) => s.id === 'catalog-hls' && s.url.includes('/api/proxy/hls')));
     assert.ok(streamData.sources.some((s) => s.id === 'vidlink-shield'));
     assert.ok(streamData.sources.some((s) => s.id === 'vidrift-sandboxed'));
+
+    // Test stream resolver OPTIONS preflight
+    const resolveOpt = await fetch(`${base}/api/resolve/stream`, { method: 'OPTIONS' });
+    assert.equal(resolveOpt.status, 204);
+    assert.equal(resolveOpt.headers.get('access-control-allow-origin'), '*');
 
     // Test stream resolver with direct HLS URL
     const directResp = await fetch(
       `${base}/api/resolve/stream?directUrl=${encodeURIComponent('https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8')}`
     );
+    assert.equal(directResp.status, 200);
+    assert.equal(directResp.headers.get('access-control-allow-origin'), '*');
     assert.equal(directResp.status, 200);
     const directData = await directResp.json();
     assert.ok(directData.sources.some((s) => s.type === 'hls' && s.url.includes('/api/proxy/hls')));

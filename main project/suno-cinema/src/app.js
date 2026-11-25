@@ -5,6 +5,7 @@ import {
   parseAnyPlayerMessage,
   buildVidriftCommand,
   VIDRIFT_ORIGIN,
+  isDirectStreamUrl,
 } from './utils/vidrift.js';
 import { antiRedirectGuard } from './utils/anti-redirect.js';
 import {
@@ -277,8 +278,82 @@ function loadHlsScriptOnce() {
   });
 }
 
+function fallbackToEmbedPlayer(item, message = 'Switched to VidLink shield player.') {
+  destroyHlsInstance();
+  if (message) {
+    showToast(message);
+  }
+
+  const fallbackUrl = buildPlayerEmbedUrl(item, {
+    provider: 'vidlink',
+    themeId: state.appearance.theme,
+    autoplay: state.prefs.autoplay,
+    sub: state.prefs.sub,
+    dub: state.prefs.dub,
+    uiScale: state.prefs.uiScale,
+    season: state.activeSeason,
+    episode: state.activeEpisode,
+  });
+
+  const frameBox = document.getElementById('player-frame-box');
+  if (frameBox) {
+    frameBox.innerHTML = `<iframe
+      id="vidrift-player"
+      src="${escapeHtml(fallbackUrl)}"
+      title="${escapeHtml(item.title)}"
+      allow="autoplay; fullscreen; picture-in-picture; encrypted-media"
+      allowfullscreen
+      referrerpolicy="strict-origin-when-cross-origin"
+    ></iframe>
+    ${renderPlayerEpisodesDrawer(item)}`;
+
+    const frame = document.getElementById('vidrift-player');
+    if (frame) {
+      frame.dataset.embedUrl = fallbackUrl;
+      applySandboxAttr(frame);
+    }
+  }
+
+  const topBar = document.querySelector('.player-top-bar');
+  if (topBar) {
+    const shieldMount = topBar.querySelector('.shield-pill');
+    if (shieldMount) {
+      shieldMount.outerHTML = `<button type="button" class="shield-pill" id="toggle-strict-shield-btn">
+        ${svgIcon('shield', 13)}
+        <span>No-Redirect ON</span>
+      </button>`;
+    }
+  }
+
+  const strip = document.getElementById('player-bottom-strip');
+  if (strip) {
+    strip.innerHTML = `<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+      ${PLAYER_PROVIDERS.map(
+        (p) => `<button type="button" class="outline-chip ${
+          state.prefs.playerProvider === p.id ? 'is-active' : ''
+        }" data-switch-provider="${p.id}" style="height:30px;padding:0 10px;font-size:11px;">${escapeHtml(
+          p.label
+        )}</button>`
+      ).join('')}
+      <button type="button" class="outline-chip" id="reload-player-btn" style="height:30px;font-size:11px;">${svgIcon(
+        'refresh',
+        12
+      )} Reload</button>
+    </div>
+    <span class="dim" style="font-size:11px;">Popups Blocked</span>`;
+  }
+}
+
 async function attachDirectVideoStream(videoEl, streamUrl, item) {
   if (!videoEl || !streamUrl) return;
+
+  // Never feed non-stream or HTML embed URLs to Hls.js or video element
+  if (!isDirectStreamUrl(streamUrl)) {
+    console.warn('[Player] Rejecting non-stream URL for video player:', streamUrl);
+    fallbackToEmbedPlayer(item, 'Direct HLS stream unavailable for this title. Switched to VidLink shield player.');
+    return;
+  }
+
   destroyHlsInstance();
 
   const key = getMediaKey(item);
@@ -312,6 +387,11 @@ async function attachDirectVideoStream(videoEl, streamUrl, item) {
     { once: true }
   );
 
+  videoEl.onerror = () => {
+    console.error('[Player] Direct video element error. Falling back to VidLink shield player.');
+    fallbackToEmbedPlayer(item, 'Direct stream error. Switched to VidLink shield player.');
+  };
+
   if (streamUrl.toLowerCase().includes('.mp4') || videoEl.canPlayType('application/vnd.apple.mpegurl')) {
     videoEl.src = streamUrl;
     return;
@@ -319,11 +399,55 @@ async function attachDirectVideoStream(videoEl, streamUrl, item) {
 
   const Hls = await loadHlsScriptOnce();
   if (Hls && Hls.isSupported()) {
-    activeHlsInstance = new Hls();
-    activeHlsInstance.loadSource(streamUrl);
-    activeHlsInstance.attachMedia(videoEl);
-  } else {
+    const hls = new Hls({
+      enableWorker: true,
+      lowLatencyMode: true,
+    });
+    activeHlsInstance = hls;
+
+    let networkRetries = 0;
+    let mediaRetries = 0;
+    const MAX_RETRIES = 2;
+
+    hls.on(Hls.Events.ERROR, (event, data) => {
+      if (!data.fatal) return;
+
+      switch (data.type) {
+        case Hls.ErrorTypes.NETWORK_ERROR:
+          if (networkRetries < MAX_RETRIES) {
+            networkRetries++;
+            console.warn(`[HLS] Network error retry ${networkRetries}/${MAX_RETRIES}...`);
+            hls.startLoad();
+          } else {
+            console.error('[HLS] Fatal network error after retries. Falling back to embed.');
+            fallbackToEmbedPlayer(item, 'HLS network error. Switched to VidLink shield player.');
+          }
+          break;
+
+        case Hls.ErrorTypes.MEDIA_ERROR:
+          if (mediaRetries < MAX_RETRIES) {
+            mediaRetries++;
+            console.warn(`[HLS] Media error retry ${mediaRetries}/${MAX_RETRIES}...`);
+            hls.recoverMediaError();
+          } else {
+            console.error('[HLS] Fatal media error after retries. Falling back to embed.');
+            fallbackToEmbedPlayer(item, 'HLS media error. Switched to VidLink shield player.');
+          }
+          break;
+
+        default:
+          console.error('[HLS] Unrecoverable fatal error:', data.type, data.details);
+          fallbackToEmbedPlayer(item, 'HLS playback error. Switched to VidLink shield player.');
+          break;
+      }
+    });
+
+    hls.loadSource(streamUrl);
+    hls.attachMedia(videoEl);
+  } else if (videoEl.canPlayType('application/vnd.apple.mpegurl')) {
     videoEl.src = streamUrl;
+  } else {
+    fallbackToEmbedPlayer(item, 'HLS playback is not supported in this browser. Switched to VidLink shield player.');
   }
 }
 
@@ -380,13 +504,26 @@ async function selectStudioHub(hubId) {
 
 function getCurrentEmbedUrl() {
   if (!state.activeItem) return '';
-  if (state.activeItem.mediaType === 'hls') return state.activeItem.hlsUrl || '';
-  if (state.prefs.playerProvider === 'hls-direct' && state.activeItem.hlsStreamUrl) {
-    return state.activeItem.hlsStreamUrl;
+  const item = state.activeItem;
+  const provider = state.prefs.playerProvider || 'vidlink';
+
+  // 1. Direct HLS link via Quick Launch or mediaType === 'hls'
+  if (item.mediaType === 'hls') {
+    return item.hlsUrl || item.hlsStreamUrl || '';
   }
-  if (state.activeItem.mediaType !== 'anime' && !state.activeItem.tmdbId) return '';
-  return buildPlayerEmbedUrl(state.activeItem, {
-    provider: state.prefs.playerProvider || 'vidlink',
+
+  // 2. Direct HLS stream candidate
+  const directStream = item.hlsStreamUrl || (item.hlsUrl && isDirectStreamUrl(item.hlsUrl) ? item.hlsUrl : '');
+
+  // If user selected Native HLS and title has a verified direct stream, return it
+  if (provider === 'hls-direct' && directStream && isDirectStreamUrl(directStream)) {
+    return directStream;
+  }
+
+  // 3. Fallback to sandboxed embed URL (always VidLink when provider is hls-direct without a direct stream)
+  if (item.mediaType !== 'anime' && !item.tmdbId) return '';
+  return buildPlayerEmbedUrl(item, {
+    provider: provider === 'hls-direct' ? 'vidlink' : provider,
     themeId: state.appearance.theme,
     autoplay: state.prefs.autoplay,
     sub: state.prefs.sub,
@@ -407,12 +544,12 @@ function sendPlayerCommand(action, payload = {}) {
 async function launchStream(rawItem, { season, episode, resumeSeconds } = {}) {
   if (!rawItem) return;
   let item = rawItem;
-  if (item.mediaType !== 'anime' && item.mediaType !== 'hls' && !item.tmdbId) {
+  if (item.mediaType !== 'anime' && item.mediaType !== 'hls' && !item.tmdbId && !item.hlsStreamUrl) {
     showToast(`Loading "${item.title}" stream...`);
     item = await resolveFullMetadata(item);
     registerItems([item]);
   }
-  if (item.mediaType !== 'anime' && item.mediaType !== 'hls' && !item.tmdbId) {
+  if (item.mediaType !== 'anime' && item.mediaType !== 'hls' && !item.tmdbId && !item.hlsStreamUrl) {
     showToast('Stream ID unavailable for this entry — try Quick Launch');
     return;
   }
@@ -429,6 +566,7 @@ async function launchStream(rawItem, { season, episode, resumeSeconds } = {}) {
   state.playerOpen = true;
   state.playerEpisodesOpen = false;
   state.modal = null;
+  state._hlsFallbackNotifiedItem = null;
   antiRedirectGuard.setTheaterActive(true);
   state.livePlayback = {
     currentTime: saved?.currentTime || 0,
@@ -1852,11 +1990,29 @@ function syncPlayerMount({ forceReload = false } = {}) {
     return;
   }
 
-  const embedUrl = getCurrentEmbedUrl();
   const item = state.activeItem;
   const provider = state.prefs.playerProvider || 'vidlink';
-  const isHls = item.mediaType === 'hls' || provider === 'hls-direct' || Boolean(item.hlsStreamUrl);
-  const isSandboxed = provider !== 'vidrift-direct' && state.shield.strictFrameMode;
+  const directStreamUrl =
+    (item.mediaType === 'hls' && item.hlsUrl) ||
+    item.hlsStreamUrl ||
+    (item.hlsUrl && isDirectStreamUrl(item.hlsUrl) ? item.hlsUrl : null);
+  const hasDirectStream = Boolean(directStreamUrl && isDirectStreamUrl(directStreamUrl));
+
+  // Play natively ONLY if there is a verified direct stream and provider is hls-direct or mediaType is hls
+  const isHls = hasDirectStream && (provider === 'hls-direct' || item.mediaType === 'hls');
+
+  // If title has no direct HLS source and Native HLS was chosen, auto-fallback cleanly with toast notification
+  if (provider === 'hls-direct' && !hasDirectStream) {
+    const itemKey = getMediaKey(item);
+    if (state._hlsFallbackNotifiedItem !== itemKey) {
+      state._hlsFallbackNotifiedItem = itemKey;
+      showToast('Direct HLS stream unavailable for this title. Switched to VidLink shield player.');
+    }
+  }
+
+  const embedUrl = isHls ? directStreamUrl : getCurrentEmbedUrl();
+  const effectiveProvider = isHls ? 'hls-direct' : provider === 'hls-direct' ? 'vidlink' : provider;
+  const isSandboxed = effectiveProvider !== 'vidrift-direct' && state.shield.strictFrameMode;
   const existingFrame = document.getElementById('vidrift-player');
   const existingVideo = document.getElementById('hls-video-player');
   const modeMismatch = (isHls && !existingVideo) || (!isHls && !existingFrame);
@@ -1966,14 +2122,15 @@ function syncPlayerMount({ forceReload = false } = {}) {
       ${
         isHls
           ? `<span class="dim" style="font-size:12px;">Playing authorized HTTPS stream natively</span>`
-          : PLAYER_PROVIDERS.map(
-              (p) => `<button type="button" class="outline-chip ${
-                provider === p.id ? 'is-active' : ''
-              }" data-switch-provider="${p.id}" style="height:30px;padding:0 10px;font-size:11px;">${escapeHtml(
-                p.label
-              )}</button>`
-            ).join('')
+          : ''
       }
+      ${PLAYER_PROVIDERS.map(
+        (p) => `<button type="button" class="outline-chip ${
+          effectiveProvider === p.id ? 'is-active' : ''
+        }" data-switch-provider="${p.id}" style="height:30px;padding:0 10px;font-size:11px;">${escapeHtml(
+          p.label
+        )}</button>`
+      ).join('')}
       ${
         saved?.currentTime > 15 && provider !== 'vidlink' && !isHls
           ? `<button type="button" class="outline-chip" id="cmd-resume-btn" style="height:30px;font-size:11px;">Resume ${formatTime(
@@ -2569,6 +2726,22 @@ function bindEvents() {
     const switchProvBtn = target.closest('[data-switch-provider]');
     if (switchProvBtn) {
       const prov = switchProvBtn.dataset.switchProvider;
+      if (prov === 'hls-direct') {
+        const item = state.activeItem;
+        const directUrl =
+          (item?.mediaType === 'hls' && item?.hlsUrl) ||
+          item?.hlsStreamUrl ||
+          (item?.hlsUrl && isDirectStreamUrl(item.hlsUrl) ? item.hlsUrl : null);
+        const hasDirect = Boolean(directUrl && isDirectStreamUrl(directUrl));
+        if (!hasDirect) {
+          state.prefs = savePlayerPrefs({ playerProvider: 'vidlink' });
+          antiRedirectGuard.setStrictFrameMode(true);
+          state.shield = antiRedirectGuard.getSnapshot();
+          showToast('Direct HLS stream unavailable for this title. Switched to VidLink shield player.');
+          render({ forceReload: true });
+          return;
+        }
+      }
       state.prefs = savePlayerPrefs({ playerProvider: prov });
       if (prov === 'vidrift-direct') {
         antiRedirectGuard.setStrictFrameMode(false);
