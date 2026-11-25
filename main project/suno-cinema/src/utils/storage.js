@@ -135,7 +135,9 @@ export function savePlayerPrefs(next) {
 export function getMediaKey(item) {
   if (!item) return '';
   if (item.mediaType === 'anime' && item.anilistId) return `anime:${item.anilistId}`;
-  return `${item.mediaType || 'movie'}:${item.tmdbId || item.id}`;
+  if (item.tmdbId) return `${item.mediaType || 'movie'}:${item.tmdbId}`;
+  if (item.imdbId) return `${item.mediaType || 'movie'}:imdb:${item.imdbId}`;
+  return String(item.id || '');
 }
 
 export function loadProgressMap() {

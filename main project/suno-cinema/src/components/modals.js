@@ -9,7 +9,8 @@ function escapeHtml(str) {
     .replace(/"/g, '&quot;');
 }
 
-export function renderSettingsModal({ appearance, prefs }) {
+export function renderSettingsModal({ appearance, prefs, shield }) {
+  const shieldState = shield || { blockedCount: 0, navigationLock: true, strictFrameMode: false, recentEvents: [] };
   return `<div class="dialog-backdrop" data-close-modal="true">
     <div class="dialog-card" role="dialog" aria-modal="true" aria-label="Appearance and VidRift Settings">
       <div class="dialog-head">
@@ -80,14 +81,36 @@ export function renderSettingsModal({ appearance, prefs }) {
       </div>
 
       <div class="field-group">
-        <label class="field-label" for="pref-tmdb-key">Optional TMDB API Key / Read Access Token (unlocks full TMDB search & seasons)</label>
+        <label class="field-label" for="pref-tmdb-key">Optional TMDB API Key / Read Access Token (free Cinemeta + AniList catalogs are already active with zero key)</label>
         <input
           id="pref-tmdb-key"
           class="field-input"
           type="password"
-          placeholder="Optional — leave blank to use built-in catalog + keyless AniList/Wikidata"
+          placeholder="Optional — movies & TV already browse/search via keyless Cinemeta + AniList"
           value="${escapeHtml(prefs.tmdbApiKey || '')}"
         />
+      </div>
+
+      <div class="season-ep-box" style="padding:12px;gap:8px;">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+          <span style="display:inline-flex;align-items:center;gap:6px;font-size:13px;font-weight:700;">
+            ${svgIcon('shield', 16)} Anti-Redirect &amp; Zero-Ad Guard
+          </span>
+          <span class="row-match-pill">${shieldState.blockedCount} blocked</span>
+        </div>
+        <p class="dim" style="font-size:11px;line-height:1.45;">
+          Suno Cinema carries zero ads and locks host <code>window.open</code>, opener links, and navigation hijacks during playback. Strict Frame Isolation adds an iframe sandbox (note: VidRift warns sandbox can break video playback on some streams, so keep OFF unless a server attempts popups).
+        </p>
+        <div style="display:flex;gap:16px;flex-wrap:wrap;margin-top:4px;">
+          <label style="display:flex;align-items:center;gap:8px;font-size:12px;cursor:pointer;">
+            <input type="checkbox" id="pref-navlock" ${shieldState.navigationLock ? 'checked' : ''} />
+            Navigation Hijack Guard
+          </label>
+          <label style="display:flex;align-items:center;gap:8px;font-size:12px;cursor:pointer;">
+            <input type="checkbox" id="pref-strict-sandbox" ${shieldState.strictFrameMode ? 'checked' : ''} />
+            Strict Frame Isolation (optional sandbox)
+          </label>
+        </div>
       </div>
 
       <div style="display:flex;justify-content:flex-end;gap:10px;">

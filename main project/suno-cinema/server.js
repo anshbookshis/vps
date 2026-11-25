@@ -175,6 +175,78 @@ async function searchTmdbLive(query, type, apiKey) {
   });
 }
 
+async function searchCinemetaLive(query, type) {
+  const tasks = [];
+  if (type === 'all' || type === 'movie') {
+    tasks.push(
+      fetchJsonWithTimeout(`https://v3-cinemeta.strem.io/catalog/movie/top/search=${encodeURIComponent(query)}.json`)
+        .then((d) =>
+          (d?.metas || []).slice(0, 12).map((m) => ({
+            id: m.moviedb_id ? `movie:${m.moviedb_id}` : `movie:imdb:${m.id}`,
+            tmdbId: m.moviedb_id ? String(m.moviedb_id) : '',
+            imdbId: m.id,
+            mediaType: 'movie',
+            title: m.name || 'Untitled',
+            year: String(m.releaseInfo || '').slice(0, 4),
+            creator: 'Feature Film',
+            runtime: '',
+            rating: m.imdbRating ? String(m.imdbRating) : '7.8',
+            genres: m.genres || ['Movie'],
+            overview: m.description || '',
+            poster: m.poster || '',
+            backdrop: m.background || m.poster || '',
+            palette: ['#ff0033', '#27272a', '#09090b'],
+            sonic: {
+              moodId: 'midnight-synth',
+              bpm: 96,
+              texture: 'Cinema Score',
+              listenBefore: 'Any Suno track',
+              cooldownCue: 'Ambient synth fade',
+              vector: { pulse: 0.68, nocturne: 0.72, warmth: 0.52, scale: 0.68, tension: 0.68 },
+            },
+            source: 'cinemeta',
+          }))
+        )
+        .catch(() => [])
+    );
+  }
+  if (type === 'all' || type === 'tv') {
+    tasks.push(
+      fetchJsonWithTimeout(`https://v3-cinemeta.strem.io/catalog/series/top/search=${encodeURIComponent(query)}.json`)
+        .then((d) =>
+          (d?.metas || []).slice(0, 12).map((m) => ({
+            id: m.moviedb_id ? `tv:${m.moviedb_id}` : `tv:imdb:${m.id}`,
+            tmdbId: m.moviedb_id ? String(m.moviedb_id) : '',
+            imdbId: m.id,
+            mediaType: 'tv',
+            title: m.name || 'Untitled Series',
+            year: String(m.releaseInfo || '').slice(0, 4),
+            creator: 'Series',
+            runtime: 'Series',
+            rating: m.imdbRating ? String(m.imdbRating) : '7.9',
+            genres: m.genres || ['Series'],
+            overview: m.description || '',
+            poster: m.poster || '',
+            backdrop: m.background || m.poster || '',
+            palette: ['#ff0033', '#27272a', '#09090b'],
+            sonic: {
+              moodId: 'midnight-synth',
+              bpm: 94,
+              texture: 'Series Score',
+              listenBefore: 'Any Suno track',
+              cooldownCue: 'Ambient synth fade',
+              vector: { pulse: 0.66, nocturne: 0.74, warmth: 0.54, scale: 0.66, tension: 0.7 },
+            },
+            source: 'cinemeta',
+          }))
+        )
+        .catch(() => [])
+    );
+  }
+  const lists = await Promise.all(tasks);
+  return lists.flat();
+}
+
 async function searchWikidataKeyless(query, type) {
   // Keyless Wikidata + iTunes/TVmaze lookup so users can discover movies/shows beyond the starter catalog even without a TMDB key
   const sr = await fetchJsonWithTimeout(
@@ -338,6 +410,14 @@ export function createSunoCinemaServer(rootDir = ROOT_DIR) {
       }
 
       if (type !== 'anime') {
+        tasks.push(
+          searchCinemetaLive(q, type)
+            .then((items) => {
+              sources.push('cinemeta');
+              return items;
+            })
+            .catch(() => [])
+        );
         if (tmdbKey) {
           tasks.push(
             searchTmdbLive(q, type, tmdbKey)
