@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#0c1015" />
+  <title>SSB Command — Practical SSB Aspirant Workbench</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230c1015'/%3E%3Crect x='2' y='2' width='28' height='28' rx='6' fill='none' stroke='%23252f3d' stroke-width='2'/%3E%3Cpolygon points='16,6 19,13 26,16 19,19 16,26 13,19 6,16 13,13' fill='%23d4a24c'/%3E%3C/svg%3E" />
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <div id="app-shell" class="app-shell">
+    <aside class="sidebar" aria-label="SSB Module Navigation">
+      <div class="brand-lockup">
+        <span class="brand-emblem" aria-hidden="true">✦</span>
+        <div>
+          <strong class="brand-name">SSB Command</strong>
+          <span class="brand-sub">Offline Field Workbench</span>
+        </div>
+      </div>
+
+      <nav class="nav-list">
+        <button class="nav-item active" data-route="dashboard" type="button">
+          <span class="nav-day">HQ</span>
+          <span>Command Center</span>
+        </button>
+        <button class="nav-item" data-route="stage1" type="button">
+          <span class="nav-day">D1</span>
+          <span>Stage I • OIR &amp; PPDT</span>
+        </button>
+        <button class="nav-item" data-route="psych" type="button">
+          <span class="nav-day">D2</span>
+          <span>Psych • TAT / WAT / SRT / SD</span>
+        </button>
+        <button class="nav-item" data-route="piq" type="button">
+          <span class="nav-day">IO</span>
+          <span>PIQ &amp; IO Grill</span>
+        </button>
+        <button class="nav-item" data-route="gto" type="button">
+          <span class="nav-day">D3</span>
+          <span>GTO • Lecturette &amp; GPE</span>
+        </button>
+      </nav>
+
+      <div class="sidebar-footer">
+        <p class="small muted">All data stays private in your browser. Back up via Mentor Dossier / JSON anytime.</p>
+      </div>
+    </aside>
+
+    <div class="main-wrap">
+      <header class="topbar">
+        <div class="topbar-left">
+          <button id="btn-toggle-focus" class="btn btn-ghost btn-xs" type="button" title="Hide sidebar for distraction-free timed practice">
+            Test-Hall Focus Mode
+          </button>
+          <span id="active-route-label" class="muted small mono">Command Center</span>
+        </div>
+        <div class="topbar-right">
+          <button id="btn-test-bell" class="btn btn-ghost btn-xs" type="button" title="Verify invigilator audio chime">
+            Test Chime
+          </button>
+          <button id="btn-toggle-mute" class="btn btn-ghost btn-xs" type="button">
+            Sound: On
+          </button>
+        </div>
+      </header>
+
+      <main id="view-root" class="view-root"></main>
+    </div>
+  </div>
+
+  <script type="module" src="./src/app.js"></script>
+</body>
+</html>
