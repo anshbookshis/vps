@@ -41,6 +41,7 @@ import {
   formatTime,
   renderPosterCard,
   renderDesktopWideCard,
+  renderSkeletonShelf,
   renderShelf,
 } from './components/cards.js';
 import {
@@ -48,6 +49,7 @@ import {
   renderDesktopBillboard,
   renderDesktopFooter,
   renderDetailView,
+  renderDesktopDetailModal,
 } from './components/showcase.js';
 import {
   renderSettingsSheet,
@@ -101,10 +103,14 @@ const state = {
   desktopSearchOpen: false,
   isDesktop: typeof window !== 'undefined' && window.innerWidth >= 900,
   prevTab: 'home',
+  lastRenderedTab: 'home',
   detailKey: null,
+  detailModalKey: null,
   detailTab: 'episodes',
   detailTrailerPlaying: false,
   detailTrailerMuted: true,
+  heroTrailerPlaying: false,
+  heroTrailerMuted: true,
   activeClipTrailerKey: null,
   searchResults: [],
   searchLoading: false,
@@ -312,9 +318,15 @@ async function launchStream(rawItem, { season, episode, resumeSeconds } = {}) {
 }
 
 async function openDetailView(key) {
-  if (state.tab !== 'detail') state.prevTab = state.tab;
-  state.detailKey = key;
-  state.tab = 'detail';
+  const dk = isDesktopMode();
+  if (dk) {
+    state.detailModalKey = key;
+  } else {
+    if (state.tab !== 'detail') state.prevTab = state.tab;
+    state.detailKey = key;
+    state.tab = 'detail';
+    state.detailModalKey = null;
+  }
   state.detailTrailerPlaying = false;
   state.detailTrailerMuted = true;
   state.modal = null;
@@ -334,14 +346,18 @@ async function openDetailView(key) {
     render();
     const hydrated = await resolveFullMetadata(item);
     registerItems([hydrated]);
-    state.detailKey = getMediaKey(hydrated);
+    if (dk) {
+      state.detailModalKey = getMediaKey(hydrated);
+    } else {
+      state.detailKey = getMediaKey(hydrated);
+    }
     item = hydrated;
   }
 
   if (item?.mediaType === 'tv' && (item.tmdbId || item.imdbId)) {
     loadTvSeasons(item.tmdbId, item.imdbId);
   }
-  window.scrollTo({ top: 0, behavior: 'instant' });
+  if (!dk) window.scrollTo({ top: 0, behavior: 'instant' });
   render();
 }
 
@@ -351,7 +367,7 @@ async function loadTvSeasons(tmdbId, imdbId = '') {
   const seasons = await fetchTvSeasonsData(tmdbId, state.prefs.tmdbApiKey, imdbId);
   if (Array.isArray(seasons) && seasons.length > 0) {
     state.seasonsCache.set(cacheKey, seasons);
-    if (state.tab === 'detail' || state.playerOpen) render();
+    if (state.tab === 'detail' || state.detailModalKey || state.playerOpen) render();
   }
 }
 
@@ -571,7 +587,11 @@ function renderDesktopHome({
         : ''
     }
 
-    ${renderDesktopBillboard(spotlightList, state.heroIndex, { myListSet })}
+    ${renderDesktopBillboard(spotlightList, state.heroIndex, {
+      myListSet,
+      trailerPlaying: state.heroTrailerPlaying,
+      trailerMuted: state.heroTrailerMuted,
+    })}
 
     ${
       continueEntries.length > 0
@@ -580,10 +600,17 @@ function renderDesktopHome({
             title: `Continue Watching for ${state.profile.name || 'Ansh'}`,
             items: continueEntries.slice(0, 14),
             kind: 'dk-wide',
+            splitIndices: new Set([1]),
             myListSet,
             likedSet,
             progressMap,
           })
+        : ''
+    }
+
+    ${
+      state.homeRefreshing && state.liveMovies.length === 0
+        ? renderSkeletonShelf({ count: 6, desktop: true })
         : ''
     }
 
@@ -594,6 +621,7 @@ function renderDesktopHome({
       kind: 'dk-wide',
       top10Indices: new Set([0, 1, 4, 5]),
       recentIndices: new Set([1, 2, 3, 4]),
+      splitIndices: new Set([2]),
       myListSet,
       likedSet,
       progressMap,
@@ -629,7 +657,8 @@ function renderDesktopHome({
       items: trendingSeries.slice(0, 20),
       kind: 'dk-wide',
       top10Indices: new Set([0, 3]),
-      recentIndices: new Set([1, 2]),
+      recentIndices: new Set([1, 3]),
+      splitIndices: new Set([0, 2]),
       myListSet,
       likedSet,
       progressMap,
@@ -815,6 +844,8 @@ function renderHomeTab() {
     { id: 'anime', label: 'Anime' },
     { id: 'hot', label: 'New & Hot' },
   ];
+  const activeChip = chips.find((c) => c.id === state.homeFilter);
+  const displayedChips = activeChip ? [activeChip] : chips;
 
   return `
     ${renderTopHeader({
@@ -827,7 +858,14 @@ function renderHomeTab() {
     })}
 
     <div class="pill-chips-row">
-      ${chips
+      ${
+        activeChip
+          ? `<button type="button" class="outline-chip is-dismiss-x" data-reset-home="true" aria-label="Clear filter">
+              ${svgIcon('close', 14)}
+            </button>`
+          : ''
+      }
+      ${displayedChips
         .map(
           (c) => `<button type="button" class="outline-chip ${
             state.homeFilter === c.id ? 'is-active' : ''
@@ -835,7 +873,7 @@ function renderHomeTab() {
         )
         .join('')}
       <button type="button" class="outline-chip" id="open-categories-btn">
-        Categories ${svgIcon('chevronDown', 14)}
+        ${activeChip ? `${activeChip.label} Categories` : 'Categories'} ${svgIcon('chevronDown', 14)}
       </button>
       <button type="button" class="outline-chip" id="refresh-home-feed-btn" ${state.homeRefreshing ? 'disabled' : ''}>
         ${svgIcon('refresh', 13)} ${state.homeRefreshing ? 'Loading...' : 'Refresh'}
@@ -1728,6 +1766,7 @@ function ensureMounts() {
   rootEl.innerHTML = `<div id="sc-root">
     <main id="view-mount"></main>
     <div id="nav-mount"></div>
+    <div id="detail-modal-mount"></div>
     <div id="player-mount"></div>
     <div id="modal-mount"></div>
   </div>`;
@@ -1735,13 +1774,49 @@ function ensureMounts() {
 
 function render(options = {}) {
   ensureMounts();
+  const dk = isDesktopMode();
   const root = document.getElementById('sc-root');
   root.className = `sc-shell ${state.prefs.phoneFrameOnDesktop ? 'is-phone-preview' : ''}`;
 
-  document.getElementById('view-mount').innerHTML = renderActiveView();
+  const viewMount = document.getElementById('view-mount');
+  viewMount.innerHTML = renderActiveView();
+  if (state.lastRenderedTab !== state.tab) {
+    state.lastRenderedTab = state.tab;
+    viewMount.classList.remove('view-enter');
+    void viewMount.offsetWidth;
+    viewMount.classList.add('view-enter');
+  }
+
   document.getElementById('nav-mount').innerHTML =
-    state.playerOpen || isDesktopMode() ? '' : renderFloatingBottomNav();
+    state.playerOpen || dk ? '' : renderFloatingBottomNav();
   syncPlayerMount(options);
+
+  const detailMount = document.getElementById('detail-modal-mount');
+  if (dk && state.detailModalKey && !state.playerOpen) {
+    const item = getItemByKey(state.detailModalKey);
+    const key = item ? getMediaKey(item) : '';
+    const seasons =
+      item?.mediaType === 'tv'
+        ? state.seasonsCache.get(String(item.tmdbId || item.imdbId)) ||
+          item.seasonsList || [{ seasonNumber: 1, name: 'Season 1', episodeCount: item.totalEpisodes || 10 }]
+        : [];
+    const related = getAllKnownPool().filter((x) => getMediaKey(x) !== key);
+    detailMount.innerHTML = renderDesktopDetailModal({
+      item,
+      inMyList: getCollectionSet(MY_LIST_COLLECTION_ID).has(key),
+      isLiked: getCollectionSet(LIKED_COLLECTION_ID).has(key),
+      savedProgress: state.progressMap[key],
+      trailerMuted: state.detailTrailerMuted,
+      trailerPlaying: state.detailTrailerPlaying,
+      seasons,
+      activeSeason: state.activeSeason,
+      relatedItems: related,
+      myListSet: getCollectionSet(MY_LIST_COLLECTION_ID),
+      dubEnabled: state.prefs.dub,
+    });
+  } else {
+    detailMount.innerHTML = '';
+  }
 
   const modalMount = document.getElementById('modal-mount');
   if (state.modal === 'settings') {
@@ -1752,15 +1827,23 @@ function render(options = {}) {
       profile: state.profile,
     });
   } else if (state.modal === 'categories') {
-    modalMount.innerHTML = renderCategoriesSheet(state.discoverGenre);
+    modalMount.innerHTML = renderCategoriesSheet(state.discoverGenre, { desktop: dk });
   } else if (state.modal === 'notifications') {
-    modalMount.innerHTML = renderNotificationsSheet(getAllKnownPool());
+    modalMount.innerHTML = renderNotificationsSheet(getAllKnownPool(), { desktop: dk });
   } else if (state.modal === 'cwmenu') {
     modalMount.innerHTML = renderContinueMenuSheet(getItemByKey(state.cwMenuKey));
   } else if (state.modal === 'quicklaunch') {
     modalMount.innerHTML = renderQuickLaunchSheet();
   } else {
     modalMount.innerHTML = '';
+  }
+
+  const topbar = document.querySelector('.dk-topbar');
+  if (topbar && typeof window !== 'undefined') {
+    topbar.classList.toggle('is-scrolled', window.scrollY > 18);
+  }
+  if (typeof document !== 'undefined') {
+    document.body.style.overflow = state.playerOpen || (dk && state.detailModalKey) || state.modal ? 'hidden' : '';
   }
 }
 
@@ -1878,6 +1961,18 @@ function bindEvents() {
     const heroStep = target.closest('[data-hero-step]');
     if (heroStep) {
       state.heroIndex = (state.heroIndex + Number(heroStep.dataset.heroStep) + 8) % 8;
+      state.heroTrailerPlaying = false;
+      render();
+      return;
+    }
+
+    if (target.closest('#hero-trailer-toggle')) {
+      if (!state.heroTrailerPlaying) {
+        state.heroTrailerPlaying = true;
+        state.heroTrailerMuted = false;
+      } else {
+        state.heroTrailerMuted = !state.heroTrailerMuted;
+      }
       render();
       return;
     }
@@ -1919,6 +2014,11 @@ function bindEvents() {
     const pickCat = target.closest('[data-pick-category]');
     if (pickCat) {
       state.modal = null;
+      if (state.homeFilter === 'movie' || state.homeFilter === 'tv' || state.homeFilter === 'anime') {
+        state.discoverType = state.homeFilter;
+      } else {
+        state.discoverType = 'all';
+      }
       state.tab = 'discover';
       state.discoverGenre = pickCat.dataset.pickCategory;
       refreshDiscoverFeed({ reset: true });
@@ -1960,8 +2060,16 @@ function bindEvents() {
       return;
     }
 
-    if (target.closest('#detail-back-btn')) {
-      state.tab = state.prevTab || 'home';
+    if (
+      target.closest('#detail-back-btn') ||
+      target.matches('[data-close-detail-modal="true"]')
+    ) {
+      if (state.detailModalKey) {
+        state.detailModalKey = null;
+        state.detailTrailerPlaying = false;
+      } else {
+        state.tab = state.prevTab || 'home';
+      }
       render();
       return;
     }
@@ -2321,6 +2429,66 @@ function bindEvents() {
       }
     }, 120);
   });
+
+  window.addEventListener(
+    'scroll',
+    () => {
+      const topbar = document.querySelector('.dk-topbar');
+      if (topbar) topbar.classList.toggle('is-scrolled', window.scrollY > 18);
+    },
+    { passive: true }
+  );
+
+  rootEl.addEventListener(
+    'mouseenter',
+    (e) => {
+      const card = e.target?.closest?.('.dk-card');
+      if (!card) return;
+      const rect = card.getBoundingClientRect();
+      const row = card.closest('.nf-row');
+      const bounds = row ? row.getBoundingClientRect() : { left: 0, right: window.innerWidth };
+      const leftEdge = Math.max(16, bounds.left + 44);
+      const rightEdge = Math.min(window.innerWidth - 16, bounds.right - 44);
+      card.classList.toggle('is-edge-left', rect.left <= leftEdge);
+      card.classList.toggle('is-edge-right', rect.right >= rightEdge);
+    },
+    true
+  );
+
+  rootEl.addEventListener(
+    'scroll',
+    (e) => {
+      const row = e.target;
+      if (!row?.classList?.contains('nf-row') || !row.dataset.shelfRow) return;
+      const indWrap = document.getElementById(`ind-${row.dataset.shelfRow}`);
+      if (!indWrap || indWrap.children.length === 0) return;
+      const dashes = indWrap.children;
+      const maxScroll = Math.max(1, row.scrollWidth - row.clientWidth);
+      const ratio = Math.min(1, Math.max(0, row.scrollLeft / maxScroll));
+      const activeIdx = Math.min(dashes.length - 1, Math.round(ratio * (dashes.length - 1)));
+      Array.from(dashes).forEach((d, idx) => d.classList.toggle('is-active', idx === activeIdx));
+    },
+    true
+  );
+
+  window.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    if (state.playerOpen) {
+      state.playerOpen = false;
+      antiRedirectGuard.setTheaterActive(false);
+      render();
+    } else if (state.modal) {
+      state.modal = null;
+      render();
+    } else if (state.detailModalKey) {
+      state.detailModalKey = null;
+      state.detailTrailerPlaying = false;
+      render();
+    } else if (state.desktopSearchOpen) {
+      state.desktopSearchOpen = false;
+      render();
+    }
+  });
 }
 
 async function loadHomeDynamicFeeds() {
@@ -2365,7 +2533,14 @@ async function init() {
   clearInterval(heroTimer);
   heroTimer = setInterval(() => {
     const busyHover = typeof document !== 'undefined' && document.querySelector('.dk-card:hover, #dk-search-input:focus');
-    if (state.tab === 'home' && !state.playerOpen && !state.modal && !busyHover) {
+    if (
+      state.tab === 'home' &&
+      !state.playerOpen &&
+      !state.modal &&
+      !state.detailModalKey &&
+      !state.heroTrailerPlaying &&
+      !busyHover
+    ) {
       state.heroIndex = (state.heroIndex + 1) % 8;
       render();
     }

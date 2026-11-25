@@ -9,6 +9,7 @@ export function renderSettingsSheet({ appearance, prefs, shield, profile }) {
   const s = shield || { blockedCount: 0, navigationLock: true, strictFrameMode: false };
   return `<div class="sheet-backdrop" data-close-modal="true">
     <div class="sheet-card" role="dialog" aria-modal="true" aria-label="Suno Cinema Settings">
+      <div class="sheet-grab-bar" aria-hidden="true"></div>
       <div style="display:flex;align-items:center;justify-content:space-between;">
         <h2 style="font-size:18px;font-weight:700;">Suno Cinema Settings</h2>
         <button type="button" class="icon-btn" data-close-modal="true" aria-label="Close">
@@ -96,52 +97,86 @@ export function renderSettingsSheet({ appearance, prefs, shield, profile }) {
   </div>`;
 }
 
-export function renderCategoriesSheet(activeGenre) {
-  return `<div class="sheet-backdrop" data-close-modal="true">
-    <div class="sheet-card" role="dialog" aria-modal="true" aria-label="Categories">
-      <div style="display:flex;align-items:center;justify-content:space-between;">
-        <h2 style="font-size:18px;font-weight:700;">Categories</h2>
-        <button type="button" class="icon-btn" data-close-modal="true" aria-label="Close">
-          ${svgIcon('close', 20)}
-        </button>
+export function renderCategoriesSheet(activeGenre, { desktop = false } = {}) {
+  if (desktop) {
+    return `<div class="dk-popover-backdrop" data-close-modal="true">
+      <div class="dk-genres-popover" role="dialog" aria-modal="true" aria-label="Genres" onclick="event.stopPropagation()">
+        <div class="dk-popover-head">
+          <span>Genres</span>
+          <button type="button" class="icon-btn" data-close-modal="true" aria-label="Close" style="width:28px;height:28px;">
+            ${svgIcon('close', 16)}
+          </button>
+        </div>
+        <div class="dk-genres-grid">
+          ${BROWSE_GENRES.map(
+            (g) => `<button type="button" class="dk-genre-link ${
+              activeGenre === g ? 'is-active' : ''
+            }" data-pick-category="${escapeHtml(g)}">${escapeHtml(g)}</button>`
+          ).join('')}
+        </div>
       </div>
-      <div style="display:flex;flex-wrap:wrap;gap:8px;">
-        ${BROWSE_GENRES.map(
-          (g) => `<button type="button" class="outline-chip ${
-            activeGenre === g ? 'is-active' : ''
-          }" data-pick-category="${escapeHtml(g)}">${escapeHtml(g)}</button>`
-        ).join('')}
-      </div>
+    </div>`;
+  }
+
+  return `<div class="android-cat-overlay" data-close-modal="true" role="dialog" aria-modal="true" aria-label="Categories">
+    <div class="android-cat-scroll" onclick="event.stopPropagation()">
+      ${BROWSE_GENRES.map(
+        (g) => `<button type="button" class="android-cat-item ${
+          activeGenre === g ? 'is-active' : ''
+        }" data-pick-category="${escapeHtml(g)}">${escapeHtml(g)}</button>`
+      ).join('')}
     </div>
+    <button type="button" class="android-cat-close" data-close-modal="true" aria-label="Close Categories">
+      ${svgIcon('close', 24)}
+    </button>
   </div>`;
 }
 
-export function renderNotificationsSheet(items) {
+export function renderNotificationsSheet(items, { desktop = false } = {}) {
+  const listHtml = (items || [])
+    .slice(0, 6)
+    .map(
+      (item, idx) => `<button type="button" class="dk-notif-row" data-open-detail="${escapeHtml(getMediaKey(item))}">
+        <span class="dk-notif-dot ${idx < 4 ? 'is-unread' : ''}"></span>
+        <div class="top-search-thumb">
+          <img src="${escapeHtml(item.backdrop || item.poster)}" alt="" referrerpolicy="no-referrer" />
+        </div>
+        <div style="flex:1;min-width:0;text-align:left;">
+          <div style="font-size:13.5px;font-weight:600;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(
+            item.title
+          )}</div>
+          <div class="dim" style="font-size:12px;margin-top:2px;">New Arrival • ${escapeHtml(item.year || 'HD')}</div>
+        </div>
+      </button>`
+    )
+    .join('');
+
+  if (desktop) {
+    return `<div class="dk-popover-backdrop is-clear" data-close-modal="true">
+      <div class="dk-notif-popover" role="dialog" aria-modal="true" aria-label="Notifications" onclick="event.stopPropagation()">
+        <div class="dk-notif-top-border"></div>
+        <div class="dk-popover-head">
+          <span>New on Suno Cinema</span>
+          <button type="button" class="icon-btn" data-close-modal="true" aria-label="Close" style="width:28px;height:28px;">
+            ${svgIcon('close', 16)}
+          </button>
+        </div>
+        <div class="dk-notif-list">${listHtml}</div>
+      </div>
+    </div>`;
+  }
+
   return `<div class="sheet-backdrop" data-close-modal="true">
     <div class="sheet-card" role="dialog" aria-modal="true" aria-label="Notifications">
+      <div class="sheet-grab-bar" aria-hidden="true"></div>
       <div style="display:flex;align-items:center;justify-content:space-between;">
         <h2 style="font-size:18px;font-weight:700;">New on Suno Cinema</h2>
         <button type="button" class="icon-btn" data-close-modal="true" aria-label="Close">
           ${svgIcon('close', 20)}
         </button>
       </div>
-      <div style="display:flex;flex-direction:column;gap:10px;">
-        ${(items || [])
-          .slice(0, 5)
-          .map(
-            (item) => `<button type="button" class="top-search-row" style="padding:6px 0;" data-open-detail="${escapeHtml(
-              getMediaKey(item)
-            )}">
-              <div class="top-search-thumb">
-                <img src="${escapeHtml(item.backdrop || item.poster)}" alt="" referrerpolicy="no-referrer" />
-              </div>
-              <div style="flex:1;min-width:0;text-align:left;">
-                <div style="font-size:14px;font-weight:600;">${escapeHtml(item.title)}</div>
-                <div class="dim" style="font-size:12px;">New Addition • ${escapeHtml(item.year || 'HD')}</div>
-              </div>
-            </button>`
-          )
-          .join('')}
+      <div style="display:flex;flex-direction:column;gap:8px;">
+        ${listHtml}
       </div>
     </div>
   </div>`;
@@ -152,6 +187,7 @@ export function renderContinueMenuSheet(item) {
   const key = getMediaKey(item);
   return `<div class="sheet-backdrop" data-close-modal="true">
     <div class="sheet-card" role="dialog" aria-modal="true" aria-label="Continue Watching Options">
+      <div class="sheet-grab-bar" aria-hidden="true"></div>
       <div style="display:flex;align-items:center;justify-content:space-between;">
         <h2 style="font-size:17px;font-weight:700;">${escapeHtml(item.title)}</h2>
         <button type="button" class="icon-btn" data-close-modal="true" aria-label="Close">
@@ -168,6 +204,7 @@ export function renderContinueMenuSheet(item) {
 export function renderQuickLaunchSheet() {
   return `<div class="sheet-backdrop" data-close-modal="true">
     <div class="sheet-card" role="dialog" aria-modal="true" aria-label="Direct VidRift Stream Launcher">
+      <div class="sheet-grab-bar" aria-hidden="true"></div>
       <div style="display:flex;align-items:center;justify-content:space-between;">
         <div>
           <h2 style="font-size:18px;font-weight:700;">Stream by TMDB / AniList ID</h2>
