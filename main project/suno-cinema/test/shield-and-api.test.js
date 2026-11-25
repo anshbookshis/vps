@@ -3,8 +3,9 @@ import assert from 'node:assert/strict';
 import { AntiRedirectGuard, isAllowedExternalUrl } from '../src/utils/anti-redirect.js';
 import { normalizeCinemetaItem, searchLocalItems, fetchLanguageCatalog } from '../src/utils/client-api.js';
 import { getMediaKey } from '../src/utils/storage.js';
-import { renderDesktopWideCard, renderDesktopTop10Card, renderShelf } from '../src/components/cards.js';
-import { renderDesktopBillboard, renderDesktopFooter } from '../src/components/showcase.js';
+import { renderDesktopWideCard, renderDesktopTop10Card, renderShelf, computeMatchPercent, renderSkeletonShelf } from '../src/components/cards.js';
+import { renderDesktopBillboard, renderDesktopFooter, renderDesktopDetailModal } from '../src/components/showcase.js';
+import { renderCategoriesSheet, renderNotificationsSheet } from '../src/components/modals.js';
 import { renderSunoCinemaDesktopWordmark } from '../src/components/icons.js';
 
 test('isAllowedExternalUrl allows Suno ecosystem domains and rejects unknown popup destinations', () => {
@@ -127,4 +128,25 @@ test('desktop UI renderers and language catalog maintain Suno Cinema branding', 
 
   const regional = await fetchLanguageCatalog('South Indian');
   assert.ok(Array.isArray(regional) && regional.length >= 1);
+
+  assert.ok(computeMatchPercent(sampleItem) >= 82 && computeMatchPercent(sampleItem) <= 99);
+  assert.ok(top10.includes('<svg'));
+  assert.ok(shelf.includes('dk-row-handle') && shelf.includes('dk-carousel-wrap'));
+
+  const splitCard = renderDesktopWideCard(sampleItem, { splitBadge: true });
+  assert.ok(splitCard.includes('dk-badge-split') && splitCard.includes('dk-match-score'));
+
+  const skel = renderSkeletonShelf({ count: 4, desktop: true });
+  assert.ok(skel.includes('sk-shimmer'));
+
+  const dkModal = renderDesktopDetailModal({ item: sampleItem, relatedItems: [sampleItem] });
+  assert.ok(dkModal.includes('dk-detail-modal') && dkModal.includes('More Like This'));
+
+  const dkCat = renderCategoriesSheet('Action', { desktop: true });
+  const mobCat = renderCategoriesSheet('Action', { desktop: false });
+  assert.ok(dkCat.includes('dk-genres-popover') && mobCat.includes('android-cat-overlay'));
+
+  const dkNotif = renderNotificationsSheet([sampleItem], { desktop: true });
+  const mobNotif = renderNotificationsSheet([sampleItem], { desktop: false });
+  assert.ok(dkNotif.includes('dk-notif-popover') && mobNotif.includes('sheet-grab-bar'));
 });
