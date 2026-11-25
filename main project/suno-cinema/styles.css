@@ -2768,3 +2768,176 @@ img {
     overflow: hidden;
   }
 }
+
+/* ============================================================
+   NET77-STYLE STUDIO HUBS, HERO DOTS & THEATER PLAYER DRAWER
+   ============================================================ */
+.hubs-strip-wrap {
+  padding: 2px 0 8px;
+}
+
+.hubs-strip {
+  display: flex;
+  gap: 8px;
+  padding: 4px 14px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  scroll-snap-type: x proximity;
+}
+
+.hubs-strip::-webkit-scrollbar {
+  display: none;
+}
+
+.hub-card {
+  position: relative;
+  flex: none;
+  min-width: 112px;
+  height: 52px;
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: linear-gradient(155deg, rgba(30, 30, 36, 0.92), rgba(14, 14, 18, 0.96));
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: flex-start;
+  text-align: left;
+  overflow: hidden;
+  scroll-snap-align: start;
+  transition: transform 0.16s var(--nf-ease), border-color 0.18s, box-shadow 0.2s;
+}
+
+.hub-card-glow {
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(circle at 85% 20%, color-mix(in srgb, var(--hub-accent, #e50914) 26%, transparent), transparent 70%);
+  opacity: 0.65;
+  pointer-events: none;
+  transition: opacity 0.2s;
+}
+
+.hub-card-title {
+  position: relative;
+  z-index: 1;
+  font-size: 12.5px;
+  font-weight: 800;
+  letter-spacing: -0.2px;
+  color: #ffffff;
+  white-space: nowrap;
+}
+
+.hub-card-sub {
+  position: relative;
+  z-index: 1;
+  font-size: 10px;
+  font-weight: 500;
+  color: #a3a3a8;
+  white-space: nowrap;
+}
+
+.hub-card:hover {
+  transform: translateY(-2px);
+  border-color: color-mix(in srgb, var(--hub-accent, #e50914) 65%, white 15%);
+}
+
+.hub-card.is-active {
+  border-color: var(--hub-accent, var(--accent));
+  box-shadow: 0 6px 22px color-mix(in srgb, var(--hub-accent, #e50914) 30%, transparent), inset 0 -2px 0 var(--hub-accent, var(--accent));
+}
+
+.hub-card.is-active .hub-card-glow {
+  opacity: 1;
+}
+
+.dk-cw-tag {
+  position: absolute;
+  top: 7px;
+  right: 7px;
+  z-index: 3;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.78);
+  border: 1px solid rgba(255, 255, 255, 0.24);
+  font-size: 10px;
+  font-weight: 700;
+  color: #ffffff;
+}
+
+.dk-hero-rating {
+  color: #fbbf24;
+  font-weight: 700;
+}
+
+.billboard-dots {
+  position: absolute;
+  left: 50%;
+  bottom: 16px;
+  transform: translateX(-50%);
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.billboard-dot {
+  width: 16px;
+  height: 3px;
+  border-radius: 99px;
+  background: rgba(255, 255, 255, 0.34);
+  transition: width 0.2s var(--nf-ease), background 0.2s;
+}
+
+.billboard-dot.is-active {
+  width: 28px;
+  background: #ffffff;
+}
+
+#hls-video-player {
+  width: 100%;
+  height: 100%;
+  background: #000000;
+  display: block;
+}
+
+.player-ep-drawer {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(340px, 88vw);
+  z-index: 15;
+  background: rgba(14, 14, 18, 0.96);
+  backdrop-filter: blur(18px);
+  border-left: 1px solid rgba(255, 255, 255, 0.14);
+  display: flex;
+  flex-direction: column;
+  padding: 14px;
+  gap: 10px;
+  overflow-y: auto;
+  animation: sheetSlideUp 0.2s var(--nf-ease-out);
+}
+
+@media (min-width: 900px) {
+  .sc-shell:not(.is-phone-preview) .hubs-strip-wrap {
+    padding: 0 36px 8px;
+  }
+
+  .sc-shell:not(.is-phone-preview) .hubs-strip {
+    display: grid;
+    grid-template-columns: repeat(7, minmax(0, 1fr));
+    gap: 10px;
+    padding: 4px 0;
+    overflow-x: visible;
+  }
+
+  .sc-shell:not(.is-phone-preview) .hub-card {
+    min-width: 0;
+    height: 60px;
+    padding: 10px 14px;
+  }
+
+  .sc-shell:not(.is-phone-preview) .hub-card-title {
+    font-size: 13.5px;
+  }
+}

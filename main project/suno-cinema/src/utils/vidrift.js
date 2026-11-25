@@ -114,6 +114,14 @@ export function parseDirectTarget(rawInput, fallbackType = 'movie') {
     return { mediaType: 'movie', tmdbId: input };
   }
 
+  if (/^https:\/\/[^\s]+\.(m3u8|mp4)(\?[^\s]*)?$/i.test(input)) {
+    return {
+      mediaType: 'hls',
+      hlsUrl: input,
+      format: input.toLowerCase().includes('.mp4') ? 'mp4' : 'hls',
+    };
+  }
+
   return null;
 }
 

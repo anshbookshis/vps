@@ -51,6 +51,12 @@ test('parseDirectTarget handles TMDB movie, TMDB TV, AniList URLs, and shorthand
     tmdbId: '157336',
   });
 
+  assert.deepEqual(parseDirectTarget('https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8'), {
+    mediaType: 'hls',
+    hlsUrl: 'https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8',
+    format: 'hls',
+  });
+
   assert.equal(parseDirectTarget('not a valid url'), null);
 });
 

@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import { AntiRedirectGuard, isAllowedExternalUrl } from '../src/utils/anti-redirect.js';
 import { normalizeCinemetaItem, searchLocalItems, fetchLanguageCatalog } from '../src/utils/client-api.js';
 import { getMediaKey } from '../src/utils/storage.js';
-import { renderDesktopWideCard, renderDesktopTop10Card, renderShelf, computeMatchPercent, renderSkeletonShelf } from '../src/components/cards.js';
-import { renderDesktopBillboard, renderDesktopFooter, renderDesktopDetailModal } from '../src/components/showcase.js';
+import { renderDesktopWideCard, renderDesktopTop10Card, renderShelf, computeMatchPercent, computeContinueLabel, renderSkeletonShelf } from '../src/components/cards.js';
+import { renderStudioHubStrip, STUDIO_HUBS, renderDesktopBillboard, renderDesktopFooter, renderDesktopDetailModal } from '../src/components/showcase.js';
 import { renderCategoriesSheet, renderNotificationsSheet } from '../src/components/modals.js';
 import { renderSunoCinemaDesktopWordmark } from '../src/components/icons.js';
 
@@ -149,4 +149,9 @@ test('desktop UI renderers and language catalog maintain Suno Cinema branding', 
   const dkNotif = renderNotificationsSheet([sampleItem], { desktop: true });
   const mobNotif = renderNotificationsSheet([sampleItem], { desktop: false });
   assert.ok(dkNotif.includes('dk-notif-popover') && mobNotif.includes('sheet-grab-bar'));
+
+  const hubsHtml = renderStudioHubStrip('anime');
+  assert.ok(STUDIO_HUBS.length >= 6);
+  assert.ok(hubsHtml.includes('data-pick-hub="anime"') && hubsHtml.includes('is-active'));
+  assert.equal(computeContinueLabel({ mediaType: 'tv' }, { season: 2, episode: 4 }), 'S2:E4');
 });
