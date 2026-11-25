@@ -165,15 +165,20 @@ export function renderDesktopWideCard(
   )}">
             ${svgIcon('play', 15)}
           </button>
+          <button type="button" class="dk-circle-btn ${isLiked ? 'is-on' : ''}" data-toggle-like="${escapeHtml(
+    key
+  )}" title="${isLiked ? 'Liked' : 'I like this'}" aria-label="Toggle Like">
+            ${svgIcon('thumbsUp', 14)}
+          </button>
           <button type="button" class="dk-circle-btn ${inMyList ? 'is-on' : ''}" data-toggle-mylist="${escapeHtml(
     key
   )}" title="${inMyList ? 'Remove from My List' : 'Add to My List'}" aria-label="Toggle My List">
             ${svgIcon(inMyList ? 'check' : 'plus', 15)}
           </button>
-          <button type="button" class="dk-circle-btn ${isLiked ? 'is-on' : ''}" data-toggle-like="${escapeHtml(
+          <button type="button" class="dk-circle-btn" data-toggle-hover-sound="${escapeHtml(
     key
-  )}" title="${isLiked ? 'Liked' : 'I like this'}" aria-label="Toggle Like">
-            ${svgIcon('thumbsUp', 14)}
+  )}" title="Preview Audio" aria-label="Preview Audio">
+            ${svgIcon('volumeOn', 14)}
           </button>
           <button type="button" class="dk-circle-btn dk-more-circle" data-open-detail="${escapeHtml(
             key
@@ -183,8 +188,9 @@ export function renderDesktopWideCard(
         </div>
         <div class="dk-hover-meta">
           <span class="dk-match-score">${matchPct}% Match</span>
-          <span class="age-pill">U/A 16+</span>
-          <span>${escapeHtml(item.runtime || (item.mediaType === 'tv' ? 'Series' : typeLabel))}</span>
+          <span class="dk-meta-type">${typeLabel}</span>
+          <span class="age-pill">${item.ageRating || 'U/A 16+'}</span>
+          <span>${escapeHtml(item.runtime || (item.mediaType === 'tv' ? 'Limited Series' : '2h 15m'))}</span>
           <span class="hd-pill">HD</span>
         </div>
         <div class="dk-hover-tags">${escapeHtml(tags.join(' • '))}</div>
