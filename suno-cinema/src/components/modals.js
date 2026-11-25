@@ -1,4 +1,5 @@
 import { APPEARANCE_THEMES } from '../utils/storage.js';
+import { PLAYER_PROVIDERS } from '../utils/vidrift.js';
 import { BROWSE_GENRES } from '../utils/client-api.js';
 import { getMediaKey } from '../utils/storage.js';
 import { svgIcon } from './icons.js';
@@ -53,13 +54,23 @@ export function renderSettingsSheet({ appearance, prefs, shield, profile }) {
           </span>
           <span class="shield-pill">${s.blockedCount} blocked</span>
         </div>
+        <div style="display:flex;flex-direction:column;gap:5px;">
+          <label class="dim" style="font-size:11px;" for="pref-provider">Default Stream Player</label>
+          <select id="pref-provider" class="field-select">
+            ${PLAYER_PROVIDERS.map(
+              (p) => `<option value="${p.id}" ${
+                (prefs.playerProvider || 'vidlink') === p.id ? 'selected' : ''
+              }>${escapeHtml(p.label)}</option>`
+            ).join('')}
+          </select>
+        </div>
         <label style="display:flex;align-items:center;gap:8px;font-size:12px;cursor:pointer;">
           <input type="checkbox" id="pref-navlock" ${s.navigationLock ? 'checked' : ''} />
           Lock page navigation during playback
         </label>
         <label style="display:flex;align-items:center;gap:8px;font-size:12px;cursor:pointer;">
           <input type="checkbox" id="pref-strict-sandbox" ${s.strictFrameMode ? 'checked' : ''} />
-          Strict iframe sandbox (toggle ON if a stream forces popups; OFF for default VidRift)
+          Sandbox player iframe (blocks 100% of ad popups &amp; redirects)
         </label>
       </div>
 

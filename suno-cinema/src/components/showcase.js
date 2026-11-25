@@ -3,14 +3,18 @@ import { svgIcon } from './icons.js';
 import { escapeHtml, resolveArtUrl, attachFallbackImgAttr, renderPosterCard } from './cards.js';
 
 /**
- * Portrait Billboard Hero Card matching Screenshot 5 (Rocket Singh style) with Suno Cinema branding.
+ * Dynamic Portrait Billboard Hero Card matching Screenshot 5 with interactive spotlight switching.
  */
-export function renderAndroidBillboard(item, { inMyList = false } = {}) {
-  if (!item) return '';
+export function renderAndroidBillboard(items, activeIndex = 0, { myListSet = new Set() } = {}) {
+  const list = Array.isArray(items) ? items : items ? [items] : [];
+  if (list.length === 0) return '';
+  const safeIdx = ((activeIndex % list.length) + list.length) % list.length;
+  const item = list[safeIdx];
   const key = getMediaKey(item);
+  const inMyList = myListSet.has(key);
   const art = resolveArtUrl(item, 'poster');
   const typeWord = item.mediaType === 'tv' ? 'Series' : item.mediaType === 'anime' ? 'Anime' : 'Movie';
-  const tags = [typeWord, ...(item.genres || []).slice(0, 2), item.country || item.year].filter(Boolean);
+  const tags = [typeWord, ...(item.genres || []).slice(0, 2), item.year || item.country].filter(Boolean);
 
   return `<section class="billboard-wrap" aria-label="Featured">
     <div class="billboard-card">
@@ -22,6 +26,19 @@ export function renderAndroidBillboard(item, { inMyList = false } = {}) {
         ${attachFallbackImgAttr(item, 'poster')}
       />
       <div class="billboard-scrim"></div>
+      ${
+        list.length > 1
+          ? `<div style="position:absolute;top:10px;right:10px;z-index:3;display:flex;align-items:center;gap:6px;background:rgba(0,0,0,0.58);padding:4px 8px;border-radius:999px;border:1px solid rgba(255,255,255,0.16);backdrop-filter:blur(8px);">
+              <button type="button" data-hero-step="-1" aria-label="Previous spotlight" style="display:grid;place-items:center;width:22px;height:22px;color:#fff;">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><polyline points="15 18 9 12 15 6"/></svg>
+              </button>
+              <span style="font-size:11px;font-weight:700;font-variant-numeric:tabular-nums;">${safeIdx + 1}/${list.length}</span>
+              <button type="button" data-hero-step="1" aria-label="Next spotlight" style="display:grid;place-items:center;width:22px;height:22px;color:#fff;">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><polyline points="9 18 15 12 9 6"/></svg>
+              </button>
+            </div>`
+          : ''
+      }
       <div class="billboard-content" data-open-detail="${escapeHtml(key)}">
         ${
           item.logo
@@ -37,7 +54,7 @@ export function renderAndroidBillboard(item, { inMyList = false } = {}) {
             ${svgIcon('play', 17)} Play ${typeWord === 'Movie' ? 'Movie' : ''}
           </button>
           <button type="button" class="btn-dark" data-toggle-mylist="${escapeHtml(key)}">
-            ${svgIcon(inMyList ? 'check' : 'plus', 17)} ${inMyList ? 'My List' : 'My List'}
+            ${svgIcon(inMyList ? 'check' : 'plus', 17)} My List
           </button>
         </div>
       </div>

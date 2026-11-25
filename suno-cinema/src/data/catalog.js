@@ -3098,7 +3098,8 @@ export const CATALOG_ITEMS = [
         "scale": 0.72,
         "tension": 0.74
       }
-    }
+    },
+    "malId": "1"
   },
   {
     "id": "anime:120377",
@@ -3137,7 +3138,8 @@ export const CATALOG_ITEMS = [
         "scale": 0.78,
         "tension": 0.92
       }
-    }
+    },
+    "malId": "42310"
   },
   {
     "id": "anime:205",
@@ -3175,7 +3177,8 @@ export const CATALOG_ITEMS = [
         "scale": 0.54,
         "tension": 0.5
       }
-    }
+    },
+    "malId": "205"
   },
   {
     "id": "anime:21519",
@@ -3213,7 +3216,8 @@ export const CATALOG_ITEMS = [
         "scale": 0.84,
         "tension": 0.6
       }
-    }
+    },
+    "malId": "32281"
   },
   {
     "id": "anime:47",
@@ -3254,7 +3258,8 @@ export const CATALOG_ITEMS = [
         "scale": 0.94,
         "tension": 0.94
       }
-    }
+    },
+    "malId": "47"
   },
   {
     "id": "anime:199",
@@ -3293,7 +3298,8 @@ export const CATALOG_ITEMS = [
         "scale": 0.78,
         "tension": 0.42
       }
-    }
+    },
+    "malId": "199"
   },
   {
     "id": "anime:30",
@@ -3334,7 +3340,8 @@ export const CATALOG_ITEMS = [
         "scale": 0.9,
         "tension": 0.92
       }
-    }
+    },
+    "malId": "30"
   },
   {
     "id": "anime:1535",
@@ -3373,7 +3380,8 @@ export const CATALOG_ITEMS = [
         "scale": 0.72,
         "tension": 0.94
       }
-    }
+    },
+    "malId": "1535"
   },
   {
     "id": "anime:16498",
@@ -3412,7 +3420,8 @@ export const CATALOG_ITEMS = [
         "scale": 0.99,
         "tension": 0.96
       }
-    }
+    },
+    "malId": "16498"
   },
   {
     "id": "anime:113415",
@@ -3450,7 +3459,8 @@ export const CATALOG_ITEMS = [
         "scale": 0.82,
         "tension": 0.88
       }
-    }
+    },
+    "malId": "40748"
   },
   {
     "id": "anime:127230",
@@ -3489,7 +3499,8 @@ export const CATALOG_ITEMS = [
         "scale": 0.78,
         "tension": 0.92
       }
-    }
+    },
+    "malId": "44511"
   },
   {
     "id": "anime:154587",
@@ -3527,7 +3538,8 @@ export const CATALOG_ITEMS = [
         "scale": 0.76,
         "tension": 0.36
       }
-    }
+    },
+    "malId": "52991"
   },
   {
     "id": "anime:130003",
@@ -3565,7 +3577,8 @@ export const CATALOG_ITEMS = [
         "scale": 0.42,
         "tension": 0.44
       }
-    }
+    },
+    "malId": "47917"
   },
   {
     "id": "anime:20665",
@@ -3604,7 +3617,8 @@ export const CATALOG_ITEMS = [
         "scale": 0.52,
         "tension": 0.56
       }
-    }
+    },
+    "malId": "23273"
   },
   {
     "id": "anime:43",
@@ -3642,7 +3656,8 @@ export const CATALOG_ITEMS = [
         "scale": 0.86,
         "tension": 0.78
       }
-    }
+    },
+    "malId": "43"
   },
   {
     "id": "anime:227",
@@ -3681,6 +3696,7 @@ export const CATALOG_ITEMS = [
         "scale": 0.6,
         "tension": 0.66
       }
-    }
+    },
+    "malId": "227"
   }
 ];
