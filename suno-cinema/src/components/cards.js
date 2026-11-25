@@ -89,7 +89,47 @@ export function renderMediaCard(item, opts = {}) {
   </article>`;
 }
 
-export function renderShelf({ id, title, items, wide = false, ranked = false, progressMap = {}, likedIds = new Set(), moreRoute = '' }) {
+export function renderTop10Card(item, rank, opts = {}) {
+  const key = getMediaKey(item);
+  const art = resolveArtUrl(item, 'poster');
+  const liked = Boolean(opts.liked);
+  return `<article class="media-card top10-card" data-key="${escapeHtml(key)}">
+    <div class="top10-inner">
+      <span class="top10-num" aria-hidden="true">${rank}</span>
+      <div class="media-art top10-art" data-open-detail="${escapeHtml(key)}">
+        <img src="${escapeHtml(art)}" alt="${escapeHtml(item.title)}" loading="lazy" referrerpolicy="no-referrer" ${attachFallbackImgAttr(
+    item,
+    'poster'
+  )} />
+        ${item.rating ? `<span class="art-badge-top">★ ${escapeHtml(item.rating)}</span>` : ''}
+        <div class="art-play">
+          <button type="button" class="art-play-circle" data-play-key="${escapeHtml(key)}" aria-label="Stream ${escapeHtml(
+    item.title
+  )}">
+            ${svgIcon('play', 20)}
+          </button>
+        </div>
+      </div>
+      <button type="button" class="media-kebab" data-toggle-like="${escapeHtml(key)}" title="${
+    liked ? 'Remove from My List' : 'Save to My List'
+  }" aria-label="Toggle Liked">
+        ${svgIcon(liked ? 'heartFill' : 'heart', 15)}
+      </button>
+    </div>
+    <div class="media-meta" style="padding-left:22px;">
+      <button type="button" class="media-title" data-open-detail="${escapeHtml(key)}">${escapeHtml(
+    item.title
+  )}</button>
+      <div class="media-subtitle">${escapeHtml(
+        [item.year, item.mediaType === 'tv' ? 'Series' : item.mediaType === 'anime' ? 'Anime' : 'Film', item.genres?.[0]]
+          .filter(Boolean)
+          .join(' • ')
+      )}</div>
+    </div>
+  </article>`;
+}
+
+export function renderShelf({ id, title, items, wide = false, ranked = false, top10 = false, progressMap = {}, likedIds = new Set(), moreRoute = '' }) {
   if (!items || items.length === 0) return '';
   return `<section class="shelf" data-shelf-id="${escapeHtml(id)}">
     <div class="shelf-head">
@@ -110,10 +150,13 @@ export function renderShelf({ id, title, items, wide = false, ranked = false, pr
         </button>
       </div>
     </div>
-    <div class="shelf-scroller" id="shelf-${escapeHtml(id)}">
+    <div class="shelf-scroller ${top10 ? 'is-top10' : ''}" id="shelf-${escapeHtml(id)}">
       ${items
         .map((item, idx) => {
           const key = getMediaKey(item);
+          if (top10) {
+            return renderTop10Card(item, idx + 1, { liked: likedIds.has(key) });
+          }
           return renderMediaCard(item, {
             wide,
             rank: ranked ? idx + 1 : 0,
