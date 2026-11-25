@@ -35,179 +35,93 @@ export function formatTime(seconds) {
   return `${m}:${String(rem).padStart(2, '0')}`;
 }
 
-export function renderMediaCard(item, opts = {}) {
-  const key = getMediaKey(item);
-  const wide = Boolean(opts.wide);
-  const variant = wide ? 'wide' : 'poster';
-  const art = resolveArtUrl(item, variant);
-  const progress = opts.progress;
-  const pct =
-    progress && progress.duration > 0
-      ? Math.min(100, Math.max(3, Math.round((progress.currentTime / progress.duration) * 100)))
-      : 0;
-  const typeLabel = item.mediaType === 'tv' ? 'Series' : item.mediaType === 'anime' ? 'Anime' : 'Film';
-  const subParts = [item.year, typeLabel, item.sonic?.texture || item.genres?.[0]].filter(Boolean);
-
-  return `<article class="media-card ${wide ? 'is-wide' : ''}" data-key="${escapeHtml(key)}">
-    <div class="media-art" data-open-detail="${escapeHtml(key)}">
-      <img src="${escapeHtml(art)}" alt="${escapeHtml(item.title)}" loading="lazy" referrerpolicy="no-referrer" ${attachFallbackImgAttr(
-    item,
-    variant
-  )} />
-      ${
-        opts.badgeText
-          ? `<span class="art-badge-top">${escapeHtml(opts.badgeText)}</span>`
-          : item.sonicMatch
-          ? `<span class="art-badge-top">${item.sonicMatch.score}% Match</span>`
-          : ''
-      }
-      ${opts.rank ? `<span class="art-rank">#${opts.rank}</span>` : ''}
-      <div class="art-play">
-        <button type="button" class="art-play-circle" data-play-key="${escapeHtml(key)}" aria-label="Stream ${escapeHtml(
-    item.title
-  )}">
-          ${svgIcon('play', 20)}
-        </button>
-      </div>
-      ${
-        pct > 0
-          ? `<div class="card-progress-bar"><div class="card-progress-fill" style="width:${pct}%"></div></div>`
-          : ''
-      }
-    </div>
-    <button type="button" class="media-kebab" data-toggle-like="${escapeHtml(key)}" title="${
-    opts.liked ? 'Remove from Liked Films' : 'Save to Liked Films'
-  }" aria-label="Toggle Liked">
-      ${svgIcon(opts.liked ? 'heartFill' : 'heart', 15)}
-    </button>
-    <div class="media-meta">
-      <button type="button" class="media-title" data-open-detail="${escapeHtml(key)}">${escapeHtml(
-    item.title
-  )}</button>
-      <div class="media-subtitle">${escapeHtml(subParts.join(' • '))}</div>
-    </div>
-  </article>`;
-}
-
-export function renderTop10Card(item, rank, opts = {}) {
+export function renderPosterCard(item, { top10 = false, recentlyAdded = false } = {}) {
   const key = getMediaKey(item);
   const art = resolveArtUrl(item, 'poster');
-  const liked = Boolean(opts.liked);
-  return `<article class="media-card top10-card" data-key="${escapeHtml(key)}">
-    <div class="top10-inner">
-      <span class="top10-num" aria-hidden="true">${rank}</span>
-      <div class="media-art top10-art" data-open-detail="${escapeHtml(key)}">
-        <img src="${escapeHtml(art)}" alt="${escapeHtml(item.title)}" loading="lazy" referrerpolicy="no-referrer" ${attachFallbackImgAttr(
+  return `<article class="nf-card" data-open-detail="${escapeHtml(key)}">
+    <div class="nf-poster">
+      <img src="${escapeHtml(art)}" alt="${escapeHtml(item.title)}" loading="lazy" referrerpolicy="no-referrer" ${attachFallbackImgAttr(
     item,
     'poster'
   )} />
-        ${item.rating ? `<span class="art-badge-top">★ ${escapeHtml(item.rating)}</span>` : ''}
-        <div class="art-play">
-          <button type="button" class="art-play-circle" data-play-key="${escapeHtml(key)}" aria-label="Stream ${escapeHtml(
-    item.title
-  )}">
-            ${svgIcon('play', 20)}
-          </button>
-        </div>
-      </div>
-      <button type="button" class="media-kebab" data-toggle-like="${escapeHtml(key)}" title="${
-    liked ? 'Remove from My List' : 'Save to My List'
-  }" aria-label="Toggle Liked">
-        ${svgIcon(liked ? 'heartFill' : 'heart', 15)}
-      </button>
-    </div>
-    <div class="media-meta" style="padding-left:22px;">
-      <button type="button" class="media-title" data-open-detail="${escapeHtml(key)}">${escapeHtml(
-    item.title
-  )}</button>
-      <div class="media-subtitle">${escapeHtml(
-        [item.year, item.mediaType === 'tv' ? 'Series' : item.mediaType === 'anime' ? 'Anime' : 'Film', item.genres?.[0]]
-          .filter(Boolean)
-          .join(' • ')
-      )}</div>
+      ${top10 ? `<span class="nf-top10-tag">TOP<br/>10</span>` : ''}
+      ${recentlyAdded ? `<span class="nf-recent-tag">Recently Added</span>` : ''}
     </div>
   </article>`;
 }
 
-export function renderShelf({ id, title, items, wide = false, ranked = false, top10 = false, progressMap = {}, likedIds = new Set(), moreRoute = '' }) {
-  if (!items || items.length === 0) return '';
-  return `<section class="shelf" data-shelf-id="${escapeHtml(id)}">
-    <div class="shelf-head">
-      <h2 class="shelf-title">${escapeHtml(title)}</h2>
-      <div class="shelf-arrows">
-        ${
-          moreRoute
-            ? `<button type="button" class="pill-button" style="height:32px;padding:0 14px;font-size:12px;" data-nav="${escapeHtml(
-                moreRoute
-              )}">More</button>`
-            : ''
-        }
-        <button type="button" data-scroll-shelf="${escapeHtml(id)}" data-dir="-1" aria-label="Scroll left">
-          ${svgIcon('chevronLeft', 18)}
-        </button>
-        <button type="button" data-scroll-shelf="${escapeHtml(id)}" data-dir="1" aria-label="Scroll right">
-          ${svgIcon('chevronRight', 18)}
-        </button>
+export function renderContinueWatchingCard(entry) {
+  const item = entry.item;
+  if (!item) return '';
+  const key = getMediaKey(item);
+  const art = resolveArtUrl(item, 'poster');
+  const pct =
+    entry.duration > 0
+      ? Math.min(98, Math.max(6, Math.round((entry.currentTime / entry.duration) * 100)))
+      : 28;
+
+  return `<article class="cw-card">
+    <div class="cw-poster-wrap" data-play-key="${escapeHtml(key)}">
+      <img src="${escapeHtml(art)}" alt="${escapeHtml(item.title)}" loading="lazy" referrerpolicy="no-referrer" ${attachFallbackImgAttr(
+    item,
+    'poster'
+  )} />
+      <span class="cw-center-play">${svgIcon('play', 20)}</span>
+      ${entry.badge ? `<span class="cw-watch-badge">${escapeHtml(entry.badge)}</span>` : ''}
+      <div class="cw-progress-track">
+        <div class="cw-progress-fill" style="width:${pct}%"></div>
       </div>
     </div>
-    <div class="shelf-scroller ${top10 ? 'is-top10' : ''}" id="shelf-${escapeHtml(id)}">
+    <div class="cw-footer">
+      <button type="button" class="cw-footer-btn" data-open-detail="${escapeHtml(key)}" aria-label="Details">
+        ${svgIcon('infoCircle', 19)}
+      </button>
+      <span class="cw-divider"></span>
+      <button type="button" class="cw-footer-btn" data-cw-menu="${escapeHtml(key)}" aria-label="More options">
+        ${svgIcon('moreVert', 18)}
+      </button>
+    </div>
+  </article>`;
+}
+
+export function renderLikedShareCard(item) {
+  const key = getMediaKey(item);
+  const art = resolveArtUrl(item, 'poster');
+  return `<article class="liked-card">
+    <div class="nf-poster" data-open-detail="${escapeHtml(key)}">
+      <img src="${escapeHtml(art)}" alt="${escapeHtml(item.title)}" loading="lazy" referrerpolicy="no-referrer" ${attachFallbackImgAttr(
+    item,
+    'poster'
+  )} />
+    </div>
+    <button type="button" class="liked-share-btn" data-share-key="${escapeHtml(key)}">
+      ${svgIcon('share', 14)} Share
+    </button>
+  </article>`;
+}
+
+export function renderShelf({ id, title, items, kind = 'poster', seeAllAttr = '', top10Indices = new Set(), recentIndices = new Set() }) {
+  if (!items || items.length === 0) return '';
+  return `<section class="nf-shelf" data-shelf-id="${escapeHtml(id)}">
+    <div class="nf-shelf-head">
+      <h2 class="nf-shelf-title">${escapeHtml(title)}</h2>
+      ${
+        seeAllAttr
+          ? `<button type="button" class="nf-see-all" ${seeAllAttr}>See All ${svgIcon('chevronRight', 16)}</button>`
+          : ''
+      }
+    </div>
+    <div class="nf-row">
       ${items
-        .map((item, idx) => {
-          const key = getMediaKey(item);
-          if (top10) {
-            return renderTop10Card(item, idx + 1, { liked: likedIds.has(key) });
-          }
-          return renderMediaCard(item, {
-            wide,
-            rank: ranked ? idx + 1 : 0,
-            progress: progressMap[key],
-            liked: likedIds.has(key),
+        .map((entry, idx) => {
+          if (kind === 'continue') return renderContinueWatchingCard(entry);
+          if (kind === 'liked') return renderLikedShareCard(entry);
+          return renderPosterCard(entry, {
+            top10: top10Indices.has(idx),
+            recentlyAdded: recentIndices.has(idx),
           });
         })
         .join('')}
     </div>
   </section>`;
-}
-
-export function renderSongFilmRow(item, idx, { activeKey = '' } = {}) {
-  const key = getMediaKey(item);
-  const art = resolveArtUrl(item, 'poster');
-  const score = item.sonicMatch?.score;
-  return `<div class="song-row ${activeKey === key ? 'is-active' : ''}" data-play-key="${escapeHtml(key)}" role="button" tabindex="0">
-    <span class="row-index">${idx + 1}</span>
-    <div class="row-art">
-      <img src="${escapeHtml(art)}" alt="" loading="lazy" referrerpolicy="no-referrer" ${attachFallbackImgAttr(
-    item,
-    'poster'
-  )} />
-    </div>
-    <div class="row-main">
-      <div class="row-title">${escapeHtml(item.title)} <span class="dim" style="font-weight:400;">(${escapeHtml(
-    item.year || ''
-  )})</span></div>
-      <div class="row-sub">After: ${escapeHtml(item.sonic?.listenBefore || item.creator || 'Soundtrack Cue')}</div>
-    </div>
-    ${score ? `<span class="row-match-pill">${score}% Match</span>` : ''}
-    <span class="row-dur">${escapeHtml(item.runtime || (item.mediaType === 'tv' ? 'Series' : 'Film'))}</span>
-    <button type="button" class="icon-button" data-open-detail="${escapeHtml(key)}" title="Details & Sonic DNA" aria-label="Inspect ${escapeHtml(
-    item.title
-  )}" onclick="event.stopPropagation()">
-      ${svgIcon('more', 16)}
-    </button>
-  </div>`;
-}
-
-export function renderMoodTiles(moods, activeMoodId) {
-  return `<div class="mood-grid">
-    ${moods
-      .map(
-        (m) => `<button type="button" class="mood-tile ${
-          activeMoodId === m.id ? 'is-active' : ''
-        }" data-select-mood="${escapeHtml(m.id)}" style="--mood:${escapeHtml(m.color)}">
-          <span class="mood-bar"></span>
-          <span class="mood-label">${escapeHtml(m.label)}</span>
-        </button>`
-      )
-      .join('')}
-  </div>`;
 }

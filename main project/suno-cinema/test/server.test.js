@@ -18,7 +18,7 @@ test('Suno Cinema HTTP server serves UI assets, catalog API, search, TV seasons,
     const cssResp = await fetch(`${base}/styles.css`);
     assert.equal(cssResp.status, 200);
     const css = await cssResp.text();
-    assert.ok(css.includes('--bg: #030303'));
+    assert.ok(css.includes('--bg: #000000'));
     assert.ok(css.includes('[data-theme=\'cyberpunk\']'));
 
     const healthResp = await fetch(`${base}/api/health`);

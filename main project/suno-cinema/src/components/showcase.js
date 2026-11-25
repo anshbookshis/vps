@@ -1,257 +1,253 @@
 import { getMediaKey } from '../utils/storage.js';
 import { svgIcon } from './icons.js';
-import { escapeHtml, resolveArtUrl, attachFallbackImgAttr } from './cards.js';
+import { escapeHtml, resolveArtUrl, attachFallbackImgAttr, renderPosterCard } from './cards.js';
 
 /**
- * 7movies-grade full-bleed Hero Carousel fused with Suno's obsidian theme & Sonic DNA.
+ * Portrait Billboard Hero Card matching Screenshot 5 (Rocket Singh style) with Suno Cinema branding.
  */
-export function renderHeroCarousel(items, activeIndex, { likedIds = new Set(), curtainPlaying = false } = {}) {
-  if (!items || items.length === 0) return '';
-  const safeIdx = ((activeIndex % items.length) + items.length) % items.length;
-  const item = items[safeIdx];
+export function renderAndroidBillboard(item, { inMyList = false } = {}) {
+  if (!item) return '';
   const key = getMediaKey(item);
-  const backdrop = resolveArtUrl(item, 'wide');
-  const liked = likedIds.has(key);
-  const typeLabel = item.mediaType === 'tv' ? 'SERIES' : item.mediaType === 'anime' ? 'ANIME' : 'FEATURE FILM';
+  const art = resolveArtUrl(item, 'poster');
+  const typeWord = item.mediaType === 'tv' ? 'Series' : item.mediaType === 'anime' ? 'Anime' : 'Movie';
+  const tags = [typeWord, ...(item.genres || []).slice(0, 2), item.country || item.year].filter(Boolean);
 
-  return `<section class="hero-showcase" aria-label="Featured Spotlight">
-    <img
-      class="hero-backdrop"
-      src="${escapeHtml(backdrop)}"
-      alt="${escapeHtml(item.title)}"
-      referrerpolicy="no-referrer"
-      ${attachFallbackImgAttr(item, 'wide')}
-    />
-    <div class="hero-scrim"></div>
-
-    <div class="hero-showcase-inner">
-      <div class="hero-showcase-meta-row">
-        <span class="sonic-live-dot"></span>
-        <span class="hero-kicker">${typeLabel}</span>
-        ${item.rating ? `<span class="hero-pill">★ ${escapeHtml(item.rating)}</span>` : ''}
-        ${item.year ? `<span class="hero-pill">${escapeHtml(item.year)}</span>` : ''}
-        ${item.runtime ? `<span class="hero-pill">${escapeHtml(item.runtime)}</span>` : ''}
+  return `<section class="billboard-wrap" aria-label="Featured">
+    <div class="billboard-card">
+      <img
+        class="billboard-img"
+        src="${escapeHtml(art)}"
+        alt="${escapeHtml(item.title)}"
+        referrerpolicy="no-referrer"
+        ${attachFallbackImgAttr(item, 'poster')}
+      />
+      <div class="billboard-scrim"></div>
+      <div class="billboard-content" data-open-detail="${escapeHtml(key)}">
         ${
-          item.sonicMatch
-            ? `<span class="hero-pill is-sonic">${item.sonicMatch.score}% Sonic Match</span>`
-            : ''
+          item.logo
+            ? `<img class="billboard-logo" src="${escapeHtml(item.logo)}" alt="${escapeHtml(
+                item.title
+              )}" referrerpolicy="no-referrer" onerror="this.style.display='none';this.nextElementSibling.style.display='block';" />
+               <div class="billboard-title" style="display:none;">${escapeHtml(item.title)}</div>`
+            : `<div class="billboard-title">${escapeHtml(item.title)}</div>`
         }
+        <div class="billboard-tags">${escapeHtml(tags.join(' • '))}</div>
+        <div class="billboard-actions" onclick="event.stopPropagation()">
+          <button type="button" class="btn-white" data-play-key="${escapeHtml(key)}">
+            ${svgIcon('play', 17)} Play ${typeWord === 'Movie' ? 'Movie' : ''}
+          </button>
+          <button type="button" class="btn-dark" data-toggle-mylist="${escapeHtml(key)}">
+            ${svgIcon(inMyList ? 'check' : 'plus', 17)} ${inMyList ? 'My List' : 'My List'}
+          </button>
+        </div>
       </div>
-
-      ${
-        item.logo
-          ? `<div class="hero-logo-wrap">
-              <img class="hero-logo-img" src="${escapeHtml(item.logo)}" alt="${escapeHtml(
-              item.title
-            )}" referrerpolicy="no-referrer" onerror="this.style.display='none';this.nextElementSibling.style.display='block';" />
-              <h1 class="hero-showcase-title" style="display:none;">${escapeHtml(item.title)}</h1>
-            </div>`
-          : `<h1 class="hero-showcase-title">${escapeHtml(item.title)}</h1>`
-      }
-
-      <p class="hero-showcase-desc">${escapeHtml(
-        item.overview || 'Stream seamlessly in HD via VidRift with synced Suno sonic pairing.'
-      )}</p>
-
-      <div class="hero-sonic-clue">
-        <span class="dim">Best after listening to:</span>
-        <strong>${escapeHtml(item.sonic?.listenBefore || 'Suno Night Mix')}</strong>
-        <span class="dim">•</span>
-        <span>${escapeHtml(item.sonic?.texture || 'Synced Score')}</span>
-      </div>
-
-      <div class="hero-actions">
-        <button type="button" class="primary-button" data-play-key="${escapeHtml(key)}">
-          ${svgIcon('play', 17)} Stream Now
-        </button>
-        ${
-          item.trailerId
-            ? `<button type="button" class="pill-button" data-open-trailer="${escapeHtml(
-                item.trailerId
-              )}" data-trailer-title="${escapeHtml(item.title)}">
-                ${svgIcon('trailer', 16)} Trailer
-              </button>`
-            : ''
-        }
-        <button type="button" class="pill-button ${
-          curtainPlaying ? 'is-accent' : ''
-        }" id="hero-audition-btn" data-curtain="${escapeHtml(item.sonic?.moodId || 'midnight-synth')}">
-          ${svgIcon('wave', 16)} ${curtainPlaying ? 'Stop Vibe' : 'Audition Vibe'}
-        </button>
-        <button type="button" class="pill-button" data-toggle-like="${escapeHtml(key)}">
-          ${svgIcon(liked ? 'heartFill' : 'heart', 16)} ${liked ? 'In My List' : 'My List'}
-        </button>
-        <button type="button" class="pill-button" data-open-detail="${escapeHtml(key)}">
-          ${svgIcon('info', 16)} More Info
-        </button>
-      </div>
-    </div>
-
-    <div class="hero-carousel-controls">
-      <button type="button" class="icon-button" data-hero-step="-1" aria-label="Previous featured title">
-        ${svgIcon('chevronLeft', 18)}
-      </button>
-      <div class="hero-dots">
-        ${items
-          .map(
-            (_, idx) => `<button type="button" class="hero-dot ${
-              idx === safeIdx ? 'is-active' : ''
-            }" data-hero-dot="${idx}" aria-label="Slide ${idx + 1}"></button>`
-          )
-          .join('')}
-      </div>
-      <button type="button" class="icon-button" data-hero-step="1" aria-label="Next featured title">
-        ${svgIcon('chevronRight', 18)}
-      </button>
     </div>
   </section>`;
 }
 
 /**
- * Rich Episode Grid using Cinemeta episode metadata + thumbnails when available,
- * or clean compact episode selector pills otherwise.
+ * Full Title Detail Screen matching Screenshot 2 (16:9 trailer stage, Play, Download, Starring, +/Rate/Share).
  */
-export function renderRichEpisodesSection({
+export function renderDetailView({
   item,
-  seasons,
-  activeSeason,
-  activeEpisode,
+  inMyList = false,
+  isLiked = false,
+  isDownloaded = false,
+  savedProgress = null,
+  trailerMuted = true,
+  trailerPlaying = false,
+  detailTab = 'episodes',
+  seasons = [],
+  activeSeason = 1,
+  activeEpisode = 1,
+  relatedItems = [],
   dubEnabled = false,
-  compact = false,
 }) {
+  if (!item) return `<div style="padding:24px;" class="dim">Title not found.</div>`;
   const key = getMediaKey(item);
+  const backdrop = resolveArtUrl(item, 'wide');
   const seasonObj =
     seasons.find((s) => s.seasonNumber === activeSeason) ||
     seasons[0] || { seasonNumber: 1, name: 'Season 1', episodeCount: item.totalEpisodes || 10 };
+  const richEps = Array.isArray(seasonObj.episodes) && seasonObj.episodes.length ? seasonObj.episodes : null;
+  const epCount = item.mediaType === 'anime' ? item.totalEpisodes || 12 : seasonObj.episodeCount || 10;
 
-  const richEpisodes = Array.isArray(seasonObj.episodes) && seasonObj.episodes.length > 0 ? seasonObj.episodes : null;
-  const epCount =
-    item.mediaType === 'anime' ? item.totalEpisodes || 12 : seasonObj.episodeCount || 10;
-
-  return `<section class="season-ep-box">
-    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
-      <h2 style="font-size:17px;font-weight:700;">Episodes ${
-        richEpisodes ? `<span class="dim" style="font-weight:400;font-size:13px;">(${richEpisodes.length} in ${escapeHtml(
-          seasonObj.name
-        )})</span>` : ''
-      }</h2>
-      <div style="display:flex;gap:8px;align-items:center;">
-        ${
-          item.mediaType === 'tv' && seasons.length > 0
-            ? `<select class="field-select" id="${compact ? 'theater-season-select' : 'detail-season-select'}" style="height:34px;">
-                ${seasons
-                  .map(
-                    (s) => `<option value="${s.seasonNumber}" ${
-                      s.seasonNumber === activeSeason ? 'selected' : ''
-                    }>${escapeHtml(s.name)} (${s.episodeCount} eps)</option>`
-                  )
-                  .join('')}
-              </select>`
-            : ''
-        }
-        ${
-          item.mediaType === 'anime'
-            ? `<button type="button" class="pill-button ${
-                dubEnabled ? 'is-accent' : ''
-              }" id="toggle-dub-btn" style="height:34px;font-size:12px;">
-                ${dubEnabled ? 'Audio: English Dub (?dub=1)' : 'Audio: Original Sub'}
-              </button>`
-            : ''
-        }
+  return `<article class="detail-view">
+    <div class="detail-preview-stage">
+      <div class="detail-overlay-top">
+        <button type="button" class="icon-btn" id="detail-back-btn" aria-label="Back" style="background:rgba(0,0,0,0.45);">
+          ${svgIcon('back', 22)}
+        </button>
+        <button type="button" class="icon-btn" id="open-shield-settings-btn" aria-label="Cast & Shield" style="background:rgba(0,0,0,0.45);">
+          ${svgIcon('cast', 20)}
+        </button>
       </div>
+      ${
+        trailerPlaying && item.trailerId
+          ? `<iframe
+              src="https://www.youtube-nocookie.com/embed/${encodeURIComponent(
+                item.trailerId
+              )}?autoplay=1&mute=${trailerMuted ? 1 : 0}&rel=0"
+              title="${escapeHtml(item.title)} Trailer"
+              allow="autoplay; encrypted-media; fullscreen"
+              allowfullscreen
+              referrerpolicy="strict-origin-when-cross-origin"
+            ></iframe>`
+          : `<img src="${escapeHtml(backdrop)}" alt="${escapeHtml(item.title)}" referrerpolicy="no-referrer" ${attachFallbackImgAttr(
+              item,
+              'wide'
+            )} />`
+      }
+      ${
+        item.trailerId
+          ? `<button type="button" class="detail-mute-btn" id="detail-trailer-toggle" aria-label="Toggle trailer sound">
+              ${svgIcon(trailerPlaying ? (trailerMuted ? 'volumeOff' : 'volumeOn') : 'trailer', 16)}
+            </button>`
+          : ''
+      }
+    </div>
+
+    <div class="detail-body">
+      <h1 class="detail-title">${escapeHtml(item.title)}</h1>
+      <div class="detail-meta-row">
+        ${item.year ? `<span>${escapeHtml(item.year)}</span>` : ''}
+        <span class="age-pill">U/A 13+</span>
+        ${item.runtime ? `<span>${escapeHtml(item.runtime)}</span>` : ''}
+        <span class="hd-pill">HD</span>
+        ${item.rating ? `<span>★ ${escapeHtml(item.rating)}</span>` : ''}
+      </div>
+
+      <div class="detail-stacked-btns">
+        <button type="button" class="btn-white" data-play-key="${escapeHtml(key)}" style="width:100%;height:44px;">
+          ${svgIcon('play', 18)} ${savedProgress?.currentTime > 15 ? 'Resume' : 'Play'}
+        </button>
+        <button type="button" class="btn-dark" data-toggle-download="${escapeHtml(key)}" style="width:100%;height:44px;">
+          ${svgIcon(isDownloaded ? 'check' : 'download', 18)} ${isDownloaded ? 'Saved to Downloads' : 'Download'}
+        </button>
+      </div>
+
+      <p style="font-size:13.5px;line-height:1.45;color:#e4e4e7;">${escapeHtml(
+        item.overview || 'Stream seamlessly on Suno Cinema via VidRift.'
+      )}</p>
+
+      ${
+        item.cast?.length
+          ? `<p class="dim" style="font-size:12px;">Starring: ${escapeHtml(item.cast.slice(0, 4).join(', '))}</p>`
+          : ''
+      }
+      ${
+        item.creator
+          ? `<p class="dim" style="font-size:12px;">${
+              item.mediaType === 'tv' ? 'Creator' : item.mediaType === 'anime' ? 'Studio' : 'Director'
+            }: ${escapeHtml(item.creator)}</p>`
+          : ''
+      }
+
+      <div class="detail-action-icons">
+        <button type="button" class="detail-icon-act ${inMyList ? 'is-active' : ''}" data-toggle-mylist="${escapeHtml(
+    key
+  )}">
+          ${svgIcon(inMyList ? 'check' : 'plus', 22)}
+          <span>My List</span>
+        </button>
+        <button type="button" class="detail-icon-act ${isLiked ? 'is-active' : ''}" data-toggle-like="${escapeHtml(
+    key
+  )}">
+          ${svgIcon('thumbsUp', 21)}
+          <span>${isLiked ? 'Liked' : 'Rate'}</span>
+        </button>
+        <button type="button" class="detail-icon-act" data-share-key="${escapeHtml(key)}">
+          ${svgIcon('share', 21)}
+          <span>Share</span>
+        </button>
+      </div>
+    </div>
+
+    <div class="detail-tabs-bar">
+      ${
+        item.mediaType !== 'movie'
+          ? `<button type="button" class="detail-tab-btn ${
+              detailTab === 'episodes' ? 'is-active' : ''
+            }" data-detail-tab="episodes">Episodes</button>`
+          : ''
+      }
+      <button type="button" class="detail-tab-btn ${
+        detailTab === 'more' || item.mediaType === 'movie' ? 'is-active' : ''
+      }" data-detail-tab="more">More Like This</button>
     </div>
 
     ${
-      richEpisodes && !compact
-        ? `<div class="episode-rich-grid">
-            ${richEpisodes
-              .map(
-                (ep) => `<button type="button" class="ep-rich-card ${
-                  ep.episode === activeEpisode ? 'is-active' : ''
-                }" data-play-episode="${ep.episode}" data-ep-key="${escapeHtml(key)}">
-                  <div class="ep-rich-thumb">
-                    ${
-                      ep.thumbnail
-                        ? `<img src="${escapeHtml(ep.thumbnail)}" alt="" loading="lazy" referrerpolicy="no-referrer" />`
-                        : `<div class="ep-rich-placeholder">S${activeSeason} E${ep.episode}</div>`
-                    }
-                    <span class="ep-rich-num">E${ep.episode}</span>
-                  </div>
-                  <div class="ep-rich-body">
-                    <div class="ep-rich-title">${escapeHtml(ep.name || `Episode ${ep.episode}`)}</div>
-                    ${
-                      ep.overview
-                        ? `<div class="ep-rich-desc">${escapeHtml(ep.overview)}</div>`
-                        : ''
-                    }
-                    ${
-                      ep.released || ep.rating
-                        ? `<div class="ep-rich-meta">${escapeHtml(
-                            [ep.released, ep.rating ? `★ ${ep.rating}` : ''].filter(Boolean).join(' • ')
-                          )}</div>`
-                        : ''
-                    }
-                  </div>
-                </button>`
-              )
-              .join('')}
+      item.mediaType !== 'movie' && detailTab === 'episodes'
+        ? `<div style="padding:10px 0;">
+            <div style="display:flex;align-items:center;justify-content:space-between;padding:0 14px 10px;">
+              ${
+                item.mediaType === 'tv' && seasons.length > 0
+                  ? `<select class="field-select" id="detail-season-select">
+                      ${seasons
+                        .map(
+                          (s) => `<option value="${s.seasonNumber}" ${
+                            s.seasonNumber === activeSeason ? 'selected' : ''
+                          }>${escapeHtml(s.name)}</option>`
+                        )
+                        .join('')}
+                    </select>`
+                  : `<span style="font-size:14px;font-weight:700;">Episodes (${epCount})</span>`
+              }
+              ${
+                item.mediaType === 'anime'
+                  ? `<button type="button" class="outline-chip ${
+                      dubEnabled ? 'is-active' : ''
+                    }" id="toggle-dub-btn">${dubEnabled ? 'English Dub' : 'Subtitled'}</button>`
+                  : ''
+              }
+            </div>
+            ${
+              richEps
+                ? richEps
+                    .map(
+                      (ep) => `<div class="ep-row">
+                        <button type="button" class="ep-row-top" data-play-episode="${ep.episode}" data-ep-key="${escapeHtml(
+                        key
+                      )}">
+                          <div class="ep-thumb">
+                            ${
+                              ep.thumbnail
+                                ? `<img src="${escapeHtml(ep.thumbnail)}" alt="" loading="lazy" referrerpolicy="no-referrer" />`
+                                : `<img src="${escapeHtml(backdrop)}" alt="" loading="lazy" referrerpolicy="no-referrer" />`
+                            }
+                            <span class="ep-thumb-play">${svgIcon('play', 13)}</span>
+                          </div>
+                          <div style="flex:1;min-width:0;">
+                            <div style="font-size:14px;font-weight:600;">${ep.episode}. ${escapeHtml(
+                        ep.name || `Episode ${ep.episode}`
+                      )}</div>
+                            <div class="dim" style="font-size:11px;margin-top:2px;">${escapeHtml(
+                              ep.released || `Season ${activeSeason}`
+                            )}</div>
+                          </div>
+                        </button>
+                        ${
+                          ep.overview
+                            ? `<p class="dim" style="font-size:12px;line-height:1.4;">${escapeHtml(ep.overview)}</p>`
+                            : ''
+                        }
+                      </div>`
+                    )
+                    .join('')
+                : `<div class="poster-grid-3" style="grid-template-columns:repeat(4,1fr);">
+                    ${Array.from({ length: Math.min(epCount, 40) }, (_, i) => i + 1)
+                      .map(
+                        (ep) => `<button type="button" class="btn-dark" style="height:38px;font-size:13px;" data-play-episode="${ep}" data-ep-key="${escapeHtml(
+                          key
+                        )}">Ep ${ep}</button>`
+                      )
+                      .join('')}
+                  </div>`
+            }
           </div>`
-        : richEpisodes && compact
-        ? `<div class="track-list">
-            ${richEpisodes
-              .map(
-                (ep) => `<button type="button" class="song-row ${
-                  ep.episode === activeEpisode ? 'is-active' : ''
-                }" data-play-episode="${ep.episode}" data-ep-key="${escapeHtml(key)}" style="text-align:left;width:100%;">
-                  <span class="row-index">${ep.episode}</span>
-                  <div class="row-main">
-                    <div class="row-title">${escapeHtml(ep.name || `Episode ${ep.episode}`)}</div>
-                    <div class="row-sub">${escapeHtml(ep.overview || `Season ${activeSeason}`)}</div>
-                  </div>
-                </button>`
-              )
-              .join('')}
-          </div>`
-        : `<div class="episode-grid" style="${compact ? 'grid-template-columns:repeat(3,1fr);' : ''}">
-            ${Array.from({ length: Math.min(epCount, 40) }, (_, i) => i + 1)
-              .map(
-                (ep) => `<button type="button" class="ep-btn ${
-                  ep === activeEpisode ? 'is-active' : ''
-                }" data-play-episode="${ep}" data-ep-key="${escapeHtml(key)}">
-                  <span>Ep ${ep}</span>
-                  ${compact ? '' : svgIcon('play', 13)}
-                </button>`
-              )
-              .join('')}
+        : `<div class="poster-grid-3">
+            ${relatedItems.slice(0, 12).map((rel) => renderPosterCard(rel)).join('')}
           </div>`
     }
-  </section>`;
-}
-
-export function renderTrailerModal(trailerId, title) {
-  if (!trailerId) return '';
-  const src = `https://www.youtube-nocookie.com/embed/${encodeURIComponent(trailerId)}?autoplay=1&rel=0`;
-  return `<div class="dialog-backdrop" data-close-modal="true">
-    <div class="dialog-card" style="width:min(860px, 100%);padding:16px;" role="dialog" aria-modal="true" aria-label="Official Trailer">
-      <div class="dialog-head">
-        <div>
-          <h2 style="font-size:17px;font-weight:700;">${escapeHtml(title || 'Trailer')} — Official Preview</h2>
-          <p class="dim" style="font-size:12px;">Privacy-enhanced embed (youtube-nocookie.com)</p>
-        </div>
-        <button type="button" class="icon-button" data-close-modal="true" aria-label="Close">
-          ${svgIcon('close', 20)}
-        </button>
-      </div>
-      <div style="position:relative;padding-bottom:56.25%;height:0;border-radius:8px;overflow:hidden;background:#000;">
-        <iframe
-          src="${escapeHtml(src)}"
-          title="${escapeHtml(title || 'Trailer')}"
-          style="position:absolute;inset:0;width:100%;height:100%;border:0;"
-          allow="autoplay; encrypted-media; fullscreen"
-          allowfullscreen
-          referrerpolicy="strict-origin-when-cross-origin"
-        ></iframe>
-      </div>
-    </div>
-  </div>`;
+  </article>`;
 }
