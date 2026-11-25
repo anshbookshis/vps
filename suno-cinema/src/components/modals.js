@@ -207,15 +207,15 @@ export function renderQuickLaunchSheet() {
       <div class="sheet-grab-bar" aria-hidden="true"></div>
       <div style="display:flex;align-items:center;justify-content:space-between;">
         <div>
-          <h2 style="font-size:18px;font-weight:700;">Stream by TMDB / AniList ID</h2>
-          <p class="dim" style="font-size:12px;margin-top:2px;">Paste any TMDB or AniList link/ID to launch on VidRift</p>
+          <h2 style="font-size:18px;font-weight:700;">Stream by ID or Stream URL</h2>
+          <p class="dim" style="font-size:12px;margin-top:2px;">Paste a TMDB/AniList ID or authorized https:// .m3u8 / .mp4 stream URL</p>
         </div>
         <button type="button" class="icon-btn" data-close-modal="true" aria-label="Close">
           ${svgIcon('close', 20)}
         </button>
       </div>
       <form id="quick-launch-form" style="display:flex;flex-direction:column;gap:12px;">
-        <input id="ql-input" class="field-input" placeholder="e.g. 438631, tv/1396/1/1, anilist/1535/1" required />
+        <input id="ql-input" class="field-input" placeholder="e.g. 438631, tv/1396/1/1, anilist/1535, or https://.../playlist.m3u8" required />
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
           <select id="ql-type" class="field-select">
             <option value="movie">Movie (TMDB)</option>

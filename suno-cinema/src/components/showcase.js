@@ -2,6 +2,35 @@ import { getMediaKey } from '../utils/storage.js';
 import { svgIcon, renderSunoRibbonSvg } from './icons.js';
 import { escapeHtml, resolveArtUrl, attachFallbackImgAttr, renderPosterCard, computeMatchPercent } from './cards.js';
 
+export const STUDIO_HUBS = [
+  { id: 'all', title: 'Suno Cinema', sub: 'All Hubs', accent: '#e50914' },
+  { id: 'hollywood', title: 'Hollywood', sub: 'English Hits', accent: '#f59e0b' },
+  { id: 'bollywood', title: 'Bollywood', sub: 'Hindi Cinema', accent: '#ff6b35' },
+  { id: 'south', title: 'South India', sub: 'Pan-India', accent: '#10b981' },
+  { id: 'anime', title: 'Anime Hub', sub: 'Sub & Dub', accent: '#06b6d4' },
+  { id: 'korean', title: 'K-Drama', sub: 'Asian Series', accent: '#ec4899' },
+  { id: 'scifi', title: 'Sci-Fi & Action', sub: 'Blockbusters', accent: '#3b82f6' },
+];
+
+/**
+ * Multi-Studio / OTT Portal switcher bar matching modern net77-style OTT portals.
+ */
+export function renderStudioHubStrip(activeHub = 'all') {
+  return `<section class="hubs-strip-wrap" aria-label="Streaming Hubs">
+    <div class="hubs-strip">
+      ${STUDIO_HUBS.map(
+        (h) => `<button type="button" class="hub-card ${activeHub === h.id ? 'is-active' : ''}" data-pick-hub="${
+          h.id
+        }" style="--hub-accent:${h.accent}">
+          <span class="hub-card-glow" aria-hidden="true"></span>
+          <span class="hub-card-title">${escapeHtml(h.title)}</span>
+          <span class="hub-card-sub">${escapeHtml(h.sub)}</span>
+        </button>`
+      ).join('')}
+    </div>
+  </section>`;
+}
+
 /**
  * Dynamic Portrait Billboard Hero Card matching Screenshot 5 with Android ambient backdrop extraction.
  */
@@ -141,7 +170,11 @@ export function renderDesktopBillboard(
                <h1 class="dk-hero-title" style="display:none;">${escapeHtml(item.title)}</h1>`
             : `<h1 class="dk-hero-title">${escapeHtml(item.title)}</h1>`
         }
-        <div class="dk-hero-meta">${escapeHtml(metaParts.join(' • '))}</div>
+        <div class="dk-hero-meta">
+          <span class="dk-match-score">${computeMatchPercent(item)}% Match</span>
+          <span>• ${escapeHtml(metaParts.join(' • '))}</span>
+          ${item.rating ? `<span class="dk-hero-rating">★ ${escapeHtml(item.rating)}</span>` : ''}
+        </div>
         <p class="dk-hero-desc">${escapeHtml(
           item.overview || item.tagline || 'Stream full HD movies, series & anime free on Suno Cinema.'
         )}</p>
@@ -159,6 +192,20 @@ export function renderDesktopBillboard(
           </button>
         </div>
       </div>
+      ${
+        list.length > 1
+          ? `<div class="billboard-dots" onclick="event.stopPropagation()">
+              ${list
+                .slice(0, 8)
+                .map(
+                  (_, idx) => `<button type="button" class="billboard-dot ${
+                    idx === safeIdx ? 'is-active' : ''
+                  }" data-hero-set="${idx}" aria-label="Spotlight ${idx + 1}"></button>`
+                )
+                .join('')}
+            </div>`
+          : ''
+      }
       <div class="dk-hero-right-dock" onclick="event.stopPropagation()">
         <div class="dk-hero-cast-badge" title="${escapeHtml(castText)}">🎬 ${escapeHtml(castText)}</div>
         ${

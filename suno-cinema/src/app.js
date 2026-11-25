@@ -45,6 +45,8 @@ import {
   renderShelf,
 } from './components/cards.js';
 import {
+  STUDIO_HUBS,
+  renderStudioHubStrip,
   renderAndroidBillboard,
   renderDesktopBillboard,
   renderDesktopFooter,
@@ -95,6 +97,9 @@ const state = {
   discoverMinRating: 0,
   discoverSort: 'trending',
   homeFilter: 'all', // 'all' | 'tv' | 'movie' | 'anime' | 'hot'
+  activeHub: 'all',
+  hubItems: [],
+  playerEpisodesOpen: false,
   tab: 'home', // 'home' | 'clips' | 'discover' | 'search' | 'mysuno' | 'detail' | 'downloads' | 'languages'
   langPref: 'Original Language',
   langValue: 'English',
@@ -243,8 +248,139 @@ function getAllKnownPool() {
   return list;
 }
 
+let activeHlsInstance = null;
+
+function destroyHlsInstance() {
+  if (activeHlsInstance) {
+    try {
+      activeHlsInstance.destroy();
+    } catch {}
+    activeHlsInstance = null;
+  }
+}
+
+function loadHlsScriptOnce() {
+  if (typeof window === 'undefined') return Promise.resolve(null);
+  if (window.Hls) return Promise.resolve(window.Hls);
+  return new Promise((resolve) => {
+    const existing = document.getElementById('suno-hlsjs-cdn');
+    if (existing) {
+      existing.addEventListener('load', () => resolve(window.Hls || null), { once: true });
+      return;
+    }
+    const sc = document.createElement('script');
+    sc.id = 'suno-hlsjs-cdn';
+    sc.src = 'https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js';
+    sc.onload = () => resolve(window.Hls || null);
+    sc.onerror = () => resolve(null);
+    document.head.appendChild(sc);
+  });
+}
+
+async function attachDirectVideoStream(videoEl, streamUrl, item) {
+  if (!videoEl || !streamUrl) return;
+  destroyHlsInstance();
+
+  const key = getMediaKey(item);
+  const saved = state.progressMap[key];
+  let lastSavedSec = 0;
+
+  videoEl.ontimeupdate = () => {
+    const cur = Number(videoEl.currentTime || 0);
+    const dur = Number(videoEl.duration || 0);
+    state.livePlayback = { currentTime: cur, duration: dur };
+    if (Math.abs(cur - lastSavedSec) >= 5 && dur > 0) {
+      lastSavedSec = cur;
+      state.progressMap = saveMediaProgress(item, {
+        currentTime: cur,
+        duration: dur,
+        season: state.activeSeason,
+        episode: state.activeEpisode,
+      });
+    }
+  };
+
+  videoEl.addEventListener(
+    'loadedmetadata',
+    () => {
+      if (saved?.currentTime > 15 && saved.currentTime < (videoEl.duration || Infinity)) {
+        try {
+          videoEl.currentTime = saved.currentTime;
+        } catch {}
+      }
+    },
+    { once: true }
+  );
+
+  if (streamUrl.toLowerCase().includes('.mp4') || videoEl.canPlayType('application/vnd.apple.mpegurl')) {
+    videoEl.src = streamUrl;
+    return;
+  }
+
+  const Hls = await loadHlsScriptOnce();
+  if (Hls && Hls.isSupported()) {
+    activeHlsInstance = new Hls();
+    activeHlsInstance.loadSource(streamUrl);
+    activeHlsInstance.attachMedia(videoEl);
+  } else {
+    videoEl.src = streamUrl;
+  }
+}
+
+function getHubFilteredItems(hubId, pool) {
+  const list = pool || getAllKnownPool();
+  switch (hubId) {
+    case 'hollywood':
+      return list.filter((x) => x.mediaType === 'movie' && !(x.regionTag || '').includes('india'));
+    case 'bollywood':
+      return list.filter((x) => x.regionTag === 'india' || (x.country || '').includes('India'));
+    case 'south':
+      return list.filter((x) => x.regionTag === 'south-india');
+    case 'anime':
+      return list.filter((x) => x.mediaType === 'anime');
+    case 'korean':
+      return list.filter((x) =>
+        /korea|korean|seoul|squid|parasite|vincenzo|proposal|queen|train/i.test(
+          `${x.country || ''} ${x.title || ''}`
+        )
+      );
+    case 'scifi':
+      return list.filter((x) =>
+        (x.genres || []).some((g) => /sci-fi|science fiction|action/i.test(g))
+      );
+    default:
+      return [];
+  }
+}
+
+async function selectStudioHub(hubId) {
+  state.activeHub = state.activeHub === hubId && hubId !== 'all' ? 'all' : hubId;
+  state.heroIndex = 0;
+  if (state.activeHub === 'all') {
+    state.hubItems = [];
+    render();
+    return;
+  }
+  const immediate = getHubFilteredItems(state.activeHub);
+  state.hubItems = immediate;
+  render();
+
+  if (state.activeHub === 'korean' || state.activeHub === 'south' || state.activeHub === 'anime') {
+    const langMap = { korean: 'Korean', south: 'South Indian', anime: 'Japanese' };
+    try {
+      const live = await fetchLanguageCatalog(langMap[state.activeHub]);
+      registerItems(live);
+      if (state.activeHub === hubId) {
+        state.hubItems = live.length ? live : getHubFilteredItems(state.activeHub);
+        render();
+      }
+    } catch {}
+  }
+}
+
 function getCurrentEmbedUrl() {
   if (!state.activeItem) return '';
+  if (state.activeItem.mediaType === 'hls') return state.activeItem.hlsUrl || '';
   if (state.activeItem.mediaType !== 'anime' && !state.activeItem.tmdbId) return '';
   return buildPlayerEmbedUrl(state.activeItem, {
     provider: state.prefs.playerProvider || 'vidlink',
@@ -268,12 +404,12 @@ function sendPlayerCommand(action, payload = {}) {
 async function launchStream(rawItem, { season, episode, resumeSeconds } = {}) {
   if (!rawItem) return;
   let item = rawItem;
-  if (item.mediaType !== 'anime' && !item.tmdbId) {
+  if (item.mediaType !== 'anime' && item.mediaType !== 'hls' && !item.tmdbId) {
     showToast(`Loading "${item.title}" stream...`);
     item = await resolveFullMetadata(item);
     registerItems([item]);
   }
-  if (item.mediaType !== 'anime' && !item.tmdbId) {
+  if (item.mediaType !== 'anime' && item.mediaType !== 'hls' && !item.tmdbId) {
     showToast('Stream ID unavailable for this entry — try Quick Launch');
     return;
   }
@@ -288,6 +424,7 @@ async function launchStream(rawItem, { season, episode, resumeSeconds } = {}) {
   state.activeSeason = resolvedSeason;
   state.activeEpisode = resolvedEpisode;
   state.playerOpen = true;
+  state.playerEpisodesOpen = false;
   state.modal = null;
   antiRedirectGuard.setTheaterActive(true);
   state.livePlayback = {
@@ -525,6 +662,9 @@ function renderDesktopTopbar() {
               ${svgIcon('search', 20)}
             </button>`
       }
+      <button type="button" class="icon-btn" id="open-quicklaunch-btn" title="Quick Launch ID or HLS URL" aria-label="Quick Launch">
+        ${svgIcon('link', 19)}
+      </button>
       <button type="button" class="icon-btn" id="open-notifications-btn" title="Notifications" aria-label="Notifications">
         ${svgIcon('bell', 20)}
         <span class="notif-badge">4</span>
@@ -549,6 +689,8 @@ function renderDesktopHome({
   myListSet,
   likedSet,
   progressMap,
+  activeHubItems,
+  activeHubMeta,
 }) {
   const subLabels = {
     tv: 'Shows',
@@ -592,6 +734,24 @@ function renderDesktopHome({
       trailerPlaying: state.heroTrailerPlaying,
       trailerMuted: state.heroTrailerMuted,
     })}
+
+    ${renderStudioHubStrip(state.activeHub)}
+
+    ${
+      activeHubMeta && activeHubItems?.length
+        ? renderShelf({
+            id: 'dk-hub-focus',
+            title: `${activeHubMeta.title} • ${activeHubMeta.sub}`,
+            items: activeHubItems.slice(0, 24),
+            kind: 'dk-wide',
+            top10Indices: new Set([0, 1]),
+            recentIndices: new Set([0, 2, 3]),
+            myListSet,
+            likedSet,
+            progressMap,
+          })
+        : ''
+    }
 
     ${
       continueEntries.length > 0
@@ -822,6 +982,11 @@ function renderHomeTab() {
     : state.catalog.filter((x) => x.mediaType === 'anime')
   ).filter(matchesFilter);
 
+  const activeHubMeta = state.activeHub !== 'all' ? STUDIO_HUBS.find((h) => h.id === state.activeHub) : null;
+  const activeHubItems = activeHubMeta
+    ? (state.hubItems.length ? state.hubItems : getHubFilteredItems(state.activeHub, pool)).filter(matchesFilter)
+    : [];
+
   if (isDesktopMode()) {
     return renderDesktopHome({
       spotlightList,
@@ -835,6 +1000,8 @@ function renderHomeTab() {
       myListSet,
       likedSet: getCollectionSet(LIKED_COLLECTION_ID),
       progressMap: state.progressMap,
+      activeHubItems,
+      activeHubMeta,
     });
   }
 
@@ -881,6 +1048,20 @@ function renderHomeTab() {
     </div>
 
     ${renderAndroidBillboard(spotlightList, state.heroIndex, { myListSet })}
+
+    ${renderStudioHubStrip(state.activeHub)}
+
+    ${
+      activeHubMeta && activeHubItems.length > 0
+        ? renderShelf({
+            id: 'mob-hub-focus',
+            title: `${activeHubMeta.title} • ${activeHubMeta.sub}`,
+            items: activeHubItems.slice(0, 22),
+            top10Indices: new Set([0, 1]),
+            recentIndices: new Set([0, 2]),
+          })
+        : ''
+    }
 
     ${
       continueEntries.length > 0
@@ -1598,21 +1779,87 @@ function applySandboxAttr(iframe) {
   }
 }
 
+function renderPlayerEpisodesDrawer(item) {
+  if (!state.playerEpisodesOpen || !item || (item.mediaType !== 'tv' && item.mediaType !== 'anime')) {
+    return '';
+  }
+  const key = getMediaKey(item);
+  const seasons =
+    item.mediaType === 'tv'
+      ? state.seasonsCache.get(String(item.tmdbId || item.imdbId)) ||
+        item.seasonsList || [{ seasonNumber: 1, name: 'Season 1', episodeCount: item.totalEpisodes || 10 }]
+      : [];
+  const seasonObj =
+    seasons.find((s) => s.seasonNumber === state.activeSeason) ||
+    seasons[0] || { seasonNumber: 1, name: 'Season 1', episodeCount: item.totalEpisodes || 12 };
+  const epList =
+    Array.isArray(seasonObj.episodes) && seasonObj.episodes.length
+      ? seasonObj.episodes
+      : Array.from({ length: Math.min(seasonObj.episodeCount || item.totalEpisodes || 12, 48) }, (_, i) => ({
+          episode: i + 1,
+          name: `Episode ${i + 1}`,
+        }));
+
+  return `<aside class="player-ep-drawer" aria-label="Episodes Drawer">
+    <div style="display:flex;align-items:center;justify-content:space-between;">
+      <strong style="font-size:15px;">Episodes</strong>
+      <button type="button" class="icon-btn" id="toggle-player-ep-drawer-btn" aria-label="Close Episodes Drawer" style="width:30px;height:30px;">
+        ${svgIcon('close', 16)}
+      </button>
+    </div>
+    ${
+      item.mediaType === 'tv' && seasons.length > 0
+        ? `<select class="field-select" id="player-ep-season-select">
+            ${seasons
+              .map(
+                (s) => `<option value="${s.seasonNumber}" ${
+                  s.seasonNumber === state.activeSeason ? 'selected' : ''
+                }>${escapeHtml(s.name)}</option>`
+              )
+              .join('')}
+          </select>`
+        : ''
+    }
+    <div style="display:flex;flex-direction:column;gap:6px;">
+      ${epList
+        .map((ep) => {
+          const isCurr = ep.episode === state.activeEpisode;
+          return `<button type="button" class="dk-ep-item" style="padding:8px;${
+            isCurr ? 'background:rgba(255,255,255,0.14);' : ''
+          }" data-play-episode="${ep.episode}" data-ep-key="${escapeHtml(key)}">
+            <span class="dk-ep-num" style="font-size:14px;">${ep.episode}</span>
+            <div class="dk-ep-text">
+              <div style="font-size:13px;font-weight:600;color:#fff;">${escapeHtml(
+                ep.name || `Episode ${ep.episode}`
+              )}</div>
+            </div>
+          </button>`;
+        })
+        .join('')}
+    </div>
+  </aside>`;
+}
+
 function syncPlayerMount({ forceReload = false } = {}) {
   const mount = document.getElementById('player-mount');
   if (!mount) return;
   if (!state.playerOpen || !state.activeItem) {
+    destroyHlsInstance();
     mount.innerHTML = '';
     return;
   }
 
   const embedUrl = getCurrentEmbedUrl();
   const item = state.activeItem;
+  const isHls = item.mediaType === 'hls';
   const provider = state.prefs.playerProvider || 'vidlink';
   const isSandboxed = provider !== 'vidrift-direct' && state.shield.strictFrameMode;
   const existingFrame = document.getElementById('vidrift-player');
+  const existingVideo = document.getElementById('hls-video-player');
+  const modeMismatch = (isHls && !existingVideo) || (!isHls && !existingFrame);
 
-  if (!existingFrame) {
+  if (modeMismatch || forceReload) {
+    destroyHlsInstance();
     mount.innerHTML = `<section class="player-fullscreen" aria-label="Suno Cinema Player">
       <div class="player-top-bar">
         <div style="display:flex;align-items:center;gap:8px;min-width:0;">
@@ -1628,57 +1875,104 @@ function syncPlayerMount({ forceReload = false } = {}) {
                 ? `Season ${state.activeSeason} • Episode ${state.activeEpisode}`
                 : item.mediaType === 'anime'
                 ? `Episode ${state.activeEpisode}`
+                : isHls
+                ? 'Direct HLS / MP4 Stream'
                 : 'HD Stream'
             }</div>
           </div>
         </div>
-        <button type="button" class="shield-pill ${isSandboxed ? '' : 'is-warn'}" id="toggle-strict-shield-btn">
-          ${svgIcon('shield', 13)}
-          <span>${isSandboxed ? 'No-Redirect ON' : 'Sandbox OFF'}</span>
-        </button>
+        <div style="display:flex;align-items:center;gap:8px;">
+          ${
+            item.mediaType === 'tv' || item.mediaType === 'anime'
+              ? `<button type="button" class="outline-chip ${
+                  state.playerEpisodesOpen ? 'is-active' : ''
+                }" id="toggle-player-ep-drawer-btn" style="height:28px;font-size:11px;">
+                  Episodes
+                </button>`
+              : ''
+          }
+          ${
+            isHls
+              ? `<span class="shield-pill">${svgIcon('shield', 13)}<span>Native HLS</span></span>`
+              : `<button type="button" class="shield-pill ${isSandboxed ? '' : 'is-warn'}" id="toggle-strict-shield-btn">
+                  ${svgIcon('shield', 13)}
+                  <span>${isSandboxed ? 'No-Redirect ON' : 'Sandbox OFF'}</span>
+                </button>`
+          }
+        </div>
       </div>
 
-      <div class="player-frame-box">
-        <iframe
-          id="vidrift-player"
-          src="${escapeHtml(embedUrl)}"
-          title="${escapeHtml(item.title)}"
-          allow="autoplay; fullscreen; picture-in-picture; encrypted-media"
-          allowfullscreen
-          referrerpolicy="strict-origin-when-cross-origin"
-        ></iframe>
+      <div class="player-frame-box" id="player-frame-box">
+        ${
+          isHls
+            ? `<video id="hls-video-player" controls playsinline autoplay></video>`
+            : `<iframe
+                id="vidrift-player"
+                src="${escapeHtml(embedUrl)}"
+                title="${escapeHtml(item.title)}"
+                allow="autoplay; fullscreen; picture-in-picture; encrypted-media"
+                allowfullscreen
+                referrerpolicy="strict-origin-when-cross-origin"
+              ></iframe>`
+        }
+        ${renderPlayerEpisodesDrawer(item)}
       </div>
 
       <div class="player-bottom-strip" id="player-bottom-strip"></div>
     </section>`;
 
-    const frame = document.getElementById('vidrift-player');
-    if (frame) {
-      frame.dataset.embedUrl = embedUrl;
-      applySandboxAttr(frame);
+    if (isHls) {
+      const videoEl = document.getElementById('hls-video-player');
+      attachDirectVideoStream(videoEl, embedUrl, item);
+      if (videoEl) videoEl.dataset.embedUrl = embedUrl;
+    } else {
+      const frame = document.getElementById('vidrift-player');
+      if (frame) {
+        frame.dataset.embedUrl = embedUrl;
+        applySandboxAttr(frame);
+      }
     }
   } else {
-    const prevSandbox = existingFrame.hasAttribute('sandbox');
-    applySandboxAttr(existingFrame);
-    if (forceReload || existingFrame.dataset.embedUrl !== embedUrl || prevSandbox !== isSandboxed) {
-      existingFrame.src = embedUrl;
-      existingFrame.dataset.embedUrl = embedUrl;
+    if (!isHls && existingFrame) {
+      const prevSandbox = existingFrame.hasAttribute('sandbox');
+      applySandboxAttr(existingFrame);
+      if (existingFrame.dataset.embedUrl !== embedUrl || prevSandbox !== isSandboxed) {
+        existingFrame.src = embedUrl;
+        existingFrame.dataset.embedUrl = embedUrl;
+      }
+    } else if (isHls && existingVideo && existingVideo.dataset.embedUrl !== embedUrl) {
+      existingVideo.dataset.embedUrl = embedUrl;
+      attachDirectVideoStream(existingVideo, embedUrl, item);
     }
+
+    const box = document.getElementById('player-frame-box');
+    if (box) {
+      const prevDrawer = box.querySelector('.player-ep-drawer');
+      if (prevDrawer) prevDrawer.remove();
+      const drawerHtml = renderPlayerEpisodesDrawer(item);
+      if (drawerHtml) box.insertAdjacentHTML('beforeend', drawerHtml);
+    }
+    const epToggle = document.getElementById('toggle-player-ep-drawer-btn');
+    if (epToggle) epToggle.classList.toggle('is-active', Boolean(state.playerEpisodesOpen));
   }
 
   const strip = document.getElementById('player-bottom-strip');
   if (strip) {
     const saved = state.progressMap[getMediaKey(item)];
     strip.innerHTML = `<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
-      ${PLAYER_PROVIDERS.map(
-        (p) => `<button type="button" class="outline-chip ${
-          provider === p.id ? 'is-active' : ''
-        }" data-switch-provider="${p.id}" style="height:30px;padding:0 10px;font-size:11px;">${escapeHtml(
-          p.label
-        )}</button>`
-      ).join('')}
       ${
-        saved?.currentTime > 15 && provider !== 'vidlink'
+        isHls
+          ? `<span class="dim" style="font-size:12px;">Playing authorized HTTPS stream natively</span>`
+          : PLAYER_PROVIDERS.map(
+              (p) => `<button type="button" class="outline-chip ${
+                provider === p.id ? 'is-active' : ''
+              }" data-switch-provider="${p.id}" style="height:30px;padding:0 10px;font-size:11px;">${escapeHtml(
+                p.label
+              )}</button>`
+            ).join('')
+      }
+      ${
+        saved?.currentTime > 15 && provider !== 'vidlink' && !isHls
           ? `<button type="button" class="outline-chip" id="cmd-resume-btn" style="height:30px;font-size:11px;">Resume ${formatTime(
               saved.currentTime
             )}</button>`
@@ -1689,7 +1983,7 @@ function syncPlayerMount({ forceReload = false } = {}) {
         12
       )} Reload</button>
       ${
-        item.mediaType !== 'movie'
+        item.mediaType !== 'movie' && !isHls
           ? `<button type="button" class="outline-chip" id="next-ep-btn" style="height:30px;font-size:11px;">Next Ep ${svgIcon(
               'next',
               12
@@ -1873,6 +2167,24 @@ async function runSearch(query) {
   }
 }
 
+function buildDirectStreamItem(parsed, customTitle = '') {
+  if (parsed.mediaType === 'hls') {
+    return {
+      id: `hls:${parsed.hlsUrl}`,
+      mediaType: 'hls',
+      hlsUrl: parsed.hlsUrl,
+      title: customTitle || `Direct ${parsed.format.toUpperCase()} Stream`,
+    };
+  }
+  return {
+    id: `${parsed.mediaType}:${parsed.tmdbId || parsed.anilistId}`,
+    tmdbId: parsed.tmdbId,
+    anilistId: parsed.anilistId,
+    mediaType: parsed.mediaType,
+    title: customTitle || `${parsed.mediaType.toUpperCase()} #${parsed.tmdbId || parsed.anilistId}`,
+  };
+}
+
 function bindEvents() {
   rootEl.addEventListener('click', (e) => {
     const target = e.target;
@@ -1963,6 +2275,20 @@ function bindEvents() {
       state.heroIndex = (state.heroIndex + Number(heroStep.dataset.heroStep) + 8) % 8;
       state.heroTrailerPlaying = false;
       render();
+      return;
+    }
+
+    const heroSetBtn = target.closest('[data-hero-set]');
+    if (heroSetBtn) {
+      state.heroIndex = Number(heroSetBtn.dataset.heroSet) || 0;
+      state.heroTrailerPlaying = false;
+      render();
+      return;
+    }
+
+    const pickHubBtn = target.closest('[data-pick-hub]');
+    if (pickHubBtn) {
+      selectStudioHub(pickHubBtn.dataset.pickHub);
       return;
     }
 
@@ -2201,24 +2527,22 @@ function bindEvents() {
     if (target.closest('[data-launch-direct="true"]')) {
       const parsed = parseDirectTarget(state.searchQuery);
       if (parsed) {
-        launchStream(
-          {
-            id: `${parsed.mediaType}:${parsed.tmdbId || parsed.anilistId}`,
-            tmdbId: parsed.tmdbId,
-            anilistId: parsed.anilistId,
-            mediaType: parsed.mediaType,
-            title: `${parsed.mediaType.toUpperCase()} #${parsed.tmdbId || parsed.anilistId}`,
-          },
-          { season: parsed.season || 1, episode: parsed.episode || 1 }
-        );
+        launchStream(buildDirectStreamItem(parsed), { season: parsed.season || 1, episode: parsed.episode || 1 });
       }
       return;
     }
 
     // Player controls
     if (target.closest('#close-player-btn')) {
+      destroyHlsInstance();
       state.playerOpen = false;
+      state.playerEpisodesOpen = false;
       antiRedirectGuard.setTheaterActive(false);
+      render();
+      return;
+    }
+    if (target.closest('#toggle-player-ep-drawer-btn')) {
+      state.playerEpisodesOpen = !state.playerEpisodesOpen;
       render();
       return;
     }
@@ -2302,9 +2626,9 @@ function bindEvents() {
 
   rootEl.addEventListener('change', (e) => {
     const t = e.target;
-    if (t.id === 'detail-season-select') {
+    if (t.id === 'detail-season-select' || t.id === 'player-ep-season-select') {
       state.activeSeason = Number(t.value) || 1;
-      state.activeEpisode = 1;
+      if (t.id === 'detail-season-select') state.activeEpisode = 1;
       render();
       return;
     }
@@ -2382,20 +2706,14 @@ function bindEvents() {
       const customTitle = (document.getElementById('ql-title')?.value || '').trim();
       const parsed = parseDirectTarget(raw, fallbackType);
       if (!parsed) {
-        showToast('Enter a valid TMDB/AniList ID or URL');
+        showToast('Enter a valid TMDB/AniList ID or https:// stream URL');
         return;
       }
       state.modal = null;
-      launchStream(
-        {
-          id: `${parsed.mediaType}:${parsed.tmdbId || parsed.anilistId}`,
-          tmdbId: parsed.tmdbId,
-          anilistId: parsed.anilistId,
-          mediaType: parsed.mediaType,
-          title: customTitle || `${parsed.mediaType.toUpperCase()} #${parsed.tmdbId || parsed.anilistId}`,
-        },
-        { season: parsed.season || 1, episode: parsed.episode || 1 }
-      );
+      launchStream(buildDirectStreamItem(parsed, customTitle), {
+        season: parsed.season || 1,
+        episode: parsed.episode || 1,
+      });
     }
   });
 

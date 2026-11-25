@@ -46,6 +46,21 @@ export function computeMatchPercent(item) {
   return 88 + (seed % 11);
 }
 
+export function computeContinueLabel(item, progress) {
+  if (!progress) return '';
+  if (item?.mediaType === 'tv' && (progress.season || progress.episode)) {
+    return `S${progress.season || 1}:E${progress.episode || 1}`;
+  }
+  if (item?.mediaType === 'anime' && progress.episode) {
+    return `Ep ${progress.episode}`;
+  }
+  if (progress.duration > 0 && progress.currentTime > 0) {
+    const pct = Math.min(98, Math.max(5, Math.round((progress.currentTime / progress.duration) * 100)));
+    return `${pct}%`;
+  }
+  return progress.currentTime > 0 ? `${formatTime(progress.currentTime)}` : '';
+}
+
 function renderTop10RankSvg(rank) {
   const wide = rank >= 10;
   const vbWidth = wide ? 142 : 96;
@@ -108,6 +123,7 @@ export function renderDesktopWideCard(
   const tags = [...(item.genres || []).slice(0, 3), item.year].filter(Boolean);
   const matchPct = computeMatchPercent(item);
   const showSplit = splitBadge || Boolean(progress?.badge);
+  const cwLabel = computeContinueLabel(item, progress);
 
   return `<article class="dk-card" data-open-detail="${escapeHtml(key)}">
     <div class="dk-card-media">
@@ -117,6 +133,7 @@ export function renderDesktopWideCard(
   )} />
       <div class="dk-card-scrim"></div>
       ${top10 ? `<span class="nf-top10-tag">TOP<br/>10</span>` : ''}
+      ${cwLabel ? `<span class="dk-cw-tag">${escapeHtml(cwLabel)}</span>` : ''}
       ${
         showSplit
           ? `<div class="dk-badge-split"><span class="is-red">New Episode</span><span class="is-white">Watch Now</span></div>`
