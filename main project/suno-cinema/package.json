@@ -1,0 +1,20 @@
+{
+  "name": "suno-cinema",
+  "version": "1.0.0",
+  "description": "Suno Cinema — a Suno Product bridging music listening to movie, series, and anime streaming via VidRift.",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test test/*.test.js"
+  },
+  "keywords": [
+    "suno",
+    "cinema",
+    "vidrift",
+    "movies",
+    "streaming",
+    "soundtrack",
+    "music-to-film"
+  ],
+  "license": "MIT"
+}
