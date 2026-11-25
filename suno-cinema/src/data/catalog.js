@@ -1,5 +1,944 @@
 export const CATALOG_ITEMS = [
   {
+    "id": "movie:26815",
+    "tmdbId": "26815",
+    "imdbId": "tt1434447",
+    "mediaType": "movie",
+    "title": "Rocket Singh: Salesman of the Year",
+    "year": "2009",
+    "creator": "Shimit Amin",
+    "cast": [
+      "Ranbir Kapoor",
+      "Prem Chopra",
+      "Mukesh S. Bhatt"
+    ],
+    "runtime": "156 min",
+    "rating": "7.5",
+    "genres": [
+      "Comedy",
+      "Drama"
+    ],
+    "country": "India",
+    "regionTag": "india",
+    "overview": "A story of a fresh graduate trying to find a balance between the maddening demands of the 'professional' way, and the way of his heart.",
+    "poster": "https://images.metahub.space/poster/small/tt1434447/img",
+    "backdrop": "https://images.metahub.space/background/medium/tt1434447/img",
+    "logo": "https://images.metahub.space/logo/medium/tt1434447/img",
+    "trailerId": "",
+    "palette": [
+      "#e50914",
+      "#ff0033",
+      "#111114"
+    ],
+    "sonic": {
+      "moodId": "indie-tape",
+      "bpm": 96,
+      "texture": "Cinema Score & Soundtrack",
+      "listenBefore": "A.R. Rahman, Pritam, Anirudh, or Amit Trivedi",
+      "cooldownCue": "Warm late-night acoustic reprise",
+      "vector": {
+        "pulse": 0.68,
+        "nocturne": 0.72,
+        "warmth": 0.74,
+        "scale": 0.72,
+        "tension": 0.64
+      }
+    }
+  },
+  {
+    "id": "movie:1163194",
+    "tmdbId": "1163194",
+    "imdbId": "tt21626284",
+    "mediaType": "movie",
+    "title": "Laapataa Ladies",
+    "year": "2024",
+    "creator": "Kiran Rao",
+    "cast": [
+      "Nitanshi Goel",
+      "Pratibha Ranta",
+      "Sparsh Shrivastava"
+    ],
+    "runtime": "123 min",
+    "rating": "8.3",
+    "genres": [
+      "Comedy",
+      "Drama"
+    ],
+    "country": "India",
+    "regionTag": "india",
+    "overview": "The misadventures of two young brides who get lost from the same train. From mistaken identities to laugh-out-aloud escapades, the ensuing chaos guarantees laughter galore and heartwarming moments.",
+    "poster": "https://images.metahub.space/poster/small/tt21626284/img",
+    "backdrop": "https://images.metahub.space/background/medium/tt21626284/img",
+    "logo": "https://images.metahub.space/logo/medium/tt21626284/img",
+    "trailerId": "hGM87LCJxRc",
+    "palette": [
+      "#e50914",
+      "#ff0033",
+      "#111114"
+    ],
+    "sonic": {
+      "moodId": "indie-tape",
+      "bpm": 96,
+      "texture": "Cinema Score & Soundtrack",
+      "listenBefore": "A.R. Rahman, Pritam, Anirudh, or Amit Trivedi",
+      "cooldownCue": "Warm late-night acoustic reprise",
+      "vector": {
+        "pulse": 0.68,
+        "nocturne": 0.72,
+        "warmth": 0.74,
+        "scale": 0.72,
+        "tension": 0.64
+      }
+    }
+  },
+  {
+    "id": "movie:1239511",
+    "tmdbId": "1239511",
+    "imdbId": "tt27540542",
+    "mediaType": "movie",
+    "title": "Lucky Baskhar",
+    "year": "2024",
+    "creator": "Venky Atluri",
+    "cast": [
+      "Dulquer Salmaan",
+      "Meenaakshi Chaudhary",
+      "Tinnu Anand"
+    ],
+    "runtime": "151 min",
+    "rating": "8.0",
+    "genres": [
+      "Crime",
+      "Drama",
+      "Thriller"
+    ],
+    "country": "India",
+    "regionTag": "south-india",
+    "overview": "A cash-strapped cashier working at a bank embarks on a risky investment scheme and soon gets drawn into the murky world of money laundering.",
+    "poster": "https://images.metahub.space/poster/small/tt27540542/img",
+    "backdrop": "https://images.metahub.space/background/medium/tt27540542/img",
+    "logo": "https://images.metahub.space/logo/medium/tt27540542/img",
+    "trailerId": "Kv5RKsqVe-Y",
+    "palette": [
+      "#e50914",
+      "#ff0033",
+      "#111114"
+    ],
+    "sonic": {
+      "moodId": "indie-tape",
+      "bpm": 96,
+      "texture": "Cinema Score & Soundtrack",
+      "listenBefore": "A.R. Rahman, Pritam, Anirudh, or Amit Trivedi",
+      "cooldownCue": "Warm late-night acoustic reprise",
+      "vector": {
+        "pulse": 0.68,
+        "nocturne": 0.72,
+        "warmth": 0.74,
+        "scale": 0.72,
+        "tension": 0.64
+      }
+    }
+  },
+  {
+    "id": "movie:102382",
+    "tmdbId": "102382",
+    "imdbId": "tt1872181",
+    "mediaType": "movie",
+    "title": "The Amazing Spider-Man 2",
+    "year": "2014",
+    "creator": "Marc Webb",
+    "cast": [
+      "Andrew Garfield",
+      "Emma Stone",
+      "Jamie Foxx"
+    ],
+    "runtime": "141 min",
+    "rating": "6.6",
+    "genres": [
+      "Action",
+      "Adventure",
+      "Sci-Fi"
+    ],
+    "country": "United States",
+    "regionTag": "global",
+    "overview": "When New York is put under siege by Oscorp, it is up to Spider-Man to save the city he swore to protect as well as his loved ones.",
+    "poster": "https://images.metahub.space/poster/small/tt1872181/img",
+    "backdrop": "https://images.metahub.space/background/medium/tt1872181/img",
+    "logo": "https://images.metahub.space/logo/medium/tt1872181/img",
+    "trailerId": "DlM2CWNTQ84",
+    "palette": [
+      "#e50914",
+      "#ff0033",
+      "#111114"
+    ],
+    "sonic": {
+      "moodId": "imax-sub",
+      "bpm": 96,
+      "texture": "Cinema Score & Soundtrack",
+      "listenBefore": "A.R. Rahman, Pritam, Anirudh, or Amit Trivedi",
+      "cooldownCue": "Warm late-night acoustic reprise",
+      "vector": {
+        "pulse": 0.68,
+        "nocturne": 0.72,
+        "warmth": 0.74,
+        "scale": 0.72,
+        "tension": 0.64
+      }
+    }
+  },
+  {
+    "id": "movie:1068452",
+    "tmdbId": "1068452",
+    "imdbId": "tt25433734",
+    "mediaType": "movie",
+    "title": "Hi Nanna",
+    "year": "2023",
+    "creator": "Shouryuv",
+    "cast": [
+      "Nani",
+      "Mrunal Thakur",
+      "Kiara Khanna"
+    ],
+    "runtime": "155 min",
+    "rating": "8.3",
+    "genres": [
+      "Drama",
+      "Family",
+      "Romance"
+    ],
+    "country": "India",
+    "regionTag": "south-india",
+    "overview": "A single father begins to narrate the story of the missing mother to his child and nothing remains the same.",
+    "poster": "https://images.metahub.space/poster/small/tt25433734/img",
+    "backdrop": "https://images.metahub.space/background/medium/tt25433734/img",
+    "logo": "https://images.metahub.space/logo/medium/tt25433734/img",
+    "trailerId": "3Ld05Om2UWs",
+    "palette": [
+      "#e50914",
+      "#ff0033",
+      "#111114"
+    ],
+    "sonic": {
+      "moodId": "indie-tape",
+      "bpm": 96,
+      "texture": "Cinema Score & Soundtrack",
+      "listenBefore": "A.R. Rahman, Pritam, Anirudh, or Amit Trivedi",
+      "cooldownCue": "Warm late-night acoustic reprise",
+      "vector": {
+        "pulse": 0.68,
+        "nocturne": 0.72,
+        "warmth": 0.74,
+        "scale": 0.72,
+        "tension": 0.64
+      }
+    }
+  },
+  {
+    "id": "movie:579974",
+    "tmdbId": "579974",
+    "imdbId": "tt8178634",
+    "mediaType": "movie",
+    "title": "RRR",
+    "year": "2022",
+    "creator": "S.S. Rajamouli",
+    "cast": [
+      "N.T. Rama Rao Jr.",
+      "Ram Charan",
+      "Ajay Devgn"
+    ],
+    "runtime": "187 min",
+    "rating": "7.8",
+    "genres": [
+      "Action",
+      "Adventure",
+      "Drama"
+    ],
+    "country": "India",
+    "regionTag": "south-india",
+    "overview": "A fearless warrior on a perilous mission comes face to face with a steely cop serving British forces in this epic saga set in pre-independent India.",
+    "poster": "https://images.metahub.space/poster/small/tt8178634/img",
+    "backdrop": "https://images.metahub.space/background/medium/tt8178634/img",
+    "logo": "https://images.metahub.space/logo/medium/tt8178634/img",
+    "trailerId": "i4pjiLGUTtk",
+    "palette": [
+      "#e50914",
+      "#ff0033",
+      "#111114"
+    ],
+    "sonic": {
+      "moodId": "indie-tape",
+      "bpm": 96,
+      "texture": "Cinema Score & Soundtrack",
+      "listenBefore": "A.R. Rahman, Pritam, Anirudh, or Amit Trivedi",
+      "cooldownCue": "Warm late-night acoustic reprise",
+      "vector": {
+        "pulse": 0.68,
+        "nocturne": 0.72,
+        "warmth": 0.74,
+        "scale": 0.72,
+        "tension": 0.64
+      }
+    }
+  },
+  {
+    "id": "movie:858485",
+    "tmdbId": "858485",
+    "imdbId": "tt15327088",
+    "mediaType": "movie",
+    "title": "Kantara",
+    "year": "2022",
+    "creator": "Rishab Shetty",
+    "cast": [
+      "Rishab Shetty",
+      "Kishore Kumar G.",
+      "Achyuth Kumar"
+    ],
+    "runtime": "147 min",
+    "rating": "8.1",
+    "genres": [
+      "Action",
+      "Adventure",
+      "Drama"
+    ],
+    "country": "India",
+    "regionTag": "south-india",
+    "overview": "When greed paves the way for betrayal, scheming and murder, a young tribal reluctantly dons the traditions of his ancestors to seek justice.",
+    "poster": "https://images.metahub.space/poster/small/tt15327088/img",
+    "backdrop": "https://images.metahub.space/background/medium/tt15327088/img",
+    "logo": "https://images.metahub.space/logo/medium/tt15327088/img",
+    "trailerId": "",
+    "palette": [
+      "#e50914",
+      "#ff0033",
+      "#111114"
+    ],
+    "sonic": {
+      "moodId": "indie-tape",
+      "bpm": 96,
+      "texture": "Cinema Score & Soundtrack",
+      "listenBefore": "A.R. Rahman, Pritam, Anirudh, or Amit Trivedi",
+      "cooldownCue": "Warm late-night acoustic reprise",
+      "vector": {
+        "pulse": 0.68,
+        "nocturne": 0.72,
+        "warmth": 0.74,
+        "scale": 0.72,
+        "tension": 0.64
+      }
+    }
+  },
+  {
+    "id": "movie:743563",
+    "tmdbId": "743563",
+    "imdbId": "tt9179430",
+    "mediaType": "movie",
+    "title": "Vikram",
+    "year": "2022",
+    "creator": "Lokesh Kanagaraj",
+    "cast": [
+      "Kamal Haasan",
+      "Vijay Sethupathi",
+      "Fahadh Faasil"
+    ],
+    "runtime": "174 min",
+    "rating": "8.3",
+    "genres": [
+      "Action",
+      "Crime",
+      "Mystery"
+    ],
+    "country": "India",
+    "regionTag": "south-india",
+    "overview": "A covert investigation changes its course when special officer Amar encounters an unrelenting Vikram and his pursuit to take down a notorious drug cartel.",
+    "poster": "https://images.metahub.space/poster/small/tt9179430/img",
+    "backdrop": "https://images.metahub.space/background/medium/tt9179430/img",
+    "logo": "https://images.metahub.space/logo/medium/tt9179430/img",
+    "trailerId": "jJf35tEkW9E",
+    "palette": [
+      "#e50914",
+      "#ff0033",
+      "#111114"
+    ],
+    "sonic": {
+      "moodId": "imax-sub",
+      "bpm": 96,
+      "texture": "Cinema Score & Soundtrack",
+      "listenBefore": "A.R. Rahman, Pritam, Anirudh, or Amit Trivedi",
+      "cooldownCue": "Warm late-night acoustic reprise",
+      "vector": {
+        "pulse": 0.68,
+        "nocturne": 0.72,
+        "warmth": 0.74,
+        "scale": 0.72,
+        "tension": 0.64
+      }
+    }
+  },
+  {
+    "id": "movie:1118224",
+    "tmdbId": "1118224",
+    "imdbId": "tt26548265",
+    "mediaType": "movie",
+    "title": "Maharaja",
+    "year": "2024",
+    "creator": "R. Nandhakumar, Nithilan Saminathan, T. Suresh",
+    "cast": [
+      "Vijay Sethupathi",
+      "Anurag Kashyap",
+      "Mamta Mohandas"
+    ],
+    "runtime": "141 min",
+    "rating": "8.3",
+    "genres": [
+      "Action",
+      "Crime",
+      "Drama"
+    ],
+    "country": "India",
+    "regionTag": "south-india",
+    "overview": "A barber seeks vengeance after his home is burglarized, cryptically telling police his \"lakshmi\" has been taken, leaving them uncertain if it's a person or object. His quest to recover the elusive \"lakshmi\" unfolds.",
+    "poster": "https://images.metahub.space/poster/small/tt26548265/img",
+    "backdrop": "https://images.metahub.space/background/medium/tt26548265/img",
+    "logo": "https://images.metahub.space/logo/medium/tt26548265/img",
+    "trailerId": "Otcr-vRuaQs",
+    "palette": [
+      "#e50914",
+      "#ff0033",
+      "#111114"
+    ],
+    "sonic": {
+      "moodId": "indie-tape",
+      "bpm": 96,
+      "texture": "Cinema Score & Soundtrack",
+      "listenBefore": "A.R. Rahman, Pritam, Anirudh, or Amit Trivedi",
+      "cooldownCue": "Warm late-night acoustic reprise",
+      "vector": {
+        "pulse": 0.68,
+        "nocturne": 0.72,
+        "warmth": 0.74,
+        "scale": 0.72,
+        "tension": 0.64
+      }
+    }
+  },
+  {
+    "id": "movie:801688",
+    "tmdbId": "801688",
+    "imdbId": "tt12735488",
+    "mediaType": "movie",
+    "title": "Kalki 2898 AD",
+    "year": "2024",
+    "creator": "Nag Ashwin",
+    "cast": [
+      "Prabhas",
+      "Amitabh Bachchan",
+      "Kamal Haasan"
+    ],
+    "runtime": "176 min",
+    "rating": "7.0",
+    "genres": [
+      "Action",
+      "Adventure",
+      "Fantasy"
+    ],
+    "country": "India",
+    "regionTag": "south-india",
+    "overview": "A pregnant woman comes under the protection of an immortal warrior while being tracked down by bounty hunters.",
+    "poster": "https://images.metahub.space/poster/small/tt12735488/img",
+    "backdrop": "https://images.metahub.space/background/medium/tt12735488/img",
+    "logo": "https://images.metahub.space/logo/medium/tt12735488/img",
+    "trailerId": "rn7tdg6cpW4",
+    "palette": [
+      "#e50914",
+      "#ff0033",
+      "#111114"
+    ],
+    "sonic": {
+      "moodId": "imax-sub",
+      "bpm": 96,
+      "texture": "Cinema Score & Soundtrack",
+      "listenBefore": "A.R. Rahman, Pritam, Anirudh, or Amit Trivedi",
+      "cooldownCue": "Warm late-night acoustic reprise",
+      "vector": {
+        "pulse": 0.68,
+        "nocturne": 0.72,
+        "warmth": 0.74,
+        "scale": 0.72,
+        "tension": 0.64
+      }
+    }
+  },
+  {
+    "id": "movie:1163258",
+    "tmdbId": "1163258",
+    "imdbId": "tt23849204",
+    "mediaType": "movie",
+    "title": "12th Fail",
+    "year": "2023",
+    "creator": "Vidhu Vinod Chopra",
+    "cast": [
+      "Vikrant Massey",
+      "Harish Khanna",
+      "Geeta Agrawal Sharma"
+    ],
+    "runtime": "146 min",
+    "rating": "8.7",
+    "genres": [
+      "Biography",
+      "Drama"
+    ],
+    "country": "India",
+    "regionTag": "india",
+    "overview": "The real-life story of IPS Officer Manoj Kumar Sharma and IRS Officer Shraddha Joshi.",
+    "poster": "https://images.metahub.space/poster/small/tt23849204/img",
+    "backdrop": "https://images.metahub.space/background/medium/tt23849204/img",
+    "logo": "https://images.metahub.space/logo/medium/tt23849204/img",
+    "trailerId": "KjbtuqENvVE",
+    "palette": [
+      "#e50914",
+      "#ff0033",
+      "#111114"
+    ],
+    "sonic": {
+      "moodId": "indie-tape",
+      "bpm": 96,
+      "texture": "Cinema Score & Soundtrack",
+      "listenBefore": "A.R. Rahman, Pritam, Anirudh, or Amit Trivedi",
+      "cooldownCue": "Warm late-night acoustic reprise",
+      "vector": {
+        "pulse": 0.68,
+        "nocturne": 0.72,
+        "warmth": 0.74,
+        "scale": 0.72,
+        "tension": 0.64
+      }
+    }
+  },
+  {
+    "id": "movie:20453",
+    "tmdbId": "20453",
+    "imdbId": "tt1187043",
+    "mediaType": "movie",
+    "title": "3 Idiots",
+    "year": "2009",
+    "creator": "Rajkumar Hirani",
+    "cast": [
+      "Aamir Khan",
+      "Madhavan",
+      "Mona Singh"
+    ],
+    "runtime": "171 min",
+    "rating": "8.4",
+    "genres": [
+      "Comedy",
+      "Drama"
+    ],
+    "country": "India",
+    "regionTag": "india",
+    "overview": "Two friends search for a brilliant, free-spirited classmate whose unconventional approach to engineering school changed their lives and challenged a rigid education system.",
+    "poster": "https://images.metahub.space/poster/small/tt1187043/img",
+    "backdrop": "https://images.metahub.space/background/medium/tt1187043/img",
+    "logo": "https://images.metahub.space/logo/medium/tt1187043/img",
+    "trailerId": "zIKu9k50SDo",
+    "palette": [
+      "#e50914",
+      "#ff0033",
+      "#111114"
+    ],
+    "sonic": {
+      "moodId": "indie-tape",
+      "bpm": 96,
+      "texture": "Cinema Score & Soundtrack",
+      "listenBefore": "A.R. Rahman, Pritam, Anirudh, or Amit Trivedi",
+      "cooldownCue": "Warm late-night acoustic reprise",
+      "vector": {
+        "pulse": 0.68,
+        "nocturne": 0.72,
+        "warmth": 0.74,
+        "scale": 0.72,
+        "tension": 0.64
+      }
+    }
+  },
+  {
+    "id": "movie:538858",
+    "tmdbId": "538858",
+    "imdbId": "tt8239946",
+    "mediaType": "movie",
+    "title": "Tumbbad",
+    "year": "2018",
+    "creator": "Rahi Anil Barve, Anand Gandhi, Adesh Prasad",
+    "cast": [
+      "Sohum Shah",
+      "Jyoti Malshe",
+      "Dhundiraj Prabhakar Jogalekar"
+    ],
+    "runtime": "113 min",
+    "rating": "8.2",
+    "genres": [
+      "Drama",
+      "Fantasy",
+      "Horror"
+    ],
+    "country": "India, Sweden",
+    "regionTag": "india",
+    "overview": "A mythological story about a goddess who created the entire universe. The plot revolves around the consequences when humans build a temple for her first-born.",
+    "poster": "https://images.metahub.space/poster/small/tt8239946/img",
+    "backdrop": "https://images.metahub.space/background/medium/tt8239946/img",
+    "logo": "https://images.metahub.space/logo/medium/tt8239946/img",
+    "trailerId": "ZjuhALyNgss",
+    "palette": [
+      "#e50914",
+      "#ff0033",
+      "#111114"
+    ],
+    "sonic": {
+      "moodId": "indie-tape",
+      "bpm": 96,
+      "texture": "Cinema Score & Soundtrack",
+      "listenBefore": "A.R. Rahman, Pritam, Anirudh, or Amit Trivedi",
+      "cooldownCue": "Warm late-night acoustic reprise",
+      "vector": {
+        "pulse": 0.68,
+        "nocturne": 0.72,
+        "warmth": 0.74,
+        "scale": 0.72,
+        "tension": 0.64
+      }
+    }
+  },
+  {
+    "id": "movie:534780",
+    "tmdbId": "534780",
+    "imdbId": "tt8108198",
+    "mediaType": "movie",
+    "title": "Andhadhun",
+    "year": "2018",
+    "creator": "Sriram Raghavan",
+    "cast": [
+      "Ayushmann Khurrana",
+      "Tabu",
+      "Radhika Apte"
+    ],
+    "runtime": "139 min",
+    "rating": "8.2",
+    "genres": [
+      "Comedy",
+      "Crime",
+      "Mystery"
+    ],
+    "country": "India",
+    "regionTag": "india",
+    "overview": "A series of mysterious events change the life of a blind pianist, who must now report a crime that he should technically know nothing of.",
+    "poster": "https://images.metahub.space/poster/small/tt8108198/img",
+    "backdrop": "https://images.metahub.space/background/medium/tt8108198/img",
+    "logo": "https://images.metahub.space/logo/medium/tt8108198/img",
+    "trailerId": "2iVYI99VGaw",
+    "palette": [
+      "#e50914",
+      "#ff0033",
+      "#111114"
+    ],
+    "sonic": {
+      "moodId": "indie-tape",
+      "bpm": 96,
+      "texture": "Cinema Score & Soundtrack",
+      "listenBefore": "A.R. Rahman, Pritam, Anirudh, or Amit Trivedi",
+      "cooldownCue": "Warm late-night acoustic reprise",
+      "vector": {
+        "pulse": 0.68,
+        "nocturne": 0.72,
+        "warmth": 0.74,
+        "scale": 0.72,
+        "tension": 0.64
+      }
+    }
+  },
+  {
+    "id": "movie:894803",
+    "tmdbId": "894803",
+    "imdbId": "tt20850406",
+    "mediaType": "movie",
+    "title": "Sita Ramam",
+    "year": "2022",
+    "creator": "Hanu Raghavapudi",
+    "cast": [
+      "Dulquer Salmaan",
+      "Mrunal Thakur",
+      "Rashmika Mandanna"
+    ],
+    "runtime": "158 min",
+    "rating": "8.5",
+    "genres": [
+      "Action",
+      "Drama",
+      "Musical"
+    ],
+    "country": "India",
+    "regionTag": "south-india",
+    "overview": "A soldier receives a life-changing letter from a woman named Sita, leading to a beautiful romance. Their love story takes an unexpected turn when he returns to his military post in Kashmir and faces imprisonment.",
+    "poster": "https://images.metahub.space/poster/small/tt20850406/img",
+    "backdrop": "https://images.metahub.space/background/medium/tt20850406/img",
+    "logo": "https://images.metahub.space/logo/medium/tt20850406/img",
+    "trailerId": "e5GYNCvdXpw",
+    "palette": [
+      "#e50914",
+      "#ff0033",
+      "#111114"
+    ],
+    "sonic": {
+      "moodId": "indie-tape",
+      "bpm": 96,
+      "texture": "Cinema Score & Soundtrack",
+      "listenBefore": "A.R. Rahman, Pritam, Anirudh, or Amit Trivedi",
+      "cooldownCue": "Warm late-night acoustic reprise",
+      "vector": {
+        "pulse": 0.68,
+        "nocturne": 0.72,
+        "warmth": 0.74,
+        "scale": 0.72,
+        "tension": 0.64
+      }
+    }
+  },
+  {
+    "id": "tv:89113",
+    "tmdbId": "89113",
+    "imdbId": "tt9432978",
+    "mediaType": "tv",
+    "title": "Kota Factory",
+    "year": "2019",
+    "creator": "Series",
+    "cast": [
+      "Mayur More",
+      "Jitendra Kumar",
+      "Ranjan Raj"
+    ],
+    "runtime": "43 min",
+    "rating": "9.0",
+    "genres": [
+      "Comedy",
+      "Drama"
+    ],
+    "country": "India",
+    "regionTag": "india",
+    "overview": "In a city of coaching centers known to train India\u2019s finest collegiate minds, an earnest but unexceptional student and his friends navigate campus life.",
+    "poster": "https://images.metahub.space/poster/small/tt9432978/img",
+    "backdrop": "https://images.metahub.space/background/medium/tt9432978/img",
+    "logo": "https://images.metahub.space/logo/medium/tt9432978/img",
+    "trailerId": "pNZQ6msbOvM",
+    "totalEpisodes": 15,
+    "palette": [
+      "#e50914",
+      "#ff0033",
+      "#111114"
+    ],
+    "sonic": {
+      "moodId": "indie-tape",
+      "bpm": 96,
+      "texture": "Cinema Score & Soundtrack",
+      "listenBefore": "A.R. Rahman, Pritam, Anirudh, or Amit Trivedi",
+      "cooldownCue": "Warm late-night acoustic reprise",
+      "vector": {
+        "pulse": 0.68,
+        "nocturne": 0.72,
+        "warmth": 0.74,
+        "scale": 0.72,
+        "tension": 0.64
+      }
+    }
+  },
+  {
+    "id": "tv:101352",
+    "tmdbId": "101352",
+    "imdbId": "tt12004706",
+    "mediaType": "tv",
+    "title": "Panchayat",
+    "year": "2020",
+    "creator": "Series",
+    "cast": [
+      "Jitendra Kumar",
+      "Raghubir Yadav",
+      "Chandan Roy"
+    ],
+    "runtime": "36 min",
+    "rating": "9.0",
+    "genres": [
+      "Comedy",
+      "Drama"
+    ],
+    "country": "India",
+    "regionTag": "india",
+    "overview": "A comedy-drama, which captures the journey of an engineering graduate Abhishek, who for lack of a better job option joins as secretary of a Panchayat office in a remote village of Uttar Pradesh.",
+    "poster": "https://images.metahub.space/poster/small/tt12004706/img",
+    "backdrop": "https://images.metahub.space/background/medium/tt12004706/img",
+    "logo": "https://images.metahub.space/logo/medium/tt12004706/img",
+    "trailerId": "AHMEtNAZTP4",
+    "totalEpisodes": 40,
+    "palette": [
+      "#e50914",
+      "#ff0033",
+      "#111114"
+    ],
+    "sonic": {
+      "moodId": "indie-tape",
+      "bpm": 96,
+      "texture": "Cinema Score & Soundtrack",
+      "listenBefore": "A.R. Rahman, Pritam, Anirudh, or Amit Trivedi",
+      "cooldownCue": "Warm late-night acoustic reprise",
+      "vector": {
+        "pulse": 0.68,
+        "nocturne": 0.72,
+        "warmth": 0.74,
+        "scale": 0.72,
+        "tension": 0.64
+      }
+    }
+  },
+  {
+    "id": "tv:84105",
+    "tmdbId": "84105",
+    "imdbId": "tt6473300",
+    "mediaType": "tv",
+    "title": "Mirzapur",
+    "year": "2018",
+    "creator": "Series",
+    "cast": [
+      "Ali Fazal",
+      "Rasika Dugal",
+      "Shweta Tripathi"
+    ],
+    "runtime": "51 min",
+    "rating": "8.4",
+    "genres": [
+      "Action",
+      "Crime",
+      "Drama"
+    ],
+    "country": "India",
+    "regionTag": "india",
+    "overview": "A shocking incident at a wedding procession ignites a series of events entangling the lives of two families in the lawless city of Mirzapur.",
+    "poster": "https://images.metahub.space/poster/small/tt6473300/img",
+    "backdrop": "https://images.metahub.space/background/medium/tt6473300/img",
+    "logo": "https://images.metahub.space/logo/medium/tt6473300/img",
+    "trailerId": "33o3s4Vs4Sw",
+    "totalEpisodes": 30,
+    "palette": [
+      "#e50914",
+      "#ff0033",
+      "#111114"
+    ],
+    "sonic": {
+      "moodId": "indie-tape",
+      "bpm": 96,
+      "texture": "Cinema Score & Soundtrack",
+      "listenBefore": "A.R. Rahman, Pritam, Anirudh, or Amit Trivedi",
+      "cooldownCue": "Warm late-night acoustic reprise",
+      "vector": {
+        "pulse": 0.68,
+        "nocturne": 0.72,
+        "warmth": 0.74,
+        "scale": 0.72,
+        "tension": 0.64
+      }
+    }
+  },
+  {
+    "id": "tv:79352",
+    "tmdbId": "79352",
+    "imdbId": "tt6077448",
+    "mediaType": "tv",
+    "title": "Sacred Games",
+    "year": "2018",
+    "creator": "Series",
+    "cast": [
+      "Nawazuddin Siddiqui",
+      "Saif Ali Khan",
+      "Neeraj Kabi"
+    ],
+    "runtime": "50 min",
+    "rating": "8.5",
+    "genres": [
+      "Action",
+      "Crime",
+      "Drama"
+    ],
+    "country": "India, United States",
+    "regionTag": "india",
+    "overview": "A link in their pasts leads an honest cop to a fugitive gang boss, whose cryptic warning spurs the officer on a quest to save Mumbai from cataclysm.",
+    "poster": "https://images.metahub.space/poster/small/tt6077448/img",
+    "backdrop": "https://images.metahub.space/background/medium/tt6077448/img",
+    "logo": "https://images.metahub.space/logo/medium/tt6077448/img",
+    "trailerId": "w-Xe8gLBc5I",
+    "totalEpisodes": 16,
+    "palette": [
+      "#e50914",
+      "#ff0033",
+      "#111114"
+    ],
+    "sonic": {
+      "moodId": "indie-tape",
+      "bpm": 96,
+      "texture": "Cinema Score & Soundtrack",
+      "listenBefore": "A.R. Rahman, Pritam, Anirudh, or Amit Trivedi",
+      "cooldownCue": "Warm late-night acoustic reprise",
+      "vector": {
+        "pulse": 0.68,
+        "nocturne": 0.72,
+        "warmth": 0.74,
+        "scale": 0.72,
+        "tension": 0.64
+      }
+    }
+  },
+  {
+    "id": "tv:93352",
+    "tmdbId": "93352",
+    "imdbId": "tt9544034",
+    "mediaType": "tv",
+    "title": "The Family Man",
+    "year": "2019",
+    "creator": "Series",
+    "cast": [
+      "Manoj Bajpayee",
+      "Samantha Ruth Prabhu",
+      "Priyamani"
+    ],
+    "runtime": "48 min",
+    "rating": "8.6",
+    "genres": [
+      "Action",
+      "Comedy",
+      "Crime"
+    ],
+    "country": "India",
+    "regionTag": "india",
+    "overview": "A working man from the National Investigation Agency tries to protect the nation from terrorism, but he also needs to keep his family safe from his secret job.",
+    "poster": "https://images.metahub.space/poster/small/tt9544034/img",
+    "backdrop": "https://images.metahub.space/background/medium/tt9544034/img",
+    "logo": "https://images.metahub.space/logo/medium/tt9544034/img",
+    "trailerId": "jsauQx_Fwrg",
+    "totalEpisodes": 26,
+    "palette": [
+      "#e50914",
+      "#ff0033",
+      "#111114"
+    ],
+    "sonic": {
+      "moodId": "indie-tape",
+      "bpm": 96,
+      "texture": "Cinema Score & Soundtrack",
+      "listenBefore": "A.R. Rahman, Pritam, Anirudh, or Amit Trivedi",
+      "cooldownCue": "Warm late-night acoustic reprise",
+      "vector": {
+        "pulse": 0.68,
+        "nocturne": 0.72,
+        "warmth": 0.74,
+        "scale": 0.72,
+        "tension": 0.64
+      }
+    }
+  },
+  {
     "id": "movie:335984",
     "tmdbId": "335984",
     "mediaType": "movie",

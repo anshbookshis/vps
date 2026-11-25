@@ -1,53 +1,56 @@
 import {
-  SONIC_PROFILES,
-  SCORE_MOODS,
-  inferSonicProfileFromText,
-  buildAfterTrackMatches,
-} from './utils/sonic-engine.js';
-import {
   buildVidriftEmbedUrl,
   parseDirectTarget,
   parseVidriftMessage,
   buildVidriftCommand,
   VIDRIFT_ORIGIN,
 } from './utils/vidrift.js';
-import { sonicCurtain } from './utils/audio-curtain.js';
 import { antiRedirectGuard } from './utils/anti-redirect.js';
 import {
-  APPEARANCE_THEMES,
   LIKED_COLLECTION_ID,
+  MY_LIST_COLLECTION_ID,
   loadAppearanceSettings,
   saveAppearanceSettings,
   loadPlayerPrefs,
   savePlayerPrefs,
+  loadProfile,
+  saveProfile,
   getMediaKey,
   loadProgressMap,
   saveMediaProgress,
+  removeMediaProgress,
   loadCollections,
   saveCollections,
+  loadDownloads,
+  saveDownloads,
   loadSearchHistory,
   rememberSearch,
   forgetSearch,
 } from './utils/storage.js';
-import { svgIcon, renderWordmarkSvg } from './components/icons.js';
-import { mountFluidHalo } from './components/canvas-halo.js';
-import { buildCinemaFallbackArt } from './utils/poster-art.js';
+import {
+  svgIcon,
+  renderSunoRibbonSvg,
+  renderSunoMascotSvg,
+} from './components/icons.js';
 import {
   escapeHtml,
   resolveArtUrl,
   attachFallbackImgAttr,
   formatTime,
-  renderMediaCard,
+  renderPosterCard,
   renderShelf,
-  renderSongFilmRow,
-  renderMoodTiles,
 } from './components/cards.js';
 import {
-  renderHeroCarousel,
-  renderRichEpisodesSection,
-  renderTrailerModal,
+  renderAndroidBillboard,
+  renderDetailView,
 } from './components/showcase.js';
-import { renderSettingsModal, renderQuickLaunchModal } from './components/modals.js';
+import {
+  renderSettingsSheet,
+  renderCategoriesSheet,
+  renderNotificationsSheet,
+  renderContinueMenuSheet,
+  renderQuickLaunchSheet,
+} from './components/modals.js';
 import {
   BROWSE_GENRES,
   loadCatalogData,
@@ -70,50 +73,43 @@ const state = {
   discoverLoading: false,
   discoverSkip: 0,
   discoverAnimePage: 1,
-  discoverType: 'all', // 'all' | 'movie' | 'tv' | 'anime'
+  discoverType: 'all',
   discoverGenre: 'All Genres',
-  discoverYear: 'all', // 'all' | '2026' | '2025' | '2024' | '2020s' | '2010s' | 'classic'
+  discoverYear: 'all',
   discoverMinRating: 0,
-  discoverSort: 'trending', // 'trending' | 'sonic' | 'rating' | 'year'
-  heroIndex: 0,
+  discoverSort: 'trending',
+  homeFilter: 'all', // 'all' | 'tv' | 'movie' | 'anime' | 'hot'
+  tab: 'home', // 'home' | 'clips' | 'discover' | 'search' | 'mysuno' | 'detail' | 'downloads'
+  prevTab: 'home',
+  detailKey: null,
+  detailTab: 'episodes',
+  detailTrailerPlaying: false,
+  detailTrailerMuted: true,
+  activeClipTrailerKey: null,
   searchResults: [],
   searchLoading: false,
-  searchOpen: false,
   searchQuery: '',
-  route: 'home', // 'home' | 'discover' | 'bridge' | 'library' | 'detail' | 'collection' | 'search'
-  detailKey: null,
-  detailLoading: false,
-  collectionId: null,
-  sidebarCollapsed: false,
-  mobileDrawerOpen: false,
-  creatingMixtape: false,
-  ecosystemOpen: false,
-  modal: null, // 'settings' | 'quicklaunch' | 'trailer' | null
-  trailerInfo: { id: '', title: '' },
   appearance: loadAppearanceSettings(),
   prefs: loadPlayerPrefs(),
-  progressMap: loadProgressMap(),
+  profile: loadProfile(),
+  progressMap: {},
   collections: loadCollections(),
+  downloads: loadDownloads(),
   searchHistory: loadSearchHistory(),
   shield: antiRedirectGuard.getSnapshot(),
+  modal: null, // 'settings' | 'categories' | 'notifications' | 'cwmenu' | 'quicklaunch' | null
+  cwMenuKey: null,
   activeItem: null,
   activeSeason: 1,
   activeEpisode: 1,
-  isExpanded: false,
-  isPaused: false,
-  panelTab: 'upnext', // 'upnext' | 'episodes' | 'sonic'
-  queue: [],
+  playerOpen: false,
   livePlayback: { currentTime: 0, duration: 0 },
-  afterCreditsItem: null,
-  vidriftLog: [],
-  toast: '',
   seasonsCache: new Map(),
+  toast: '',
 };
 
-let cleanupHalo = null;
 let toastTimer = null;
 let searchDebounce = null;
-let heroTimer = null;
 
 function showToast(msg) {
   state.toast = msg;
@@ -122,7 +118,7 @@ function showToast(msg) {
   toastTimer = setTimeout(() => {
     state.toast = '';
     renderToastOnly();
-  }, 2600);
+  }, 2400);
 }
 
 function renderToastOnly() {
@@ -154,13 +150,12 @@ function registerItems(items) {
           poster: item.poster || prev.poster,
           backdrop: item.backdrop || prev.backdrop,
           logo: item.logo || prev.logo,
-          sonic: prev.source !== 'cinemeta' && prev.sonic ? prev.sonic : item.sonic || prev.sonic,
+          trailerId: item.trailerId || prev.trailerId,
           seasonsList: item.seasonsList || prev.seasonsList,
           cast: item.cast?.length ? item.cast : prev.cast,
         }
       : { ...item, id: key };
     state.catalogMap.set(key, merged);
-    // Keep cross-reference under imdb key if both exist
     if (item.imdbId && item.tmdbId) {
       state.catalogMap.set(`${item.mediaType}:imdb:${item.imdbId}`, merged);
     }
@@ -177,28 +172,35 @@ function getItemByKey(key) {
   return null;
 }
 
-function getLikedSet() {
-  const col = state.collections.find((c) => c.id === LIKED_COLLECTION_ID);
+function getCollectionSet(colId) {
+  const col = state.collections.find((c) => c.id === colId);
   return new Set(col?.items || []);
 }
 
-function getActiveSonicProfile() {
-  if (state.prefs.customTrackQuery) {
-    return inferSonicProfileFromText(state.prefs.customTrackQuery);
-  }
-  return SONIC_PROFILES.find((p) => p.id === state.prefs.activeMoodId) || SONIC_PROFILES[0];
+function toggleCollectionItem(colId, key, addedMsg, removedMsg) {
+  const col = state.collections.find((c) => c.id === colId);
+  if (!col) return;
+  const exists = col.items.includes(key);
+  col.items = exists ? col.items.filter((x) => x !== key) : [key, ...col.items];
+  state.collections = saveCollections([...state.collections]);
+  showToast(exists ? removedMsg : addedMsg);
+  render();
 }
 
-function getActivePalette() {
-  const t = APPEARANCE_THEMES.find((x) => x.id === state.appearance.theme) || APPEARANCE_THEMES[0];
-  return t.colors;
+function toggleDownload(key) {
+  const exists = state.downloads.includes(key);
+  state.downloads = saveDownloads(
+    exists ? state.downloads.filter((x) => x !== key) : [key, ...state.downloads]
+  );
+  showToast(exists ? 'Removed from Downloads' : 'Saved to Downloads queue');
+  render();
 }
 
 function getAllKnownPool() {
   const seen = new Set();
   const list = [];
-  for (const sourceList of [state.catalog, state.liveMovies, state.liveSeries, state.liveAnimeTrending]) {
-    for (const item of sourceList) {
+  for (const src of [state.catalog, state.liveMovies, state.liveSeries, state.liveAnimeTrending]) {
+    for (const item of src) {
       const k = getMediaKey(item);
       if (k && !seen.has(k)) {
         seen.add(k);
@@ -227,32 +229,24 @@ function sendPlayerCommand(action, payload = {}) {
   const iframe = document.getElementById('vidrift-player');
   if (!iframe || !iframe.contentWindow) return false;
   iframe.contentWindow.postMessage(buildVidriftCommand(action, payload), VIDRIFT_ORIGIN);
-  state.vidriftLog = [`→ Sent ${action} ${JSON.stringify(payload)}`, ...state.vidriftLog].slice(0, 12);
   return true;
 }
 
-async function launchStream(rawItem, { season, episode, expand = true, resumeSeconds } = {}) {
+async function launchStream(rawItem, { season, episode, resumeSeconds } = {}) {
   if (!rawItem) return;
-
   let item = rawItem;
   if (item.mediaType !== 'anime' && !item.tmdbId) {
-    showToast(`Resolving VidRift stream for "${item.title}"...`);
+    showToast(`Loading "${item.title}" stream...`);
     item = await resolveFullMetadata(item);
     registerItems([item]);
   }
-
   if (item.mediaType !== 'anime' && !item.tmdbId) {
-    showToast('Could not resolve a TMDB ID for this title automatically. Try Quick Launch.');
+    showToast('Stream ID unavailable for this entry — try Quick Launch');
     return;
   }
 
   const key = getMediaKey(item);
   registerItems([item]);
-
-  if (sonicCurtain.isPlaying) {
-    sonicCurtain.stop(600);
-  }
-
   const saved = state.progressMap[key];
   const resolvedSeason = season ?? saved?.season ?? item.season ?? 1;
   const resolvedEpisode = episode ?? saved?.episode ?? item.episode ?? 1;
@@ -260,33 +254,24 @@ async function launchStream(rawItem, { season, episode, expand = true, resumeSec
   state.activeItem = getItemByKey(key) || item;
   state.activeSeason = resolvedSeason;
   state.activeEpisode = resolvedEpisode;
-  state.isExpanded = expand;
-  state.isPaused = false;
-  state.afterCreditsItem = null;
-  antiRedirectGuard.setTheaterActive(expand);
-
+  state.playerOpen = true;
+  state.modal = null;
+  antiRedirectGuard.setTheaterActive(true);
   state.livePlayback = {
     currentTime: saved?.currentTime || 0,
     duration: saved?.duration || 0,
   };
 
-  const profile = getActiveSonicProfile();
-  const { ranked } = buildAfterTrackMatches(getAllKnownPool(), profile);
-  const upNext = ranked.filter((x) => getMediaKey(x) !== key).slice(0, 14);
-  state.queue = [state.activeItem, ...upNext];
-  state.panelTab = item.mediaType === 'tv' || item.mediaType === 'anime' ? 'episodes' : 'upnext';
-
   if (item.mediaType === 'tv' && (item.tmdbId || item.imdbId)) {
     loadTvSeasons(item.tmdbId, item.imdbId);
   }
 
-  saveMediaProgress(state.activeItem, {
+  state.progressMap = saveMediaProgress(state.activeItem, {
     season: resolvedSeason,
     episode: resolvedEpisode,
     currentTime: saved?.currentTime || 0,
     duration: saved?.duration || 0,
   });
-  state.progressMap = loadProgressMap();
 
   render();
 
@@ -300,33 +285,36 @@ async function launchStream(rawItem, { season, episode, expand = true, resumeSec
 }
 
 async function openDetailView(key) {
+  if (state.tab !== 'detail') state.prevTab = state.tab;
   state.detailKey = key;
-  state.route = 'detail';
-  state.isExpanded = false;
-  state.searchOpen = false;
-  antiRedirectGuard.setTheaterActive(false);
+  state.tab = 'detail';
+  state.detailTrailerPlaying = false;
+  state.detailTrailerMuted = true;
+  state.modal = null;
 
   let item = getItemByKey(key);
   const saved = state.progressMap[key];
   state.activeSeason = saved?.season || 1;
   state.activeEpisode = saved?.episode || 1;
+  state.detailTab = item?.mediaType === 'movie' ? 'more' : 'episodes';
 
-  if (item && item.mediaType !== 'anime' && item.imdbId && (!item.tmdbId || !item.cast?.length || (item.mediaType === 'tv' && !item.seasonsList))) {
-    state.detailLoading = true;
+  if (
+    item &&
+    item.mediaType !== 'anime' &&
+    item.imdbId &&
+    (!item.tmdbId || !item.cast?.length || (item.mediaType === 'tv' && !item.seasonsList))
+  ) {
     render();
-    try {
-      const hydrated = await resolveFullMetadata(item);
-      registerItems([hydrated]);
-      state.detailKey = getMediaKey(hydrated);
-      item = hydrated;
-    } finally {
-      state.detailLoading = false;
-    }
+    const hydrated = await resolveFullMetadata(item);
+    registerItems([hydrated]);
+    state.detailKey = getMediaKey(hydrated);
+    item = hydrated;
   }
 
   if (item?.mediaType === 'tv' && (item.tmdbId || item.imdbId)) {
     loadTvSeasons(item.tmdbId, item.imdbId);
   }
+  window.scrollTo({ top: 0, behavior: 'instant' });
   render();
 }
 
@@ -336,7 +324,7 @@ async function loadTvSeasons(tmdbId, imdbId = '') {
   const seasons = await fetchTvSeasonsData(tmdbId, state.prefs.tmdbApiKey, imdbId);
   if (Array.isArray(seasons) && seasons.length > 0) {
     state.seasonsCache.set(cacheKey, seasons);
-    if (state.isExpanded || state.route === 'detail') render();
+    if (state.tab === 'detail' || state.playerOpen) render();
   }
 }
 
@@ -363,8 +351,7 @@ async function refreshDiscoverFeed({ reset = true } = {}) {
       tasks.push(loadTrendingAnime({ genre, page: state.discoverAnimePage }).catch(() => []));
     }
 
-    const lists = await Promise.all(tasks);
-    const incoming = lists.flat();
+    const incoming = (await Promise.all(tasks)).flat();
     registerItems(incoming);
 
     if (reset) {
@@ -375,9 +362,8 @@ async function refreshDiscoverFeed({ reset = true } = {}) {
         }
         return true;
       });
-      const combined = [...incoming, ...curatedMatching];
       const seen = new Set();
-      state.discoverItems = combined.filter((x) => {
+      state.discoverItems = [...incoming, ...curatedMatching].filter((x) => {
         const k = getMediaKey(x);
         if (seen.has(k)) return false;
         seen.add(k);
@@ -385,13 +371,15 @@ async function refreshDiscoverFeed({ reset = true } = {}) {
       });
     } else {
       const seen = new Set(state.discoverItems.map((x) => getMediaKey(x)));
-      const nextBatch = incoming.filter((x) => {
-        const k = getMediaKey(x);
-        if (seen.has(k)) return false;
-        seen.add(k);
-        return true;
-      });
-      state.discoverItems = [...state.discoverItems, ...nextBatch];
+      state.discoverItems = [
+        ...state.discoverItems,
+        ...incoming.filter((x) => {
+          const k = getMediaKey(x);
+          if (seen.has(k)) return false;
+          seen.add(k);
+          return true;
+        }),
+      ];
     }
   } finally {
     state.discoverLoading = false;
@@ -399,517 +387,251 @@ async function refreshDiscoverFeed({ reset = true } = {}) {
   }
 }
 
-function openCategoryDiscover(type) {
-  state.route = 'discover';
-  state.discoverType = type;
-  state.isExpanded = false;
-  state.mobileDrawerOpen = false;
-  antiRedirectGuard.setTheaterActive(false);
-  refreshDiscoverFeed({ reset: true });
-}
-
-function toggleLike(key) {
-  const col = state.collections.find((c) => c.id === LIKED_COLLECTION_ID);
-  if (!col) return;
-  const exists = col.items.includes(key);
-  col.items = exists ? col.items.filter((x) => x !== key) : [key, ...col.items];
-  state.collections = saveCollections([...state.collections]);
-  showToast(exists ? 'Removed from My List' : 'Saved to My List');
-  render();
-}
-
-function addToMixtape(collectionId, key) {
-  const col = state.collections.find((c) => c.id === collectionId);
-  if (!col) return;
-  if (!col.items.includes(key)) {
-    col.items = [...col.items, key];
-    state.collections = saveCollections([...state.collections]);
-    showToast(`Added to "${col.name}"`);
-  } else {
-    showToast(`Already in "${col.name}"`);
+async function shareItem(item) {
+  if (!item) return;
+  const url = window.location.href.split('#')[0];
+  const text = `Watch "${item.title}" on Suno Cinema`;
+  if (navigator.share) {
+    try {
+      await navigator.share({ title: item.title, text, url });
+      return;
+    } catch {}
   }
-  render();
+  try {
+    await navigator.clipboard.writeText(`${text} — ${url}`);
+    showToast(`Copied share link for "${item.title}"`);
+  } catch {
+    showToast(`Ready to share "${item.title}"`);
+  }
 }
 
-function renderSidebar() {
-  const navItems = [
-    { id: 'home', label: 'Home', icon: 'home', action: 'nav' },
-    { id: 'movie', label: 'Movies', icon: 'film', action: 'cat' },
-    { id: 'tv', label: 'TV Shows', icon: 'tv', action: 'cat' },
-    { id: 'anime', label: 'Anime', icon: 'sparkles', action: 'cat' },
-    { id: 'discover', label: 'Discover', icon: 'compass', action: 'discover' },
-    { id: 'bridge', label: 'Sonic Bridge', icon: 'wave', action: 'nav' },
-    { id: 'library', label: 'My List', icon: 'library', action: 'nav' },
-  ];
-
-  return `<aside class="sidebar ${state.sidebarCollapsed ? 'is-collapsed' : ''} ${
-    state.mobileDrawerOpen ? 'is-open' : ''
-  }" aria-label="Main navigation">
-    <nav class="sidebar-nav">
-      ${navItems
-        .map((n) => {
-          const isActive =
-            n.action === 'cat'
-              ? state.route === 'discover' && state.discoverType === n.id
-              : n.action === 'discover'
-              ? state.route === 'discover' && state.discoverType === 'all'
-              : state.route === n.id;
-          const attr =
-            n.action === 'cat'
-              ? `data-open-cat="${n.id}"`
-              : n.action === 'discover'
-              ? `data-open-cat="all"`
-              : `data-nav="${n.id}"`;
-          return `<button type="button" class="nav-item ${isActive ? 'is-active' : ''}" ${attr}>
-            ${svgIcon(n.icon, 20)}
-            <span class="nav-label">${n.label}</span>
-          </button>`;
-        })
-        .join('')}
-    </nav>
-
-    ${
-      !state.sidebarCollapsed
-        ? `<div class="sidebar-divider"></div>
-        ${
-          state.creatingMixtape
-            ? `<form class="sidebar-new" id="new-mixtape-form">
-                <input id="new-mixtape-input" placeholder="Mixtape name..." maxlength="60" autofocus />
-              </form>`
-            : `<button type="button" class="pill-button sidebar-new-button" id="start-mixtape-btn">
-                ${svgIcon('plus', 17)} New mixtape
-              </button>`
-        }
-        <div class="sidebar-playlists">
-          ${state.collections
-            .map(
-              (c) => `<button type="button" class="playlist-item ${
-                state.route === 'collection' && state.collectionId === c.id ? 'is-active' : ''
-              }" data-open-collection="${escapeHtml(c.id)}">
-                <span class="playlist-name">${escapeHtml(c.name)}</span>
-                <span class="playlist-sub">${c.auto ? 'Auto list' : `${c.items.length} titles`}</span>
-              </button>`
-            )
-            .join('')}
-        </div>
-        <div class="sidebar-footer">
-          <div style="display:flex;align-items:center;justify-content:space-between;padding:4px 6px;font-size:11px;" class="dim">
-            <span style="display:inline-flex;align-items:center;gap:5px;">${svgIcon('shield', 13)} Zero-Ad Shield</span>
-            <span>${state.shield.blockedCount} blocked</span>
-          </div>
-          <a class="sidebar-eco-link" href="https://sunov2.vercel.app/app" target="_blank" rel="noopener noreferrer">
-            <div>
-              <div style="font-weight:600;">Suno Music</div>
-              <div class="dim" style="font-size:11px;">Open audio player</div>
-            </div>
-            ${svgIcon('external', 15)}
-          </a>
-        </div>`
-        : ''
-    }
-  </aside>`;
-}
-
-function renderTopbar() {
-  const direct = parseDirectTarget(state.searchQuery);
-  const showHistory = !state.searchQuery.trim() && state.searchHistory.length > 0;
-  const pool = getAllKnownPool();
-  const quickSuggestions = state.searchQuery.trim()
-    ? pool
-        .filter((x) => x.title.toLowerCase().includes(state.searchQuery.trim().toLowerCase()))
-        .slice(0, 6)
-    : [];
-  const sugOpen = state.searchOpen && (showHistory || quickSuggestions.length > 0 || Boolean(direct));
-
-  return `<header class="topbar">
-    <div class="topbar-left">
-      <button type="button" class="icon-button" id="toggle-sidebar-btn" aria-label="Menu">
-        ${svgIcon('menu', 21)}
+function renderTopHeader({ leftHtml, rightExtras = '' }) {
+  return `<header class="sc-topbar">
+    <div class="sc-topbar-left">${leftHtml}</div>
+    <div class="sc-topbar-actions">
+      ${rightExtras}
+      <button type="button" class="icon-btn" id="open-settings-btn" title="Shield, Cast & Theme" aria-label="Cast and Settings">
+        ${svgIcon('cast', 21)}
       </button>
-      <div class="wordmark" data-nav="home" role="button" tabindex="0">
-        <span class="wordmark-badge">${renderWordmarkSvg()}</span>
-        <span class="wordmark-text">Suno <span class="wordmark-light">Cinema</span></span>
-        <span class="suno-product-tag">a Suno Product</span>
-      </div>
-    </div>
-
-    <div class="searchbox ${sugOpen ? 'is-open' : ''}" id="searchbox-wrap">
-      <form class="searchbox-field" id="global-search-form">
-        <span class="searchbox-icon">${svgIcon('search', 18)}</span>
-        <input
-          id="global-search-input"
-          type="text"
-          autocomplete="off"
-          placeholder="Search any movie, TV show, anime, or paste TMDB/AniList ID..."
-          value="${escapeHtml(state.searchQuery)}"
-        />
-        ${
-          state.searchQuery
-            ? `<button type="button" class="icon-button" id="clear-search-btn" style="width:30px;height:30px;" aria-label="Clear search">
-                ${svgIcon('close', 16)}
-              </button>`
-            : ''
-        }
-      </form>
-      ${
-        sugOpen
-          ? `<ul class="suggestions">
-              ${
-                direct
-                  ? `<li class="sug-row" data-launch-direct="true">
-                      <span class="sug-main">${svgIcon('play', 16)} <span>Stream <strong>${escapeHtml(
-                      direct.mediaType.toUpperCase()
-                    )} #${escapeHtml(direct.tmdbId || direct.anilistId)}</strong> directly via VidRift</span></span>
-                      <span class="sug-meta">Instant</span>
-                    </li>`
-                  : ''
-              }
-              ${
-                showHistory
-                  ? state.searchHistory
-                      .map(
-                        (h) => `<li class="sug-row">
-                          <button type="button" class="sug-main" data-run-search="${escapeHtml(h)}">
-                            ${svgIcon('search', 15)} <span>${escapeHtml(h)}</span>
-                          </button>
-                          <button type="button" class="icon-button" data-forget-search="${escapeHtml(
-                            h
-                          )}" style="width:28px;height:28px;" aria-label="Remove">${svgIcon('close', 14)}</button>
-                        </li>`
-                      )
-                      .join('')
-                  : quickSuggestions
-                      .map(
-                        (item) => `<li class="sug-row" data-open-detail="${escapeHtml(getMediaKey(item))}">
-                          <span class="sug-main">${svgIcon('film', 15)} <span>${escapeHtml(item.title)}</span></span>
-                          <span class="sug-meta">${escapeHtml(item.year || '')} • ${escapeHtml(
-                          item.mediaType.toUpperCase()
-                        )}</span>
-                        </li>`
-                      )
-                      .join('')
-              }
-            </ul>`
-          : ''
-      }
-    </div>
-
-    <div class="topbar-right">
-      <button type="button" class="icon-button" id="open-quicklaunch-btn" title="Stream by TMDB / AniList ID or URL" aria-label="Quick Stream">
-        ${svgIcon('link', 19)}
+      <button type="button" class="icon-btn" id="open-downloads-btn" title="Downloads" aria-label="Downloads">
+        ${svgIcon('download', 21)}
       </button>
-      <button type="button" class="icon-button" id="toggle-eco-btn" title="Suno Ecosystem" aria-label="Suno Ecosystem">
-        ${svgIcon('music', 19)}
+      <button type="button" class="icon-btn" id="open-notifications-btn" title="Notifications" aria-label="Notifications">
+        ${svgIcon('bell', 21)}
+        <span class="notif-badge">4</span>
       </button>
-      <button type="button" class="icon-button" id="open-settings-btn" title="Themes, Shield & VidRift Settings" aria-label="Settings">
-        ${svgIcon('settings', 19)}
-      </button>
-      <button type="button" class="avatar" id="avatar-settings-btn" title="Suno Appearance">S</button>
-
-      ${
-        state.ecosystemOpen
-          ? `<div class="account-pop" role="menu">
-              <div class="provider-pop-title">Suno Ecosystem</div>
-              <button type="button" class="menu-item" data-nav="bridge">
-                <span class="menu-item-mark">${svgIcon('check', 16)}</span>
-                <span class="menu-item-text">
-                  <span class="menu-item-name">Suno Cinema (Active)</span>
-                  <span class="menu-item-desc">All movies, series & anime via free keyless APIs + VidRift</span>
-                </span>
-              </button>
-              <a class="menu-item" href="https://sunov2.vercel.app/app" target="_blank" rel="noopener noreferrer" style="text-decoration:none;color:inherit;">
-                <span class="menu-item-mark">${svgIcon('music', 16)}</span>
-                <span class="menu-item-text">
-                  <span class="menu-item-name">Suno Music ↗</span>
-                  <span class="menu-item-desc">Listen to tracks first on sunov2.vercel.app/app</span>
-                </span>
-              </a>
-              <div class="provider-pop-note">
-                Zero ads • Host Anti-Redirect Shield active (${state.shield.blockedCount} blocked).
-              </div>
-            </div>`
-          : ''
-      }
     </div>
   </header>`;
 }
 
-function renderSonicBridgeHero(profile, arc, { compact = false } = {}) {
-  const playingThis = sonicCurtain.isPlaying && sonicCurtain.activeMoodId === profile.curtainPatch;
-  const topDrop = arc[0]?.item;
-
-  return `<section class="sonic-bridge-card">
-    <div class="sonic-bridge-main">
-      <div class="sonic-eyebrow">
-        <span class="sonic-live-dot"></span>
-        <span>After-Track Cinema Engine • a Suno Product</span>
-      </div>
-      <h2 class="sonic-bridge-title">${
-        compact ? 'What song just ended on Suno?' : `Just finished "${escapeHtml(profile.trackTitle)}"?`
-      }</h2>
-      <p class="sonic-bridge-desc">
-        ${escapeHtml(profile.description)} Pick a sonic cue or type any track/artist you just heard — Suno Cinema tunes the catalog and transitions smoothly into your next film.
-      </p>
-
-      <form class="sonic-input-row" id="sonic-prompt-form">
-        <div class="sonic-prompt-box">
-          ${svgIcon('music', 16)}
-          <input
-            id="sonic-track-input"
-            type="text"
-            placeholder="Type any track or vibe (e.g. Nightcall, Radiohead, 3 AM rain jazz)..."
-            value="${escapeHtml(state.prefs.customTrackQuery || '')}"
-          />
-        </div>
-        <button type="button" class="pill-button ${playingThis ? 'is-accent' : ''}" id="audition-curtain-btn" data-curtain="${escapeHtml(
-    profile.curtainPatch
-  )}">
-          ${svgIcon(playingThis ? 'pause' : 'wave', 16)}
-          ${playingThis ? 'Stop Sonic Curtain' : 'Audition Vibe'}
-        </button>
-        ${
-          topDrop
-            ? `<button type="button" class="primary-button" data-play-key="${escapeHtml(getMediaKey(topDrop))}">
-                ${svgIcon('play', 16)} Drop Into ${escapeHtml(topDrop.title)}
-              </button>`
-            : ''
-        }
-      </form>
-
-      <div class="sonic-preset-chips">
-        ${SONIC_PROFILES.map(
-          (p) => `<button type="button" class="sonic-chip ${
-            !state.prefs.customTrackQuery && state.prefs.activeMoodId === p.id ? 'is-active' : ''
-          }" data-pick-sonic="${escapeHtml(p.id)}">
-            <span>${escapeHtml(p.trackTitle)}</span>
-          </button>`
-        ).join('')}
-      </div>
-
-      ${
-        arc.length > 0
-          ? `<div class="arc-strip">
-              ${arc
-                .map(
-                  (step) => `<button type="button" class="arc-card" data-play-key="${escapeHtml(
-                    getMediaKey(step.item)
-                  )}">
-                    <div class="arc-thumb">
-                      <img src="${escapeHtml(resolveArtUrl(step.item, 'wide'))}" alt="" loading="lazy" referrerpolicy="no-referrer" ${attachFallbackImgAttr(
-                    step.item,
-                    'wide'
-                  )} />
-                    </div>
-                    <div class="arc-meta">
-                      <span class="arc-stage">${escapeHtml(step.stage)}</span>
-                      <span class="arc-title">${escapeHtml(step.item.title)}</span>
-                      <span class="arc-sub">${escapeHtml(step.item.sonicMatch?.reason || step.note)}</span>
-                    </div>
-                  </button>`
-                )
-                .join('')}
-            </div>`
-          : ''
-      }
-    </div>
-
-    <div class="sonic-halo-panel">
-      <div class="sonic-halo-canvas-wrap">
-        <canvas class="sonic-halo-canvas" id="sonic-halo-canvas"></canvas>
-        <div class="sonic-halo-center">
-          <div class="sonic-halo-bpm">${profile.bpm} BPM</div>
-          <div class="sonic-halo-key">${escapeHtml(profile.keySignature)}</div>
-        </div>
-      </div>
-      <div style="text-align:center;">
-        <div style="font-size:13px;font-weight:600;">${escapeHtml(profile.moodLabel)}</div>
-        <div class="dim" style="font-size:11px;margin-top:2px;">${escapeHtml(profile.artistCue)}</div>
-      </div>
-    </div>
-  </section>`;
-}
-
-function renderHomePage() {
-  const profile = getActiveSonicProfile();
+function renderHomeTab() {
+  const myListSet = getCollectionSet(MY_LIST_COLLECTION_ID);
   const pool = getAllKnownPool();
-  const { ranked, arc } = buildAfterTrackMatches(pool, profile);
-  const likedIds = getLikedSet();
 
-  const continueItems = Object.values(state.progressMap)
-    .filter((entry) => entry?.item && entry.currentTime > 5)
-    .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))
-    .map((entry) => getItemByKey(getMediaKey(entry.item)) || entry.item);
+  const matchesFilter = (item) => {
+    if (state.homeFilter === 'tv') return item.mediaType === 'tv';
+    if (state.homeFilter === 'movie') return item.mediaType === 'movie';
+    if (state.homeFilter === 'anime') return item.mediaType === 'anime';
+    return true;
+  };
 
-  // Build Hero Carousel items prioritizing high-res backdrop + logo items
-  const heroCandidates = [
-    ...state.liveMovies.filter((x) => x.backdrop).slice(0, 4),
-    ...state.liveSeries.filter((x) => x.backdrop).slice(0, 2),
-    ...ranked.slice(0, 6),
-  ];
-  const heroSeen = new Set();
-  const heroItems = heroCandidates
-    .filter((x) => {
-      const k = getMediaKey(x);
-      if (heroSeen.has(k)) return false;
-      heroSeen.add(k);
-      return true;
-    })
-    .slice(0, 6);
+  // Spotlight billboard (defaults to Rocket Singh like screenshot 5, or first filtered title)
+  const rocketSingh = getItemByKey('movie:26815');
+  const spotlightPool = pool.filter(matchesFilter);
+  const featured =
+    state.homeFilter === 'all' && rocketSingh
+      ? rocketSingh
+      : spotlightPool.find((x) => x.poster) || spotlightPool[0];
 
-  const top10Items = [
-    ...state.liveMovies.slice(0, 6),
-    ...state.liveSeries.slice(0, 4),
-  ];
-  const fallbackTop10 = top10Items.length >= 10 ? top10Items : ranked.slice(0, 10);
+  const southIndia = state.catalog.filter((x) => x.regionTag === 'south-india' && matchesFilter(x));
+  const indiaMoviesShows = state.catalog.filter(
+    (x) => (x.regionTag === 'india' || x.country?.includes('India')) && matchesFilter(x)
+  );
+  const englishMovies = [
+    ...state.catalog.filter(
+      (x) => x.mediaType === 'movie' && x.regionTag !== 'south-india' && x.regionTag !== 'india'
+    ),
+    ...state.liveMovies,
+  ].filter(matchesFilter);
 
-  const trendingMovies = state.liveMovies.length ? state.liveMovies.slice(0, 18) : ranked.filter((x) => x.mediaType === 'movie');
-  const trendingSeries = state.liveSeries.length ? state.liveSeries.slice(0, 18) : ranked.filter((x) => x.mediaType === 'tv');
-  const trendingAnime = state.liveAnimeTrending.length
+  const continueEntries = Object.values(state.progressMap)
+    .filter((e) => e?.item && e.currentTime > 0 && matchesFilter(e.item))
+    .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+
+  const seriesShelf = [
+    ...state.catalog.filter((x) => x.mediaType === 'tv'),
+    ...state.liveSeries,
+  ].filter(matchesFilter);
+
+  const animeShelf = (state.liveAnimeTrending.length
     ? state.liveAnimeTrending
-    : ranked.filter((x) => x.mediaType === 'anime');
+    : state.catalog.filter((x) => x.mediaType === 'anime')
+  ).filter(matchesFilter);
 
-  const genreQuickChips = [
-    'All',
-    'Sci-Fi',
-    'Action',
-    'Drama',
-    'Thriller',
-    'Crime',
-    'Comedy',
-    'Romance',
-    'Animation',
-    'Horror',
+  const chips = [
+    { id: 'tv', label: 'Shows' },
+    { id: 'movie', label: 'Movies' },
+    { id: 'anime', label: 'Anime' },
+    { id: 'hot', label: 'New & Hot' },
   ];
 
-  return `<div class="page">
-    <div class="chip-row">
-      ${genreQuickChips
-        .map((g) => {
-          if (g === 'All') {
-            return `<button type="button" class="chip is-active" data-nav="home">Featured</button>`;
-          }
-          return `<button type="button" class="chip" data-quick-genre="${escapeHtml(g)}">${escapeHtml(g)}</button>`;
-        })
+  return `
+    ${renderTopHeader({
+      leftHtml: `
+        <button type="button" style="display:inline-flex;align-items:center;gap:8px;" data-reset-home="true">
+          ${renderSunoRibbonSvg(22, 26)}
+          <span class="sc-topbar-title">Home</span>
+        </button>
+      `,
+    })}
+
+    <div class="pill-chips-row">
+      ${chips
+        .map(
+          (c) => `<button type="button" class="outline-chip ${
+            state.homeFilter === c.id ? 'is-active' : ''
+          }" data-home-filter="${c.id}">${c.label}</button>`
+        )
         .join('')}
+      <button type="button" class="outline-chip" id="open-categories-btn">
+        Categories ${svgIcon('chevronDown', 14)}
+      </button>
     </div>
 
-    ${renderHeroCarousel(heroItems, state.heroIndex, {
-      likedIds,
-      curtainPlaying: sonicCurtain.isPlaying,
+    ${renderAndroidBillboard(featured, {
+      inMyList: featured ? myListSet.has(getMediaKey(featured)) : false,
+    })}
+
+    ${renderShelf({
+      id: 'south-india',
+      title: 'South Indian Cinema',
+      items: southIndia.slice(0, 14),
+      top10Indices: new Set([1, 2]),
+      recentIndices: new Set([1, 2]),
+    })}
+
+    ${renderShelf({
+      id: 'india-cinema',
+      title: 'Movies & TV Shows set in India',
+      items: indiaMoviesShows.slice(0, 16),
+      top10Indices: new Set([0, 3]),
+      recentIndices: new Set([1]),
+    })}
+
+    ${renderShelf({
+      id: 'english-movies',
+      title: 'English Movies',
+      items: englishMovies.slice(0, 20),
+      top10Indices: new Set([3, 5]),
+      recentIndices: new Set([1, 3]),
     })}
 
     ${
-      continueItems.length > 0
+      continueEntries.length > 0
         ? renderShelf({
-            id: 'continue',
-            title: 'Continue watching',
-            items: continueItems,
-            wide: true,
-            progressMap: state.progressMap,
-            likedIds,
-            moreRoute: 'library',
+            id: 'home-cw',
+            title: 'Continue Watching',
+            items: continueEntries.slice(0, 10),
+            kind: 'continue',
           })
         : ''
     }
 
     ${renderShelf({
-      id: 'top10-today',
-      title: 'Top 10 Today',
-      items: fallbackTop10.slice(0, 10),
-      top10: true,
-      progressMap: state.progressMap,
-      likedIds,
-      moreRoute: 'discover',
-    })}
-
-    ${renderSonicBridgeHero(profile, arc)}
-
-    ${renderShelf({
-      id: 'matched-wide',
-      title: `After "${profile.trackTitle}" • Sonic Matches`,
-      items: ranked.slice(0, 14),
-      wide: true,
-      ranked: true,
-      progressMap: state.progressMap,
-      likedIds,
-      moreRoute: 'bridge',
+      id: 'series-row',
+      title: 'Trending TV Series',
+      items: seriesShelf.slice(0, 20),
+      top10Indices: new Set([0, 2]),
+      recentIndices: new Set([0]),
     })}
 
     ${renderShelf({
-      id: 'movies-shelf',
-      title: 'Trending Movies Now',
-      items: trendingMovies,
-      wide: false,
-      progressMap: state.progressMap,
-      likedIds,
-      moreRoute: 'discover',
+      id: 'anime-row',
+      title: 'Anime & Soundtracks',
+      items: animeShelf.slice(0, 20),
+      top10Indices: new Set([0, 1]),
     })}
-
-    ${renderShelf({
-      id: 'series-shelf',
-      title: 'New & Popular TV Seasons',
-      items: trendingSeries,
-      wide: false,
-      progressMap: state.progressMap,
-      likedIds,
-      moreRoute: 'discover',
-    })}
-
-    ${renderShelf({
-      id: 'anime-shelf',
-      title: 'Trending Anime & OST (AniList Live)',
-      items: trendingAnime,
-      wide: false,
-      progressMap: state.progressMap,
-      likedIds,
-      moreRoute: 'discover',
-    })}
-
-    <section class="shelf">
-      <div class="shelf-head">
-        <h2 class="shelf-title">Score moods & sonic textures</h2>
-      </div>
-      ${renderMoodTiles(SCORE_MOODS, profile.id)}
-    </section>
-  </div>`;
+  `;
 }
 
-function renderBridgePage() {
-  const profile = getActiveSonicProfile();
-  const { ranked, arc } = buildAfterTrackMatches(getAllKnownPool(), profile);
+function renderClipsTab() {
+  const pool = getAllKnownPool().filter((x) => x.trailerId || x.backdrop);
+  const myListSet = getCollectionSet(MY_LIST_COLLECTION_ID);
 
-  return `<div class="page">
-    ${renderSonicBridgeHero(profile, arc, { compact: true })}
-
-    <section class="shelf">
-      <div class="shelf-head">
-        <h2 class="shelf-title">Acoustic affinity ranking (${ranked.length} titles scored)</h2>
-      </div>
-      <div class="track-list">
-        ${ranked
-          .slice(0, 24)
-          .map((item, idx) =>
-            renderSongFilmRow(item, idx, {
-              activeKey: state.activeItem ? getMediaKey(state.activeItem) : '',
-            })
-          )
-          .join('')}
-      </div>
-    </section>
-  </div>`;
+  return `
+    ${renderTopHeader({
+      leftHtml: `
+        ${renderSunoRibbonSvg(22, 26)}
+        <span class="sc-topbar-title">Clips</span>
+      `,
+    })}
+    <div class="clips-feed">
+      ${pool.slice(0, 14).map((item) => {
+        const key = getMediaKey(item);
+        const playingClip = state.activeClipTrailerKey === key && item.trailerId;
+        const inList = myListSet.has(key);
+        return `<article class="clip-card">
+          <div class="clip-media">
+            ${
+              playingClip
+                ? `<iframe
+                    src="https://www.youtube-nocookie.com/embed/${encodeURIComponent(item.trailerId)}?autoplay=1&rel=0"
+                    title="${escapeHtml(item.title)}"
+                    allow="autoplay; encrypted-media; fullscreen"
+                    allowfullscreen
+                    referrerpolicy="strict-origin-when-cross-origin"
+                  ></iframe>`
+                : `<img src="${escapeHtml(resolveArtUrl(item, 'wide'))}" alt="${escapeHtml(item.title)}" loading="lazy" referrerpolicy="no-referrer" ${attachFallbackImgAttr(
+                    item,
+                    'wide'
+                  )} />`
+            }
+          </div>
+          <div class="clip-body">
+            <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;">
+              <div>
+                <div style="font-size:16px;font-weight:700;">${escapeHtml(item.title)}</div>
+                <div class="dim" style="font-size:12px;margin-top:2px;">${escapeHtml(
+                  [item.year, item.rating ? `★ ${item.rating}` : '', ...(item.genres || []).slice(0, 2)]
+                    .filter(Boolean)
+                    .join(' • ')
+                )}</div>
+              </div>
+              ${
+                item.trailerId
+                  ? `<button type="button" class="outline-chip" data-play-clip="${escapeHtml(key)}">
+                      ${svgIcon('trailer', 14)} ${playingClip ? 'Poster' : 'Preview'}
+                    </button>`
+                  : ''
+              }
+            </div>
+            <p class="dim" style="font-size:12px;line-height:1.4;">${escapeHtml(
+              (item.overview || '').slice(0, 140)
+            )}</p>
+            <div style="display:grid;grid-template-columns:1fr 1fr auto;gap:8px;margin-top:2px;">
+              <button type="button" class="btn-white" style="height:36px;font-size:13px;" data-play-key="${escapeHtml(key)}">
+                ${svgIcon('play', 15)} Play
+              </button>
+              <button type="button" class="btn-dark" style="height:36px;font-size:13px;" data-toggle-mylist="${escapeHtml(key)}">
+                ${svgIcon(inList ? 'check' : 'plus', 15)} My List
+              </button>
+              <button type="button" class="btn-dark" style="height:36px;padding:0 12px;" data-share-key="${escapeHtml(key)}" aria-label="Share">
+                ${svgIcon('share', 15)}
+              </button>
+            </div>
+          </div>
+        </article>`;
+      }).join('')}
+    </div>
+  `;
 }
 
-function applyDiscoverClientFilters(items) {
-  const profile = getActiveSonicProfile();
-  const { ranked } = buildAfterTrackMatches(items, profile);
-
-  const filtered = ranked.filter((item) => {
+function applyDiscoverFilters(items) {
+  const filtered = items.filter((item) => {
     if (state.discoverType !== 'all' && item.mediaType !== state.discoverType) return false;
     if (state.discoverGenre !== 'All Genres') {
-      const hasGenre = (item.genres || []).some(
-        (g) => g.toLowerCase() === state.discoverGenre.toLowerCase()
-      );
-      if (!hasGenre) return false;
+      const has = (item.genres || []).some((g) => g.toLowerCase() === state.discoverGenre.toLowerCase());
+      if (!has) return false;
     }
     const y = Number(item.year || 0);
     if (state.discoverYear === '2026' && y !== 2026) return false;
@@ -918,9 +640,7 @@ function applyDiscoverClientFilters(items) {
     if (state.discoverYear === '2020s' && (y < 2020 || y > 2029)) return false;
     if (state.discoverYear === '2010s' && (y < 2010 || y > 2019)) return false;
     if (state.discoverYear === 'classic' && (y === 0 || y >= 2010)) return false;
-
-    const r = Number(item.rating || 0);
-    if (state.discoverMinRating > 0 && r < state.discoverMinRating) return false;
+    if (state.discoverMinRating > 0 && Number(item.rating || 0) < state.discoverMinRating) return false;
     return true;
   });
 
@@ -930,864 +650,512 @@ function applyDiscoverClientFilters(items) {
   if (state.discoverSort === 'year') {
     return [...filtered].sort((a, b) => Number(b.year || 0) - Number(a.year || 0));
   }
-  if (state.discoverSort === 'sonic') {
-    return [...filtered].sort((a, b) => (b.sonicMatch?.score || 0) - (a.sonicMatch?.score || 0));
-  }
   return filtered;
 }
 
-function renderDiscoverPage() {
-  const likedIds = getLikedSet();
+function renderDiscoverTab() {
   const baseList = state.discoverItems.length ? state.discoverItems : getAllKnownPool();
-  const visible = applyDiscoverClientFilters(baseList);
+  const visible = applyDiscoverFilters(baseList);
 
-  const titleMap = {
-    all: 'Discover All Movies, Series & Anime',
-    movie: 'Movies Catalog',
-    tv: 'TV Shows & Series',
-    anime: 'Anime & Soundtracks',
-  };
-
-  return `<div class="page">
-    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;">
-      <div>
-        <h1 style="font-size:28px;font-weight:700;letter-spacing:-0.5px;">${
-          titleMap[state.discoverType] || 'Discover'
-        }</h1>
-        <p class="dim" style="font-size:13px;margin-top:4px;">Free keyless discovery powered by Cinemeta &amp; AniList • ${visible.length} matches shown</p>
-      </div>
-      <button type="button" class="pill-button" id="explore-quicklaunch-btn">
-        ${svgIcon('link', 16)} Launch TMDB / AniList ID
-      </button>
-    </div>
+  return `
+    ${renderTopHeader({
+      leftHtml: `
+        ${renderSunoRibbonSvg(22, 26)}
+        <span class="sc-topbar-title">Discover</span>
+      `,
+      rightExtras: `
+        <button type="button" class="icon-btn" id="open-quicklaunch-btn" title="Stream by TMDB / AniList ID" aria-label="Quick Launch">
+          ${svgIcon('link', 19)}
+        </button>
+      `,
+    })}
 
     <div class="discover-bar">
-      <div class="field-group">
-        <label class="field-label" for="disc-type">Category</label>
-        <select id="disc-type" class="field-select">
-          <option value="all" ${state.discoverType === 'all' ? 'selected' : ''}>All Formats</option>
-          <option value="movie" ${state.discoverType === 'movie' ? 'selected' : ''}>Movies</option>
-          <option value="tv" ${state.discoverType === 'tv' ? 'selected' : ''}>TV Shows</option>
-          <option value="anime" ${state.discoverType === 'anime' ? 'selected' : ''}>Anime</option>
-        </select>
-      </div>
-
-      <div class="field-group">
-        <label class="field-label" for="disc-genre">Genre</label>
-        <select id="disc-genre" class="field-select">
-          ${BROWSE_GENRES.map(
-            (g) => `<option value="${escapeHtml(g)}" ${
-              state.discoverGenre === g ? 'selected' : ''
-            }>${escapeHtml(g)}</option>`
-          ).join('')}
-        </select>
-      </div>
-
-      <div class="field-group">
-        <label class="field-label" for="disc-year">Year</label>
-        <select id="disc-year" class="field-select">
-          <option value="all" ${state.discoverYear === 'all' ? 'selected' : ''}>All Years</option>
-          <option value="2026" ${state.discoverYear === '2026' ? 'selected' : ''}>2026</option>
-          <option value="2025" ${state.discoverYear === '2025' ? 'selected' : ''}>2025</option>
-          <option value="2024" ${state.discoverYear === '2024' ? 'selected' : ''}>2024</option>
-          <option value="2020s" ${state.discoverYear === '2020s' ? 'selected' : ''}>2020s</option>
-          <option value="2010s" ${state.discoverYear === '2010s' ? 'selected' : ''}>2010s</option>
-          <option value="classic" ${state.discoverYear === 'classic' ? 'selected' : ''}>Pre-2010 Classics</option>
-        </select>
-      </div>
-
-      <div class="field-group">
-        <label class="field-label" for="disc-rating">Rating</label>
-        <select id="disc-rating" class="field-select">
-          <option value="0" ${state.discoverMinRating === 0 ? 'selected' : ''}>Any Rating</option>
-          <option value="7" ${state.discoverMinRating === 7 ? 'selected' : ''}>7.0+ IMDb</option>
-          <option value="7.5" ${state.discoverMinRating === 7.5 ? 'selected' : ''}>7.5+ IMDb</option>
-          <option value="8" ${state.discoverMinRating === 8 ? 'selected' : ''}>8.0+ Acclaimed</option>
-        </select>
-      </div>
-
-      <div class="field-group">
-        <label class="field-label" for="disc-sort">Sort By</label>
-        <select id="disc-sort" class="field-select">
-          <option value="trending" ${state.discoverSort === 'trending' ? 'selected' : ''}>Trending</option>
-          <option value="sonic" ${state.discoverSort === 'sonic' ? 'selected' : ''}>Sonic Match %</option>
-          <option value="rating" ${state.discoverSort === 'rating' ? 'selected' : ''}>Highest Rated</option>
-          <option value="year" ${state.discoverSort === 'year' ? 'selected' : ''}>Newest First</option>
-        </select>
-      </div>
+      <select id="disc-type" class="field-select" aria-label="Type">
+        <option value="all" ${state.discoverType === 'all' ? 'selected' : ''}>All Types</option>
+        <option value="movie" ${state.discoverType === 'movie' ? 'selected' : ''}>Movies</option>
+        <option value="tv" ${state.discoverType === 'tv' ? 'selected' : ''}>TV Shows</option>
+        <option value="anime" ${state.discoverType === 'anime' ? 'selected' : ''}>Anime</option>
+      </select>
+      <select id="disc-genre" class="field-select" aria-label="Genre">
+        ${BROWSE_GENRES.map(
+          (g) => `<option value="${escapeHtml(g)}" ${
+            state.discoverGenre === g ? 'selected' : ''
+          }>${escapeHtml(g)}</option>`
+        ).join('')}
+      </select>
+      <select id="disc-year" class="field-select" aria-label="Year">
+        <option value="all" ${state.discoverYear === 'all' ? 'selected' : ''}>All Years</option>
+        <option value="2026" ${state.discoverYear === '2026' ? 'selected' : ''}>2026</option>
+        <option value="2025" ${state.discoverYear === '2025' ? 'selected' : ''}>2025</option>
+        <option value="2024" ${state.discoverYear === '2024' ? 'selected' : ''}>2024</option>
+        <option value="2020s" ${state.discoverYear === '2020s' ? 'selected' : ''}>2020s</option>
+        <option value="2010s" ${state.discoverYear === '2010s' ? 'selected' : ''}>2010s</option>
+        <option value="classic" ${state.discoverYear === 'classic' ? 'selected' : ''}>Classics</option>
+      </select>
+      <select id="disc-sort" class="field-select" aria-label="Sort">
+        <option value="trending" ${state.discoverSort === 'trending' ? 'selected' : ''}>Trending</option>
+        <option value="rating" ${state.discoverSort === 'rating' ? 'selected' : ''}>Top Rated</option>
+        <option value="year" ${state.discoverSort === 'year' ? 'selected' : ''}>Newest</option>
+      </select>
     </div>
 
     ${
       state.discoverLoading && visible.length === 0
-        ? `<p class="dim">Loading live catalog from Cinemeta &amp; AniList...</p>`
-        : visible.length > 0
-        ? `<div class="card-grid">
-            ${visible
-              .map((item) => {
-                const key = getMediaKey(item);
-                return renderMediaCard(item, {
-                  progress: state.progressMap[key],
-                  liked: likedIds.has(key),
-                });
-              })
-              .join('')}
-          </div>`
-        : `<div class="season-ep-box"><p class="dim">No titles matched these exact filter constraints. Try relaxing Year or Rating.</p></div>`
+        ? `<p class="dim" style="padding:18px 14px;">Loading free catalog from Cinemeta &amp; AniList...</p>`
+        : `<div class="poster-grid-3">${visible.map((item) => renderPosterCard(item)).join('')}</div>`
     }
 
-    <div style="display:flex;justify-content:center;padding-top:8px;">
-      <button type="button" class="pill-button" id="discover-load-more-btn" ${state.discoverLoading ? 'disabled' : ''}>
-        ${state.discoverLoading ? 'Loading more titles...' : 'Load More Titles'}
+    <div style="display:flex;justify-content:center;padding:8px 14px 16px;">
+      <button type="button" class="btn-dark" id="discover-load-more-btn" style="width:100%;max-width:340px;" ${
+        state.discoverLoading ? 'disabled' : ''
+      }>
+        ${state.discoverLoading ? 'Loading more...' : 'Load More Titles'}
       </button>
     </div>
-  </div>`;
+  `;
 }
 
-function renderLibraryPage() {
-  const likedIds = getLikedSet();
-  const continueItems = Object.values(state.progressMap)
-    .filter((e) => e?.item && e.currentTime > 0)
-    .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))
-    .map((e) => getItemByKey(getMediaKey(e.item)) || e.item);
-
-  const likedItems = Array.from(likedIds)
-    .map((k) => getItemByKey(k))
-    .filter(Boolean);
-
-  return `<div class="page">
-    <h1 style="font-size:28px;font-weight:700;letter-spacing:-0.5px;">My List &amp; Cinema Library</h1>
-
-    ${
-      continueItems.length > 0
-        ? renderShelf({
-            id: 'lib-continue',
-            title: 'Continue watching (synced from VidRift)',
-            items: continueItems,
-            wide: true,
-            progressMap: state.progressMap,
-            likedIds,
-          })
-        : `<div class="season-ep-box"><p class="dim">Start streaming any movie, series, or anime — VidRift playback timestamps appear here automatically.</p></div>`
-    }
-
-    <section class="shelf">
-      <div class="shelf-head"><h2 class="shelf-title">Double-feature mixtapes</h2></div>
-      <div class="mood-grid">
-        ${state.collections
-          .map(
-            (c) => `<button type="button" class="mood-tile" data-open-collection="${escapeHtml(
-              c.id
-            )}" style="--mood:var(--accent)">
-              <span class="mood-bar"></span>
-              <span class="mood-label">${escapeHtml(c.name)} (${c.items.length})</span>
-            </button>`
-          )
-          .join('')}
-      </div>
-    </section>
-
-    <section class="shelf">
-      <div class="shelf-head"><h2 class="shelf-title">Saved to My List (${likedItems.length})</h2></div>
-      ${
-        likedItems.length > 0
-          ? `<div class="card-grid">
-              ${likedItems
-                .map((item) => {
-                  const key = getMediaKey(item);
-                  return renderMediaCard(item, {
-                    progress: state.progressMap[key],
-                    liked: true,
-                  });
-                })
-                .join('')}
-            </div>`
-          : `<p class="dim">Tap the heart on any title to add it to My List.</p>`
-      }
-    </section>
-  </div>`;
-}
-
-function renderCollectionPage() {
-  const col = state.collections.find((c) => c.id === state.collectionId) || state.collections[0];
-  const items = (col?.items || []).map((k) => getItemByKey(k)).filter(Boolean);
-
-  return `<div class="page">
-    <div class="hero">
-      <div class="hero-art">
-        <img src="${escapeHtml(
-          items[0]
-            ? resolveArtUrl(items[0], 'poster')
-            : buildCinemaFallbackArt({ title: col?.name || 'Mixtape', creator: 'Suno Double Feature', mediaType: 'movie' }, 'poster')
-        )}" alt="" referrerpolicy="no-referrer" />
-      </div>
-      <div class="hero-body">
-        <span class="sonic-eyebrow">Suno Double-Feature Mixtape</span>
-        <h1 class="hero-title">${escapeHtml(col?.name || 'Mixtape')}</h1>
-        <p class="hero-meta">${items.length} curated titles • ${escapeHtml(col?.subtitle || 'Custom arc')}</p>
-        <div class="hero-actions">
-          ${
-            items[0]
-              ? `<button type="button" class="primary-button" data-play-key="${escapeHtml(
-                  getMediaKey(items[0])
-                )}">${svgIcon('play', 16)} Play Feature Arc</button>`
-              : ''
-          }
-        </div>
-      </div>
-    </div>
-
-    <div class="track-list">
-      ${
-        items.length > 0
-          ? items.map((item, idx) => renderSongFilmRow(item, idx)).join('')
-          : `<p class="dim">This mixtape is empty. Open any film and add it to "${escapeHtml(col?.name || '')}".</p>`
-      }
-    </div>
-  </div>`;
-}
-
-function renderSearchPage() {
-  const likedIds = getLikedSet();
+function renderSearchTab() {
   const direct = parseDirectTarget(state.searchQuery);
+  const topRecommended = getAllKnownPool().slice(0, 14);
 
-  return `<div class="page">
-    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;">
-      <div>
-        <h1 style="font-size:26px;font-weight:700;">Results for "${escapeHtml(state.searchQuery)}"</h1>
-        <p class="dim" style="font-size:13px;margin-top:4px;">Searching Suno catalog, Cinemeta (all movies &amp; series) &amp; AniList live</p>
-      </div>
-      ${
-        direct
-          ? `<button type="button" class="primary-button" data-launch-direct="true">
-              ${svgIcon('play', 16)} Stream ${escapeHtml(direct.mediaType.toUpperCase())} #${escapeHtml(
-              direct.tmdbId || direct.anilistId
-            )}
-            </button>`
-          : ''
-      }
-    </div>
-
-    ${
-      state.searchLoading
-        ? `<p class="dim">Querying free Cinemeta, AniList &amp; curated catalogs...</p>`
-        : state.searchResults.length > 0
-        ? `<div class="card-grid">
-            ${state.searchResults
-              .map((item) => {
-                const key = getMediaKey(item);
-                return renderMediaCard(item, {
-                  progress: state.progressMap[key],
-                  liked: likedIds.has(key),
-                });
-              })
-              .join('')}
-          </div>`
-        : `<div class="season-ep-box">
-            <p>No direct match returned. You can still stream <strong>any</strong> TMDB or AniList title immediately using the Direct ID Launcher!</p>
-            <div>
-              <button type="button" class="pill-button" id="search-open-ql">${svgIcon('link', 16)} Launch by TMDB / AniList ID</button>
-            </div>
-          </div>`
-    }
-  </div>`;
-}
-
-function renderDetailPage() {
-  const item = getItemByKey(state.detailKey);
-  if (!item) {
-    return `<div class="page"><p class="dim">Title not found.</p></div>`;
-  }
-  const key = getMediaKey(item);
-  const saved = state.progressMap[key];
-  const liked = getLikedSet().has(key);
-  const profile = getActiveSonicProfile();
-  const { ranked } = buildAfterTrackMatches(getAllKnownPool(), profile);
-  const related = ranked.filter((x) => getMediaKey(x) !== key).slice(0, 10);
-
-  const seasons =
-    item.mediaType === 'tv'
-      ? state.seasonsCache.get(String(item.tmdbId || item.imdbId)) ||
-        item.seasonsList || [{ seasonNumber: 1, name: 'Season 1', episodeCount: item.totalEpisodes || 10 }]
-      : [];
-
-  return `<div class="page">
-    <div class="hero">
-      <div class="hero-art">
-        <img src="${escapeHtml(resolveArtUrl(item, 'poster'))}" alt="${escapeHtml(
-    item.title
-  )}" referrerpolicy="no-referrer" ${attachFallbackImgAttr(item, 'poster')} />
-      </div>
-      <div class="hero-body">
-        <span class="sonic-eyebrow">${escapeHtml(item.mediaType.toUpperCase())} • ${escapeHtml(
-    item.year || 'Feature'
-  )} • ★ ${escapeHtml(item.rating || '8.0')}${item.country ? ` • ${escapeHtml(item.country)}` : ''}</span>
-        ${
-          item.logo
-            ? `<div class="hero-logo-wrap"><img class="hero-logo-img" src="${escapeHtml(item.logo)}" alt="${escapeHtml(
-                item.title
-              )}" referrerpolicy="no-referrer" onerror="this.style.display='none';this.nextElementSibling.style.display='block';" /><h1 class="hero-title" style="display:none;">${escapeHtml(
-                item.title
-              )}</h1></div>`
-            : `<h1 class="hero-title">${escapeHtml(item.title)}</h1>`
-        }
-        <p class="hero-meta">${escapeHtml(item.creator || 'Suno Cinema')} • ${escapeHtml(
-    item.runtime || ''
-  )} • ${escapeHtml((item.genres || []).join(', '))}</p>
-        ${item.awards ? `<p class="dim" style="font-size:12px;">${escapeHtml(item.awards)}</p>` : ''}
-        <p class="hero-description">${escapeHtml(
-          item.overview || (state.detailLoading ? 'Fetching full synopsis & TMDB stream info...' : 'Stream seamlessly through VidRift with Suno Sonic pairing.')
-        )}</p>
-
-        ${
-          item.cast?.length
-            ? `<div class="cast-chips">${item.cast
-                .map((c) => `<span class="cast-chip">${escapeHtml(c)}</span>`)
-                .join('')}</div>`
-            : ''
-        }
-
-        <div class="hero-sonic-strip">
-          <div><span class="dim">Sonic DNA:</span> <strong>${escapeHtml(
-            item.sonic?.texture || 'Atmospheric Score'
-          )}</strong></div>
-          <div><span class="dim">Listen First:</span> <strong>${escapeHtml(
-            item.sonic?.listenBefore || 'Suno Night Mix'
-          )}</strong></div>
-          <div><span class="dim">After-Credits:</span> <strong>${escapeHtml(
-            item.sonic?.cooldownCue || 'Ambient Reverb'
-          )}</strong></div>
-        </div>
-
-        <div class="hero-actions">
-          <button type="button" class="primary-button" data-play-key="${escapeHtml(key)}">
-            ${svgIcon('play', 16)} ${
-    saved?.currentTime > 15 ? `Resume (${formatTime(saved.currentTime)})` : 'Stream on VidRift'
-  }
-          </button>
-          ${
-            item.trailerId
-              ? `<button type="button" class="pill-button" data-open-trailer="${escapeHtml(
-                  item.trailerId
-                )}" data-trailer-title="${escapeHtml(item.title)}">
-                  ${svgIcon('trailer', 16)} Watch Trailer
-                </button>`
-              : ''
-          }
-          <button type="button" class="pill-button" id="detail-audition-btn" data-curtain="${escapeHtml(
-            item.sonic?.moodId || 'midnight-synth'
-          )}">
-            ${svgIcon('wave', 16)} Audition Score Mood
-          </button>
-          <button type="button" class="pill-button" data-toggle-like="${escapeHtml(key)}">
-            ${svgIcon(liked ? 'heartFill' : 'heart', 16)} ${liked ? 'In My List' : 'My List'}
-          </button>
-          <select class="field-select" style="height:38px;" data-add-mixtape="${escapeHtml(key)}">
-            <option value="">+ Add to Mixtape...</option>
-            ${state.collections
-              .filter((c) => !c.auto)
-              .map((c) => `<option value="${escapeHtml(c.id)}">${escapeHtml(c.name)}</option>`)
-              .join('')}
-          </select>
-        </div>
-      </div>
-    </div>
-
-    ${
-      item.mediaType === 'tv' || item.mediaType === 'anime'
-        ? renderRichEpisodesSection({
-            item,
-            seasons,
-            activeSeason: state.activeSeason,
-            activeEpisode: state.activeEpisode,
-            dubEnabled: state.prefs.dub,
-            compact: false,
-          })
-        : ''
-    }
-
-    ${renderShelf({
-      id: 'detail-related',
-      title: 'Continue the sonic arc with',
-      items: related,
-      wide: true,
-      progressMap: state.progressMap,
-      likedIds: getLikedSet(),
-    })}
-  </div>`;
-}
-
-function renderTheaterContent() {
-  if (!state.activeItem) return { panelHtml: '', toolbarHtml: '', afterHtml: '', embedUrl: '' };
-  const item = state.activeItem;
-  const key = getMediaKey(item);
-  const embedUrl = getCurrentEmbedUrl();
-  const saved = state.progressMap[key];
-  const seasons =
-    item.mediaType === 'tv'
-      ? state.seasonsCache.get(String(item.tmdbId || item.imdbId)) ||
-        item.seasonsList || [{ seasonNumber: 1, name: 'Season 1', episodeCount: item.totalEpisodes || 10 }]
-      : [];
-
-  const afterHtml = state.afterCreditsItem
-    ? `<div class="after-credits-banner">
-        <div>
-          <div class="sonic-eyebrow">After-Credits Transition</div>
-          <div style="font-size:15px;font-weight:700;margin-top:3px;">Up Next: ${escapeHtml(
-            state.afterCreditsItem.title
-          )}</div>
-          <div class="dim" style="font-size:12px;">Or ease out with an ambient Suno cooldown tone</div>
-        </div>
-        <div style="display:flex;gap:8px;flex-wrap:wrap;">
-          <button type="button" class="pill-button" id="cooldown-audio-btn">
-            ${svgIcon('wave', 15)} Audio Cooldown
-          </button>
-          <button type="button" class="primary-button" data-play-key="${escapeHtml(
-            getMediaKey(state.afterCreditsItem)
-          )}">
-            ${svgIcon('play', 15)} Stream Next
-          </button>
-        </div>
-      </div>`
-    : '';
-
-  const toolbarHtml = `<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
-      <strong style="font-size:15px;">${escapeHtml(item.title)}</strong>
-      ${
-        item.mediaType !== 'movie'
-          ? `<span class="row-match-pill">${
-              item.mediaType === 'tv' ? `S${state.activeSeason} E${state.activeEpisode}` : `Ep ${state.activeEpisode}`
-            }</span>`
-          : ''
-      }
-      <button type="button" class="shield-pill ${state.shield.strictFrameMode ? 'is-warn' : ''}" id="toggle-strict-shield-btn" title="Zero-Ad Host Shield active. Click to toggle optional strict frame sandbox.">
-        ${svgIcon('shield', 14)}
-        <span>${state.shield.strictFrameMode ? 'Strict Sandbox ON' : `Shield Active • ${state.shield.blockedCount} blocked`}</span>
+  return `
+    <div class="search-bar-sticky">
+      <button type="button" class="icon-btn" data-nav-tab="home" aria-label="Back">
+        ${svgIcon('back', 21)}
       </button>
-      <span class="dim" style="font-size:12px;">
+      <form class="search-input-pill" id="global-search-form">
+        ${svgIcon('search', 18)}
+        <input
+          id="global-search-input"
+          type="text"
+          placeholder="Search movies, shows, anime, or TMDB ID..."
+          value="${escapeHtml(state.searchQuery)}"
+          autocomplete="off"
+        />
         ${
-          state.livePlayback.currentTime > 0
-            ? `Synced: ${formatTime(state.livePlayback.currentTime)}`
-            : 'VidRift Ready'
-        }
-      </span>
-    </div>
-
-    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-      ${
-        saved?.currentTime > 15
-          ? `<button type="button" class="pill-button" id="cmd-resume-btn" style="height:34px;font-size:12px;">
-              Resume ${formatTime(saved.currentTime)}
-            </button>`
-          : ''
-      }
-      <button type="button" class="pill-button" id="cmd-play-btn" style="height:34px;font-size:12px;">Play</button>
-      <button type="button" class="pill-button" id="cmd-pause-btn" style="height:34px;font-size:12px;">Pause</button>
-      <button type="button" class="pill-button" id="reload-player-btn" style="height:34px;font-size:12px;" title="Reload stream player">
-        ${svgIcon('refresh', 13)} Reload
-      </button>
-      ${
-        item.mediaType !== 'movie'
-          ? `<button type="button" class="pill-button" id="next-ep-btn" style="height:34px;font-size:12px;">Next Ep ${svgIcon(
-              'next',
-              13
-            )}</button>`
-          : ''
-      }
-      <button type="button" class="pill-button" id="collapse-theater-btn" style="height:34px;font-size:12px;">
-        ${svgIcon('chevronDown', 15)} Mini Dock
-      </button>
-    </div>`;
-
-  const panelHtml = `<div class="panel-tabs">
-      <button type="button" class="panel-tab ${
-        state.panelTab === 'upnext' ? 'is-active' : ''
-      }" data-panel-tab="upnext">Up Next</button>
-      ${
-        item.mediaType !== 'movie'
-          ? `<button type="button" class="panel-tab ${
-              state.panelTab === 'episodes' ? 'is-active' : ''
-            }" data-panel-tab="episodes">Episodes</button>`
-          : ''
-      }
-      <button type="button" class="panel-tab ${
-        state.panelTab === 'sonic' ? 'is-active' : ''
-      }" data-panel-tab="sonic">Sonic &amp; Shield</button>
-    </div>
-
-    <div class="panel-scroll">
-      ${
-        state.panelTab === 'upnext'
-          ? state.queue.map((q, idx) => renderSongFilmRow(q, idx, { activeKey: key })).join('')
-          : state.panelTab === 'episodes'
-          ? renderRichEpisodesSection({
-              item,
-              seasons,
-              activeSeason: state.activeSeason,
-              activeEpisode: state.activeEpisode,
-              dubEnabled: state.prefs.dub,
-              compact: true,
-            })
-          : `<div style="display:flex;flex-direction:column;gap:12px;font-size:12px;">
-              <div class="season-ep-box" style="padding:12px;">
-                <div style="font-weight:700;margin-bottom:4px;">Anti-Redirect &amp; Zero-Ad Shield</div>
-                <div class="dim">Host popups/redirects blocked: <strong>${state.shield.blockedCount}</strong></div>
-                <div class="dim" style="margin-top:4px;">Navigation Lock: <strong>${
-                  state.shield.navigationLock ? 'Armed' : 'Off'
-                }</strong> • Strict Sandbox: <strong>${
-              state.shield.strictFrameMode ? 'ON' : 'OFF (VidRift default)'
-            }</strong></div>
-                ${
-                  state.shield.recentEvents.length
-                    ? `<div style="margin-top:8px;display:flex;flex-direction:column;gap:3px;">
-                        ${state.shield.recentEvents
-                          .slice(0, 6)
-                          .map(
-                            (ev) =>
-                              `<div class="dim" style="font-size:11px;">[${escapeHtml(ev.time)}] ${escapeHtml(
-                                ev.reason
-                              )}</div>`
-                          )
-                          .join('')}
-                      </div>`
-                    : ''
-                }
-              </div>
-              <div class="season-ep-box" style="padding:12px;">
-                <div style="font-weight:700;margin-bottom:4px;">Sonic Pairing</div>
-                <div class="dim">Listen first: ${escapeHtml(item.sonic?.listenBefore || 'Suno Night Mix')}</div>
-                <div class="dim" style="margin-top:4px;">After credits: ${escapeHtml(
-                  item.sonic?.cooldownCue || 'Ambient Pad'
-                )}</div>
-              </div>
-              <div class="season-ep-box" style="padding:12px;">
-                <div style="font-weight:700;margin-bottom:4px;">Active VidRift Embed URL</div>
-                <div class="dim" style="word-break:break-all;font-size:11px;line-height:1.4;">${escapeHtml(
-                  embedUrl
-                )}</div>
-              </div>
-              <div class="season-ep-box" style="padding:12px;">
-                <div style="font-weight:700;margin-bottom:4px;">postMessage Bridge Log</div>
-                ${
-                  state.vidriftLog.length
-                    ? state.vidriftLog
-                        .map((l) => `<div class="dim" style="font-size:11px;">${escapeHtml(l)}</div>`)
-                        .join('')
-                    : `<div class="dim" style="font-size:11px;">Listening for vidrift:progress / ended / exit events...</div>`
-                }
-              </div>
-            </div>`
-      }
-    </div>`;
-
-  return { panelHtml, toolbarHtml, afterHtml, embedUrl };
-}
-
-function renderPlayerBar() {
-  const item = state.activeItem;
-  const curtainOnly = !item && sonicCurtain.isPlaying;
-  if (!item && !curtainOnly) return '';
-
-  const pct =
-    state.livePlayback.duration > 0
-      ? Math.min(100, Math.round((state.livePlayback.currentTime / state.livePlayback.duration) * 100))
-      : sonicCurtain.isPlaying
-      ? 100
-      : 0;
-
-  const title = item ? item.title : `Sonic Curtain • ${sonicCurtain.activeLabel || 'Mood Synth'}`;
-  const sub = item
-    ? `${item.mediaType === 'tv' ? `S${state.activeSeason} E${state.activeEpisode} • ` : ''}${
-        item.sonic?.texture || item.creator || 'VidRift Stream'
-      }`
-    : 'Listening bridge active — pick a movie to transition';
-  const art = item ? resolveArtUrl(item, 'poster') : '';
-  const liked = item ? getLikedSet().has(getMediaKey(item)) : false;
-
-  return `<footer class="playerbar" aria-label="Suno Cinema Player Dock">
-    <div class="scrubber-track" title="VidRift playback progress">
-      <div class="scrubber-fill" style="width:${pct}%"></div>
-    </div>
-    <div class="playerbar-inner">
-      <div class="playerbar-controls">
-        <button type="button" class="icon-button" id="dock-prev-btn" aria-label="Previous">${svgIcon('prev', 18)}</button>
-        <button type="button" class="play-button" id="dock-toggle-btn" aria-label="${
-          state.isPaused ? 'Play' : 'Pause'
-        }">
-          ${svgIcon(state.isPaused && !sonicCurtain.isPlaying ? 'play' : 'pause', 18)}
-        </button>
-        <button type="button" class="icon-button" id="dock-next-btn" aria-label="Next">${svgIcon('next', 18)}</button>
-        <span class="playerbar-time">
-          ${formatTime(state.livePlayback.currentTime)} <span class="dim">/ ${formatTime(
-    state.livePlayback.duration
-  )}</span>
-        </span>
-      </div>
-
-      <div class="playerbar-now" id="dock-expand-trigger" role="button" tabindex="0">
-        ${
-          art
-            ? `<div class="now-art"><img src="${escapeHtml(art)}" alt="" referrerpolicy="no-referrer" ${attachFallbackImgAttr(
-                item,
-                'poster'
-              )} /></div>`
-            : `<div class="now-art" style="display:grid;place-items:center;background:var(--accent);color:#fff;">${svgIcon(
-                'wave',
-                20
-              )}</div>`
-        }
-        <div class="now-text">
-          <div class="now-title">${escapeHtml(title)}</div>
-          <div class="now-sub">${escapeHtml(sub)}</div>
-        </div>
-      </div>
-
-      <div class="playerbar-actions">
-        <button type="button" class="icon-button hide-sm ${
-          sonicCurtain.isPlaying ? 'is-on' : ''
-        }" id="dock-curtain-btn" title="Toggle Sonic Curtain" aria-label="Toggle Sonic Curtain">
-          ${svgIcon('wave', 18)}
-        </button>
-        ${
-          item
-            ? `<button type="button" class="icon-button hide-sm" data-toggle-like="${escapeHtml(
-                getMediaKey(item)
-              )}" aria-label="Like">
-                ${svgIcon(liked ? 'heartFill' : 'heart', 18)}
+          state.searchQuery
+            ? `<button type="button" class="icon-btn" id="clear-search-btn" style="width:28px;height:28px;">
+                ${svgIcon('close', 16)}
               </button>`
             : ''
         }
-        <button type="button" class="icon-button" id="dock-expand-btn" aria-label="Toggle Theater">
-          ${svgIcon(state.isExpanded ? 'chevronDown' : 'chevronUp', 20)}
-        </button>
-        <button type="button" class="icon-button" id="dock-close-btn" title="Close player dock" aria-label="Close player dock">
-          ${svgIcon('close', 18)}
-        </button>
-      </div>
+      </form>
     </div>
-  </footer>`;
+
+    ${
+      direct
+        ? `<div style="padding:4px 14px 10px;">
+            <button type="button" class="btn-white" style="width:100%;" data-launch-direct="true">
+              ${svgIcon('play', 16)} Stream ${escapeHtml(direct.mediaType.toUpperCase())} #${escapeHtml(
+            direct.tmdbId || direct.anilistId
+          )} via VidRift
+            </button>
+          </div>`
+        : ''
+    }
+
+    ${
+      !state.searchQuery.trim()
+        ? `<div style="padding:4px 0 12px;">
+            <h2 class="nf-shelf-title" style="padding:6px 14px 10px;">Recommended Shows &amp; Movies</h2>
+            ${topRecommended
+              .map((item) => {
+                const key = getMediaKey(item);
+                return `<div class="top-search-row" data-open-detail="${escapeHtml(key)}">
+                  <div class="top-search-thumb">
+                    <img src="${escapeHtml(resolveArtUrl(item, 'wide'))}" alt="" loading="lazy" referrerpolicy="no-referrer" ${attachFallbackImgAttr(
+                  item,
+                  'wide'
+                )} />
+                  </div>
+                  <div style="flex:1;min-width:0;">
+                    <div style="font-size:14px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(
+                      item.title
+                    )}</div>
+                    <div class="dim" style="font-size:12px;">${escapeHtml(item.year || '')} • ${escapeHtml(
+                  item.mediaType.toUpperCase()
+                )}</div>
+                  </div>
+                  <button type="button" class="icon-btn" data-play-key="${escapeHtml(key)}" onclick="event.stopPropagation()" aria-label="Play ${escapeHtml(
+                  item.title
+                )}">
+                    ${svgIcon('play', 18)}
+                  </button>
+                </div>`;
+              })
+              .join('')}
+          </div>`
+        : state.searchLoading
+        ? `<p class="dim" style="padding:20px 14px;">Searching free Cinemeta &amp; AniList...</p>`
+        : state.searchResults.length > 0
+        ? `<div>
+            <h2 class="nf-shelf-title" style="padding:6px 14px 4px;">Top Results</h2>
+            <div class="poster-grid-3">${state.searchResults.map((x) => renderPosterCard(x)).join('')}</div>
+          </div>`
+        : `<div style="padding:22px 14px;display:flex;flex-direction:column;gap:12px;">
+            <p class="dim">No exact matches found for "${escapeHtml(state.searchQuery)}".</p>
+            <button type="button" class="btn-dark" id="open-quicklaunch-btn">Launch by TMDB / AniList ID</button>
+          </div>`
+    }
+  `;
 }
 
-function renderMobileNav() {
+function renderMySunoTab() {
+  const continueEntries = Object.values(state.progressMap)
+    .filter((e) => e?.item && e.currentTime > 0)
+    .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+
+  const likedItems = Array.from(getCollectionSet(LIKED_COLLECTION_ID))
+    .map((k) => getItemByKey(k))
+    .filter(Boolean);
+
+  const myListItems = Array.from(getCollectionSet(MY_LIST_COLLECTION_ID))
+    .map((k) => getItemByKey(k))
+    .filter(Boolean);
+
+  return `
+    ${renderTopHeader({
+      leftHtml: `
+        <button type="button" style="display:inline-flex;align-items:center;gap:10px;" id="open-settings-profile-btn">
+          ${renderSunoMascotSvg(28)}
+          <span class="sc-topbar-title">${escapeHtml(state.profile.name || 'Ansh')} ${svgIcon('chevronDown', 16)}</span>
+        </button>
+      `,
+    })}
+
+    <button type="button" class="downloads-banner" id="open-downloads-card">
+      <span style="padding-top:2px;">${svgIcon('download', 22)}</span>
+      <div class="downloads-banner-body">
+        <div class="downloads-banner-title">
+          <span>Downloads</span>
+          ${svgIcon('chevronRight', 20)}
+        </div>
+        <div class="downloads-banner-sub">${
+          state.downloads.length > 0
+            ? `${state.downloads.length} saved title(s) in your offline &amp; quick-watch queue.`
+            : 'Movies and shows that you download appear here.'
+        }</div>
+      </div>
+    </button>
+
+    ${renderShelf({
+      id: 'mysuno-cw',
+      title: 'Continue Watching',
+      items: continueEntries,
+      kind: 'continue',
+    })}
+
+    ${renderShelf({
+      id: 'mysuno-liked',
+      title: "TV Shows & Movies You've Liked",
+      items: likedItems,
+      kind: 'liked',
+    })}
+
+    ${renderShelf({
+      id: 'mysuno-mylist',
+      title: 'My List',
+      items: myListItems,
+      seeAllAttr: 'data-nav-tab="discover"',
+    })}
+  `;
+}
+
+function renderDownloadsView() {
+  const downloadedItems = state.downloads.map((k) => getItemByKey(k)).filter(Boolean);
+  const collageLeft = getItemByKey('movie:157336') || state.catalog[0];
+  const collageCenter = getItemByKey('movie:26815') || state.catalog[1];
+  const collageRight = getItemByKey('movie:1163194') || state.catalog[2];
+
+  return `
+    ${renderTopHeader({
+      leftHtml: `
+        <button type="button" class="icon-btn" id="downloads-back-btn" aria-label="Back">
+          ${svgIcon('back', 22)}
+        </button>
+        <span class="sc-topbar-title">Downloads</span>
+      `,
+    })}
+
+    <div class="downloads-page">
+      <button type="button" id="toggle-smart-downloads-btn" style="display:flex;align-items:center;gap:10px;font-size:15px;font-weight:600;padding:4px 0;">
+        ${svgIcon('settings', 20)}
+        <span>Smart Downloads ${state.profile.smartDownloads ? '(On)' : ''}</span>
+      </button>
+
+      <div>
+        <h2 style="font-size:20px;font-weight:700;margin-bottom:8px;">Turn on Downloads for You</h2>
+        <p class="dim" style="font-size:14px;line-height:1.45;">
+          We'll queue movies and shows just for you, so you'll always have something ready to watch.
+        </p>
+      </div>
+
+      <div class="collage-wrap">
+        <div class="collage-circle"></div>
+        ${
+          collageLeft
+            ? `<div class="collage-poster left"><img src="${escapeHtml(resolveArtUrl(collageLeft, 'poster'))}" alt="" referrerpolicy="no-referrer" /></div>`
+            : ''
+        }
+        ${
+          collageCenter
+            ? `<div class="collage-poster center"><img src="${escapeHtml(resolveArtUrl(collageCenter, 'poster'))}" alt="" referrerpolicy="no-referrer" /></div>`
+            : ''
+        }
+        ${
+          collageRight
+            ? `<div class="collage-poster right"><img src="${escapeHtml(resolveArtUrl(collageRight, 'poster'))}" alt="" referrerpolicy="no-referrer" /></div>`
+            : ''
+        }
+      </div>
+
+      <button type="button" class="btn-blue" id="setup-smart-dl-btn" style="width:100%;">
+        ${state.profile.smartDownloads ? 'Smart Queue Active ✓' : 'Set up'}
+      </button>
+      <button type="button" class="btn-dark" data-nav-tab="discover" style="width:100%;height:44px;">
+        Find More to Download
+      </button>
+
+      ${
+        downloadedItems.length > 0
+          ? `<div style="margin-top:8px;">
+              <h3 style="font-size:16px;font-weight:700;margin-bottom:10px;">Saved Queue (${downloadedItems.length})</h3>
+              <div class="poster-grid-3" style="padding:0;">
+                ${downloadedItems.map((item) => renderPosterCard(item)).join('')}
+              </div>
+            </div>`
+          : ''
+      }
+    </div>
+  `;
+}
+
+function renderFloatingBottomNav() {
+  const activeTab =
+    state.tab === 'detail' || state.tab === 'downloads' ? state.prevTab : state.tab;
   const items = [
-    { id: 'home', label: 'Home', icon: 'home', attr: 'data-nav="home"' },
-    { id: 'discover', label: 'Discover', icon: 'compass', attr: 'data-open-cat="all"' },
-    { id: 'bridge', label: 'Bridge', icon: 'wave', attr: 'data-nav="bridge"' },
-    { id: 'library', label: 'My List', icon: 'library', attr: 'data-nav="library"' },
+    { id: 'home', label: 'Home', iconHtml: svgIcon('home', 21) },
+    { id: 'clips', label: 'Clips', iconHtml: svgIcon('clips', 21) },
+    { id: 'discover', label: 'Discover', iconHtml: svgIcon('compass', 21) },
+    { id: 'search', label: 'Search', iconHtml: svgIcon('search', 21) },
+    { id: 'mysuno', label: 'My Suno', iconHtml: renderSunoMascotSvg(22) },
   ];
-  return `<nav class="mobile-bottom-bar" aria-label="Mobile navigation">
-    ${items
-      .map(
-        (n) => `<button type="button" class="mobile-nav-tab ${
-          state.route === n.id ? 'is-active' : ''
-        }" ${n.attr}>
-          ${svgIcon(n.icon, 20)}
-          <span>${n.label}</span>
-        </button>`
-      )
-      .join('')}
+
+  return `<nav class="floating-nav-wrap" aria-label="Bottom Navigation">
+    <div class="floating-nav-pill">
+      ${items
+        .map(
+          (n) => `<button type="button" class="nav-pill-tab ${
+            activeTab === n.id ? 'is-active' : ''
+          }" data-nav-tab="${n.id}">
+            ${n.iconHtml}
+            <span>${n.label}</span>
+          </button>`
+        )
+        .join('')}
+    </div>
   </nav>`;
-}
-
-function renderPage() {
-  switch (state.route) {
-    case 'bridge':
-      return renderBridgePage();
-    case 'discover':
-      return renderDiscoverPage();
-    case 'library':
-      return renderLibraryPage();
-    case 'collection':
-      return renderCollectionPage();
-    case 'search':
-      return renderSearchPage();
-    case 'detail':
-      return renderDetailPage();
-    case 'home':
-    default:
-      return renderHomePage();
-  }
-}
-
-function ensureShellMounts() {
-  if (document.getElementById('app-shell')) return;
-  rootEl.innerHTML = `<div class="app" id="app-shell">
-    <div class="page-wash"></div>
-    <div id="shell-mount" style="display:flex;flex-direction:column;flex:1;min-height:0;"></div>
-    <div id="theater-mount"></div>
-    <div id="dock-mount"></div>
-    <div id="mobile-nav-mount"></div>
-    <div id="modal-mount"></div>
-  </div>`;
 }
 
 function applySandboxAttr(iframe) {
   if (!iframe) return;
   if (state.shield.strictFrameMode) {
-    iframe.setAttribute(
-      'sandbox',
-      'allow-scripts allow-same-origin allow-forms allow-presentation'
-    );
+    iframe.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms allow-presentation');
   } else {
     iframe.removeAttribute('sandbox');
   }
 }
 
-function syncTheaterMount({ forceReload = false } = {}) {
-  const mount = document.getElementById('theater-mount');
+function syncPlayerMount({ forceReload = false } = {}) {
+  const mount = document.getElementById('player-mount');
   if (!mount) return;
-  if (!state.activeItem) {
+  if (!state.playerOpen || !state.activeItem) {
     mount.innerHTML = '';
     return;
   }
 
-  const { panelHtml, toolbarHtml, afterHtml, embedUrl } = renderTheaterContent();
-  let overlay = mount.querySelector('.theater-overlay');
+  const embedUrl = getCurrentEmbedUrl();
+  const item = state.activeItem;
+  const existingFrame = document.getElementById('vidrift-player');
 
-  if (!overlay) {
-    mount.innerHTML = `<section class="theater-overlay ${
-      state.isExpanded ? '' : 'is-hidden'
-    }" aria-label="VidRift Theater Stage">
-      <div class="theater-stage-left">
-        <div class="theater-video-wrap">
-          <iframe
-            id="vidrift-player"
-            src="${escapeHtml(embedUrl)}"
-            title="${escapeHtml(state.activeItem.title)}"
-            allow="autoplay; fullscreen; picture-in-picture; encrypted-media"
-            allowfullscreen
-            referrerpolicy="strict-origin-when-cross-origin"
-          ></iframe>
-          <div id="after-credits-mount"></div>
+  if (!existingFrame) {
+    mount.innerHTML = `<section class="player-fullscreen" aria-label="VidRift Player">
+      <div class="player-top-bar">
+        <div style="display:flex;align-items:center;gap:8px;min-width:0;">
+          <button type="button" class="icon-btn" id="close-player-btn" aria-label="Close player">
+            ${svgIcon('back', 22)}
+          </button>
+          <div style="min-width:0;">
+            <div style="font-size:15px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(
+              item.title
+            )}</div>
+            <div class="dim" style="font-size:11px;">${
+              item.mediaType === 'tv'
+                ? `Season ${state.activeSeason} • Episode ${state.activeEpisode}`
+                : item.mediaType === 'anime'
+                ? `Episode ${state.activeEpisode}`
+                : 'VidRift HD Stream'
+            }</div>
+          </div>
         </div>
-        <div class="theater-toolbar" id="theater-toolbar-mount"></div>
+        <button type="button" class="shield-pill ${state.shield.strictFrameMode ? 'is-warn' : ''}" id="toggle-strict-shield-btn">
+          ${svgIcon('shield', 13)}
+          <span>${state.shield.strictFrameMode ? 'Sandbox ON' : `Shield • ${state.shield.blockedCount}`}</span>
+        </button>
       </div>
-      <aside class="theater-panel" id="theater-panel-mount"></aside>
+
+      <div class="player-frame-box">
+        <iframe
+          id="vidrift-player"
+          src="${escapeHtml(embedUrl)}"
+          title="${escapeHtml(item.title)}"
+          allow="autoplay; fullscreen; picture-in-picture; encrypted-media"
+          allowfullscreen
+          referrerpolicy="strict-origin-when-cross-origin"
+        ></iframe>
+      </div>
+
+      <div class="player-bottom-strip" id="player-bottom-strip"></div>
     </section>`;
-    overlay = mount.querySelector('.theater-overlay');
-    const iframe = document.getElementById('vidrift-player');
-    if (iframe) {
-      iframe.dataset.embedUrl = embedUrl;
-      applySandboxAttr(iframe);
+
+    const frame = document.getElementById('vidrift-player');
+    if (frame) {
+      frame.dataset.embedUrl = embedUrl;
+      applySandboxAttr(frame);
     }
   } else {
-    overlay.classList.toggle('is-hidden', !state.isExpanded);
-    const iframe = document.getElementById('vidrift-player');
-    if (iframe) {
-      const prevSandbox = iframe.hasAttribute('sandbox');
-      applySandboxAttr(iframe);
-      if (forceReload || iframe.dataset.embedUrl !== embedUrl || prevSandbox !== state.shield.strictFrameMode) {
-        iframe.src = embedUrl;
-        iframe.title = state.activeItem.title;
-        iframe.dataset.embedUrl = embedUrl;
-      }
+    const prevSandbox = existingFrame.hasAttribute('sandbox');
+    applySandboxAttr(existingFrame);
+    if (forceReload || existingFrame.dataset.embedUrl !== embedUrl || prevSandbox !== state.shield.strictFrameMode) {
+      existingFrame.src = embedUrl;
+      existingFrame.dataset.embedUrl = embedUrl;
     }
   }
 
-  const afterEl = document.getElementById('after-credits-mount');
-  const toolbarEl = document.getElementById('theater-toolbar-mount');
-  const panelEl = document.getElementById('theater-panel-mount');
-  if (afterEl) afterEl.innerHTML = afterHtml;
-  if (toolbarEl) toolbarEl.innerHTML = toolbarHtml;
-  if (panelEl) panelEl.innerHTML = panelHtml;
+  const strip = document.getElementById('player-bottom-strip');
+  if (strip) {
+    const saved = state.progressMap[getMediaKey(item)];
+    strip.innerHTML = `<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+      ${
+        saved?.currentTime > 15
+          ? `<button type="button" class="outline-chip" id="cmd-resume-btn">Resume ${formatTime(saved.currentTime)}</button>`
+          : ''
+      }
+      <button type="button" class="outline-chip" id="reload-player-btn">${svgIcon('refresh', 13)} Reload</button>
+      ${
+        item.mediaType !== 'movie'
+          ? `<button type="button" class="outline-chip" id="next-ep-btn">Next Ep ${svgIcon('next', 13)}</button>`
+          : ''
+      }
+      ${
+        item.mediaType === 'anime'
+          ? `<button type="button" class="outline-chip ${state.prefs.dub ? 'is-active' : ''}" id="toggle-dub-btn">${
+              state.prefs.dub ? 'Dub ON' : 'Sub'
+            }</button>`
+          : ''
+      }
+    </div>
+    <span class="dim" style="font-size:11px;">${
+      state.livePlayback.currentTime > 0 ? `Synced ${formatTime(state.livePlayback.currentTime)}` : 'Zero-Ad Host'
+    }</span>`;
+  }
+}
+
+function renderActiveView() {
+  switch (state.tab) {
+    case 'clips':
+      return renderClipsTab();
+    case 'discover':
+      return renderDiscoverTab();
+    case 'search':
+      return renderSearchTab();
+    case 'mysuno':
+      return renderMySunoTab();
+    case 'downloads':
+      return renderDownloadsView();
+    case 'detail': {
+      const item = getItemByKey(state.detailKey);
+      const key = item ? getMediaKey(item) : '';
+      const seasons =
+        item?.mediaType === 'tv'
+          ? state.seasonsCache.get(String(item.tmdbId || item.imdbId)) ||
+            item.seasonsList || [{ seasonNumber: 1, name: 'Season 1', episodeCount: item.totalEpisodes || 10 }]
+          : [];
+      const related = getAllKnownPool().filter((x) => getMediaKey(x) !== key);
+      return renderDetailView({
+        item,
+        inMyList: getCollectionSet(MY_LIST_COLLECTION_ID).has(key),
+        isLiked: getCollectionSet(LIKED_COLLECTION_ID).has(key),
+        isDownloaded: state.downloads.includes(key),
+        savedProgress: state.progressMap[key],
+        trailerMuted: state.detailTrailerMuted,
+        trailerPlaying: state.detailTrailerPlaying,
+        detailTab: state.detailTab,
+        seasons,
+        activeSeason: state.activeSeason,
+        activeEpisode: state.activeEpisode,
+        relatedItems: related,
+        dubEnabled: state.prefs.dub,
+      });
+    }
+    case 'home':
+    default:
+      return renderHomeTab();
+  }
+}
+
+function ensureMounts() {
+  if (document.getElementById('sc-root')) return;
+  rootEl.innerHTML = `<div id="sc-root">
+    <main id="view-mount"></main>
+    <div id="nav-mount"></div>
+    <div id="player-mount"></div>
+    <div id="modal-mount"></div>
+  </div>`;
 }
 
 function render(options = {}) {
-  if (cleanupHalo) {
-    cleanupHalo();
-    cleanupHalo = null;
-  }
+  ensureMounts();
+  const root = document.getElementById('sc-root');
+  root.className = `sc-shell ${state.prefs.phoneFrameOnDesktop ? 'is-phone-preview' : ''}`;
 
-  ensureShellMounts();
-  const shell = document.getElementById('app-shell');
-  const hasPlayer = Boolean(state.activeItem || sonicCurtain.isPlaying);
-  shell.className = [
-    'app',
-    hasPlayer ? 'has-player' : '',
-    state.sidebarCollapsed ? 'rail-collapsed' : '',
-    state.isExpanded ? 'player-expanded' : '',
-  ]
-    .filter(Boolean)
-    .join(' ');
+  document.getElementById('view-mount').innerHTML = renderActiveView();
+  document.getElementById('nav-mount').innerHTML = state.playerOpen ? '' : renderFloatingBottomNav();
+  syncPlayerMount(options);
 
-  const shellMount = document.getElementById('shell-mount');
-  const prevScroll = document.getElementById('main-content')?.scrollTop || 0;
-  shellMount.innerHTML = `${renderTopbar()}
-    <div class="app-body">
-      ${renderSidebar()}
-      ${
-        state.mobileDrawerOpen
-          ? `<button type="button" style="position:fixed;inset:0;z-index:70;background:#0009;" id="close-drawer-scrim" aria-label="Close navigation"></button>`
-          : ''
-      }
-      <main class="content" id="main-content">
-        ${renderPage()}
-      </main>
-    </div>`;
-
-  syncTheaterMount(options);
-  document.getElementById('dock-mount').innerHTML = renderPlayerBar();
-  document.getElementById('mobile-nav-mount').innerHTML = renderMobileNav();
-  document.getElementById('modal-mount').innerHTML =
-    state.modal === 'settings'
-      ? renderSettingsModal({ appearance: state.appearance, prefs: state.prefs, shield: state.shield })
-      : state.modal === 'quicklaunch'
-      ? renderQuickLaunchModal()
-      : state.modal === 'trailer'
-      ? renderTrailerModal(state.trailerInfo.id, state.trailerInfo.title)
-      : '';
-
-  const haloCanvas = document.getElementById('sonic-halo-canvas');
-  if (haloCanvas) {
-    cleanupHalo = mountFluidHalo(haloCanvas, getActivePalette);
-  }
-
-  const contentEl = document.getElementById('main-content');
-  if (contentEl) {
-    contentEl.scrollTop = prevScroll;
-    contentEl.addEventListener(
-      'scroll',
-      () => {
-        shell.style.setProperty('--wash-fade', String(Math.min(1, contentEl.scrollTop / 260)));
-      },
-      { passive: true }
-    );
+  const modalMount = document.getElementById('modal-mount');
+  if (state.modal === 'settings') {
+    modalMount.innerHTML = renderSettingsSheet({
+      appearance: state.appearance,
+      prefs: state.prefs,
+      shield: state.shield,
+      profile: state.profile,
+    });
+  } else if (state.modal === 'categories') {
+    modalMount.innerHTML = renderCategoriesSheet(state.discoverGenre);
+  } else if (state.modal === 'notifications') {
+    modalMount.innerHTML = renderNotificationsSheet(getAllKnownPool());
+  } else if (state.modal === 'cwmenu') {
+    modalMount.innerHTML = renderContinueMenuSheet(getItemByKey(state.cwMenuKey));
+  } else if (state.modal === 'quicklaunch') {
+    modalMount.innerHTML = renderQuickLaunchSheet();
+  } else {
+    modalMount.innerHTML = '';
   }
 }
 
 async function runSearch(query) {
   const clean = String(query || '').trim();
-  if (!clean) return;
   state.searchQuery = clean;
-  state.searchOpen = false;
-  state.searchHistory = rememberSearch(clean);
-  antiRedirectGuard.setTheaterActive(false);
-
-  const direct = parseDirectTarget(clean);
-  if (
-    direct &&
-    !/^\d+$/.test(clean) &&
-    (clean.includes('themoviedb.org') ||
-      clean.includes('anilist.co') ||
-      /^(movie|tv|anime|anilist|tmdb)[:/]/i.test(clean))
-  ) {
-    launchStream(
-      {
-        id: `${direct.mediaType}:${direct.tmdbId || direct.anilistId}`,
-        tmdbId: direct.tmdbId,
-        anilistId: direct.anilistId,
-        mediaType: direct.mediaType,
-        title: `${direct.mediaType.toUpperCase()} #${direct.tmdbId || direct.anilistId}`,
-        year: '',
-        genres: ['Direct VidRift'],
-      },
-      { season: direct.season || 1, episode: direct.episode || 1 }
-    );
+  if (!clean) {
+    state.searchResults = [];
+    render();
     return;
   }
-
-  state.route = 'search';
+  state.searchHistory = rememberSearch(clean);
   state.searchLoading = true;
-  state.isExpanded = false;
   render();
 
   try {
@@ -1817,183 +1185,123 @@ function bindEvents() {
       return;
     }
 
-    if (target.closest('#toggle-sidebar-btn')) {
-      if (window.matchMedia('(max-width: 760px)').matches) {
-        state.mobileDrawerOpen = !state.mobileDrawerOpen;
-      } else {
-        state.sidebarCollapsed = !state.sidebarCollapsed;
+    const navBtn = target.closest('[data-nav-tab]');
+    if (navBtn) {
+      const nextTab = navBtn.dataset.navTab;
+      state.prevTab = state.tab;
+      state.tab = nextTab;
+      if (nextTab === 'discover' && state.discoverItems.length === 0) {
+        refreshDiscoverFeed({ reset: true });
+        return;
       }
+      window.scrollTo({ top: 0, behavior: 'instant' });
       render();
       return;
     }
 
-    if (target.closest('#close-drawer-scrim')) {
-      state.mobileDrawerOpen = false;
+    if (target.closest('[data-reset-home="true"]')) {
+      state.tab = 'home';
+      state.homeFilter = 'all';
       render();
       return;
     }
 
-    if (target.closest('#toggle-eco-btn')) {
-      state.ecosystemOpen = !state.ecosystemOpen;
+    const homeFilterBtn = target.closest('[data-home-filter]');
+    if (homeFilterBtn) {
+      const val = homeFilterBtn.dataset.homeFilter;
+      if (val === 'hot') {
+        state.tab = 'discover';
+        state.discoverSort = 'year';
+        refreshDiscoverFeed({ reset: true });
+        return;
+      }
+      state.homeFilter = state.homeFilter === val ? 'all' : val;
       render();
       return;
     }
 
-    if (target.closest('#open-settings-btn') || target.closest('#avatar-settings-btn')) {
-      state.ecosystemOpen = false;
+    if (target.closest('#open-categories-btn')) {
+      state.modal = 'categories';
+      render();
+      return;
+    }
+
+    const pickCat = target.closest('[data-pick-category]');
+    if (pickCat) {
+      state.modal = null;
+      state.tab = 'discover';
+      state.discoverGenre = pickCat.dataset.pickCategory;
+      refreshDiscoverFeed({ reset: true });
+      return;
+    }
+
+    if (
+      target.closest('#open-settings-btn') ||
+      target.closest('#open-settings-profile-btn') ||
+      target.closest('#open-shield-settings-btn')
+    ) {
       state.modal = 'settings';
       render();
       return;
     }
 
-    if (
-      target.closest('#open-quicklaunch-btn') ||
-      target.closest('#explore-quicklaunch-btn') ||
-      target.closest('#search-open-ql')
-    ) {
+    if (target.closest('#open-downloads-btn') || target.closest('#open-downloads-card')) {
+      state.prevTab = state.tab === 'downloads' ? 'mysuno' : state.tab;
+      state.tab = 'downloads';
+      render();
+      return;
+    }
+
+    if (target.closest('#downloads-back-btn')) {
+      state.tab = state.prevTab || 'mysuno';
+      render();
+      return;
+    }
+
+    if (target.closest('#open-notifications-btn')) {
+      state.modal = 'notifications';
+      render();
+      return;
+    }
+
+    if (target.closest('#open-quicklaunch-btn')) {
       state.modal = 'quicklaunch';
       render();
       return;
     }
 
-    const trailerBtn = target.closest('[data-open-trailer]');
-    if (trailerBtn) {
-      state.trailerInfo = {
-        id: trailerBtn.dataset.openTrailer,
-        title: trailerBtn.dataset.trailerTitle || 'Trailer',
-      };
-      state.modal = 'trailer';
+    if (target.closest('#detail-back-btn')) {
+      state.tab = state.prevTab || 'home';
       render();
       return;
     }
 
-    if (target.closest('#clear-search-btn')) {
-      state.searchQuery = '';
-      state.searchOpen = false;
-      render();
-      return;
-    }
-
-    // Navigation & Discover shortcuts
-    const catBtn = target.closest('[data-open-cat]');
-    if (catBtn) {
-      openCategoryDiscover(catBtn.dataset.openCat);
-      return;
-    }
-
-    const quickGenre = target.closest('[data-quick-genre]');
-    if (quickGenre) {
-      state.route = 'discover';
-      state.discoverType = 'all';
-      state.discoverGenre = quickGenre.dataset.quickGenre;
-      state.isExpanded = false;
-      refreshDiscoverFeed({ reset: true });
-      return;
-    }
-
-    const navBtn = target.closest('[data-nav]');
-    if (navBtn) {
-      state.route = navBtn.dataset.nav;
-      state.mobileDrawerOpen = false;
-      state.isExpanded = false;
-      state.ecosystemOpen = false;
-      antiRedirectGuard.setTheaterActive(false);
-      render();
-      return;
-    }
-
-    // Hero carousel controls
-    const heroStep = target.closest('[data-hero-step]');
-    if (heroStep) {
-      state.heroIndex = (state.heroIndex + Number(heroStep.dataset.heroStep) + 6) % 6;
-      render();
-      return;
-    }
-    const heroDot = target.closest('[data-hero-dot]');
-    if (heroDot) {
-      state.heroIndex = Number(heroDot.dataset.heroDot);
-      render();
-      return;
-    }
-
-    if (target.closest('#discover-load-more-btn')) {
-      state.discoverSkip += 50;
-      state.discoverAnimePage += 1;
-      refreshDiscoverFeed({ reset: false });
-      return;
-    }
-
-    // Collections
-    const openCol = target.closest('[data-open-collection]');
-    if (openCol) {
-      state.route = 'collection';
-      state.collectionId = openCol.dataset.openCollection;
-      state.mobileDrawerOpen = false;
-      state.isExpanded = false;
-      antiRedirectGuard.setTheaterActive(false);
-      render();
-      return;
-    }
-
-    if (target.closest('#start-mixtape-btn')) {
-      state.creatingMixtape = true;
-      render();
-      document.getElementById('new-mixtape-input')?.focus();
-      return;
-    }
-
-    // Search history actions
-    const runSug = target.closest('[data-run-search]');
-    if (runSug) {
-      runSearch(runSug.dataset.runSearch);
-      return;
-    }
-    const forgetSug = target.closest('[data-forget-search]');
-    if (forgetSug) {
-      e.stopPropagation();
-      state.searchHistory = forgetSearch(forgetSug.dataset.forgetSearch);
-      render();
-      return;
-    }
-    if (target.closest('[data-launch-direct="true"]')) {
-      const parsed = parseDirectTarget(state.searchQuery);
-      if (parsed) {
-        launchStream(
-          {
-            id: `${parsed.mediaType}:${parsed.tmdbId || parsed.anilistId}`,
-            tmdbId: parsed.tmdbId,
-            anilistId: parsed.anilistId,
-            mediaType: parsed.mediaType,
-            title: `${parsed.mediaType.toUpperCase()} #${parsed.tmdbId || parsed.anilistId}`,
-            genres: ['Direct VidRift'],
-          },
-          { season: parsed.season || 1, episode: parsed.episode || 1 }
-        );
+    if (target.closest('#detail-trailer-toggle')) {
+      if (!state.detailTrailerPlaying) {
+        state.detailTrailerPlaying = true;
+        state.detailTrailerMuted = false;
+      } else {
+        state.detailTrailerMuted = !state.detailTrailerMuted;
       }
-      return;
-    }
-
-    // Sonic mood selection & Web Audio Curtain
-    const pickSonic = target.closest('[data-pick-sonic]') || target.closest('[data-select-mood]');
-    if (pickSonic) {
-      const moodId = pickSonic.dataset.pickSonic || pickSonic.dataset.selectMood;
-      state.prefs = savePlayerPrefs({ activeMoodId: moodId, customTrackQuery: '' });
       render();
       return;
     }
 
-    const curtainBtn =
-      target.closest('#audition-curtain-btn') ||
-      target.closest('#detail-audition-btn') ||
-      target.closest('#hero-audition-btn');
-    if (curtainBtn) {
-      const patch = curtainBtn.dataset.curtain || 'midnight-synth';
-      sonicCurtain.playMood(patch);
+    const detailTabBtn = target.closest('[data-detail-tab]');
+    if (detailTabBtn) {
+      state.detailTab = detailTabBtn.dataset.detailTab;
       render();
       return;
     }
 
-    // Play or Open Detail
+    const playClipBtn = target.closest('[data-play-clip]');
+    if (playClipBtn) {
+      const k = playClipBtn.dataset.playClip;
+      state.activeClipTrailerKey = state.activeClipTrailerKey === k ? null : k;
+      render();
+      return;
+    }
+
     const playBtn = target.closest('[data-play-key]');
     if (playBtn) {
       e.stopPropagation();
@@ -2016,29 +1324,102 @@ function bindEvents() {
       return;
     }
 
-    const likeBtn = target.closest('[data-toggle-like]');
-    if (likeBtn) {
+    const myListBtn = target.closest('[data-toggle-mylist]');
+    if (myListBtn) {
       e.stopPropagation();
-      toggleLike(likeBtn.dataset.toggleLike);
+      toggleCollectionItem(
+        MY_LIST_COLLECTION_ID,
+        myListBtn.dataset.toggleMylist,
+        'Added to My List',
+        'Removed from My List'
+      );
       return;
     }
 
-    // Shelf scroll arrows
-    const scrollBtn = target.closest('[data-scroll-shelf]');
-    if (scrollBtn) {
-      const scroller = document.getElementById(`shelf-${scrollBtn.dataset.scrollShelf}`);
-      if (scroller) {
-        scroller.scrollBy({
-          left: Number(scrollBtn.dataset.dir) * Math.max(320, scroller.clientWidth * 0.78),
-          behavior: 'smooth',
-        });
+    const likeBtn = target.closest('[data-toggle-like]');
+    if (likeBtn) {
+      e.stopPropagation();
+      toggleCollectionItem(
+        LIKED_COLLECTION_ID,
+        likeBtn.dataset.toggleLike,
+        'Added to Liked',
+        'Removed from Liked'
+      );
+      return;
+    }
+
+    const dlBtn = target.closest('[data-toggle-download]');
+    if (dlBtn) {
+      toggleDownload(dlBtn.dataset.toggleDownload);
+      return;
+    }
+
+    const shareBtn = target.closest('[data-share-key]');
+    if (shareBtn) {
+      e.stopPropagation();
+      shareItem(getItemByKey(shareBtn.dataset.shareKey));
+      return;
+    }
+
+    const cwMenuBtn = target.closest('[data-cw-menu]');
+    if (cwMenuBtn) {
+      e.stopPropagation();
+      state.cwMenuKey = cwMenuBtn.dataset.cwMenu;
+      state.modal = 'cwmenu';
+      render();
+      return;
+    }
+
+    const removeCwBtn = target.closest('[data-remove-cw]');
+    if (removeCwBtn) {
+      state.progressMap = removeMediaProgress(removeCwBtn.dataset.removeCw);
+      state.modal = null;
+      showToast('Removed from Continue Watching');
+      render();
+      return;
+    }
+
+    if (target.closest('#setup-smart-dl-btn') || target.closest('#toggle-smart-downloads-btn')) {
+      state.profile = saveProfile({ smartDownloads: !state.profile.smartDownloads });
+      showToast(state.profile.smartDownloads ? 'Smart Downloads Queue enabled' : 'Smart Downloads paused');
+      render();
+      return;
+    }
+
+    if (target.closest('#discover-load-more-btn')) {
+      state.discoverSkip += 50;
+      state.discoverAnimePage += 1;
+      refreshDiscoverFeed({ reset: false });
+      return;
+    }
+
+    if (target.closest('#clear-search-btn')) {
+      state.searchQuery = '';
+      state.searchResults = [];
+      render();
+      return;
+    }
+
+    if (target.closest('[data-launch-direct="true"]')) {
+      const parsed = parseDirectTarget(state.searchQuery);
+      if (parsed) {
+        launchStream(
+          {
+            id: `${parsed.mediaType}:${parsed.tmdbId || parsed.anilistId}`,
+            tmdbId: parsed.tmdbId,
+            anilistId: parsed.anilistId,
+            mediaType: parsed.mediaType,
+            title: `${parsed.mediaType.toUpperCase()} #${parsed.tmdbId || parsed.anilistId}`,
+          },
+          { season: parsed.season || 1, episode: parsed.episode || 1 }
+        );
       }
       return;
     }
 
-    // Theater controls & Shield toggles
-    if (target.closest('#collapse-theater-btn')) {
-      state.isExpanded = false;
+    // Player controls
+    if (target.closest('#close-player-btn')) {
+      state.playerOpen = false;
       antiRedirectGuard.setTheaterActive(false);
       render();
       return;
@@ -2047,29 +1428,13 @@ function bindEvents() {
       const next = !state.shield.strictFrameMode;
       antiRedirectGuard.setStrictFrameMode(next);
       state.shield = antiRedirectGuard.getSnapshot();
-      showToast(
-        next
-          ? 'Strict Sandbox ON (blocks iframe popups; turn OFF if stream stalls)'
-          : 'Strict Sandbox OFF (full VidRift compatibility; host shield active)'
-      );
+      showToast(next ? 'Strict Sandbox ON' : 'Strict Sandbox OFF (Default VidRift)');
       render();
       return;
     }
     if (target.closest('#reload-player-btn')) {
       render({ forceReload: true });
-      showToast('Reloaded VidRift player');
-      return;
-    }
-    if (target.closest('#cmd-play-btn')) {
-      state.isPaused = false;
-      sendPlayerCommand('play');
-      render();
-      return;
-    }
-    if (target.closest('#cmd-pause-btn')) {
-      state.isPaused = true;
-      sendPlayerCommand('pause');
-      render();
+      showToast('Reloaded stream');
       return;
     }
     if (target.closest('#cmd-resume-btn')) {
@@ -2086,121 +1451,48 @@ function bindEvents() {
     }
     if (target.closest('#toggle-dub-btn')) {
       state.prefs = savePlayerPrefs({ dub: !state.prefs.dub });
-      showToast(state.prefs.dub ? 'Switched to English Dub (?dub=1)' : 'Switched to Subtitled');
-      render();
-      return;
-    }
-    if (target.closest('#cooldown-audio-btn')) {
-      sonicCurtain.playMood('lofi-rain', 'After-Credits Cooldown');
-      state.isExpanded = false;
-      antiRedirectGuard.setTheaterActive(false);
+      showToast(state.prefs.dub ? 'Switched to English Dub' : 'Switched to Subtitled');
       render();
       return;
     }
 
-    const panelTab = target.closest('[data-panel-tab]');
-    if (panelTab) {
-      state.panelTab = panelTab.dataset.panelTab;
-      render();
-      return;
-    }
-
-    // Dock controls
-    if (target.closest('#dock-expand-btn') || target.closest('#dock-expand-trigger')) {
-      if (state.activeItem) {
-        state.isExpanded = !state.isExpanded;
-        antiRedirectGuard.setTheaterActive(state.isExpanded);
-        render();
-      }
-      return;
-    }
-    if (target.closest('#dock-close-btn')) {
-      state.activeItem = null;
-      state.isExpanded = false;
-      state.afterCreditsItem = null;
-      antiRedirectGuard.setTheaterActive(false);
-      if (sonicCurtain.isPlaying) sonicCurtain.stop(250);
-      render();
-      return;
-    }
-    if (target.closest('#dock-curtain-btn')) {
-      const profile = getActiveSonicProfile();
-      sonicCurtain.playMood(profile.curtainPatch);
-      render();
-      return;
-    }
-    if (target.closest('#dock-toggle-btn')) {
-      if (sonicCurtain.isPlaying && !state.activeItem) {
-        sonicCurtain.stop(300);
-        render();
-        return;
-      }
-      state.isPaused = !state.isPaused;
-      sendPlayerCommand(state.isPaused ? 'pause' : 'play');
-      render();
-      return;
-    }
-    if (target.closest('#dock-next-btn') && state.queue.length > 1) {
-      const idx = state.queue.findIndex((x) => getMediaKey(x) === getMediaKey(state.activeItem));
-      const next = state.queue[(idx + 1) % state.queue.length];
-      if (next) launchStream(next, { expand: state.isExpanded });
-      return;
-    }
-    if (target.closest('#dock-prev-btn') && state.queue.length > 1) {
-      const idx = state.queue.findIndex((x) => getMediaKey(x) === getMediaKey(state.activeItem));
-      const prev = state.queue[(idx - 1 + state.queue.length) % state.queue.length];
-      if (prev) launchStream(prev, { expand: state.isExpanded });
-      return;
-    }
-
-    // Settings theme picker
-    const themeCard = target.closest('[data-pick-theme]');
-    if (themeCard) {
+    const themeChip = target.closest('[data-pick-theme]');
+    if (themeChip) {
       state.appearance = saveAppearanceSettings({
         ...state.appearance,
-        theme: themeCard.dataset.pickTheme,
+        theme: themeChip.dataset.pickTheme,
       });
       render();
       return;
     }
+
     if (target.closest('#save-settings-btn')) {
-      const amoled = Boolean(document.getElementById('pref-amoled')?.checked);
+      const name = (document.getElementById('pref-profile-name')?.value || 'Ansh').trim() || 'Ansh';
+      const sub = document.getElementById('pref-sub')?.value || 'en';
       const autoplay = Boolean(document.getElementById('pref-autoplay')?.checked);
       const dub = Boolean(document.getElementById('pref-dub')?.checked);
-      const sub = document.getElementById('pref-sub')?.value || 'en';
-      const uiScale = Number(document.getElementById('pref-uiscale')?.value || 1);
+      const phoneFrameOnDesktop = Boolean(document.getElementById('pref-phone-frame')?.checked);
       const tmdbApiKey = (document.getElementById('pref-tmdb-key')?.value || '').trim();
       const navLock = Boolean(document.getElementById('pref-navlock')?.checked);
       const strictSandbox = Boolean(document.getElementById('pref-strict-sandbox')?.checked);
 
+      state.profile = saveProfile({ name });
       antiRedirectGuard.setNavigationLock(navLock);
       antiRedirectGuard.setStrictFrameMode(strictSandbox);
       state.shield = antiRedirectGuard.getSnapshot();
-      state.appearance = saveAppearanceSettings({ ...state.appearance, amoled });
-      state.prefs = savePlayerPrefs({ autoplay, dub, sub, uiScale, tmdbApiKey });
+      state.prefs = savePlayerPrefs({ autoplay, dub, sub, tmdbApiKey, phoneFrameOnDesktop });
       state.modal = null;
-      showToast('Settings synced to Suno Cinema & VidRift');
+      showToast('Settings saved');
       render();
     }
   });
 
   rootEl.addEventListener('change', (e) => {
     const t = e.target;
-    if (t.matches('#detail-season-select') || t.matches('#theater-season-select')) {
+    if (t.id === 'detail-season-select') {
       state.activeSeason = Number(t.value) || 1;
       state.activeEpisode = 1;
-      if (state.isExpanded && state.activeItem) {
-        launchStream(state.activeItem, { season: state.activeSeason, episode: 1 });
-      } else {
-        render();
-      }
-      return;
-    }
-    if (t.matches('[data-add-mixtape]')) {
-      const colId = t.value;
-      const key = t.dataset.addMixtape;
-      if (colId && key) addToMixtape(colId, key);
-      t.value = '';
+      render();
       return;
     }
     if (t.id === 'disc-type') {
@@ -2218,11 +1510,6 @@ function bindEvents() {
       render();
       return;
     }
-    if (t.id === 'disc-rating') {
-      state.discoverMinRating = Number(t.value || 0);
-      render();
-      return;
-    }
     if (t.id === 'disc-sort') {
       state.discoverSort = t.value;
       render();
@@ -2233,28 +1520,19 @@ function bindEvents() {
     const t = e.target;
     if (t.id === 'global-search-input') {
       state.searchQuery = t.value;
-      state.searchOpen = true;
       clearTimeout(searchDebounce);
       searchDebounce = setTimeout(() => {
-        const box = document.getElementById('searchbox-wrap');
-        if (box && document.activeElement?.id === 'global-search-input') {
-          const pos = t.selectionStart;
-          render();
+        const pos = t.selectionStart;
+        runSearch(state.searchQuery).then(() => {
           const fresh = document.getElementById('global-search-input');
-          if (fresh) {
+          if (fresh && state.tab === 'search') {
             fresh.focus();
             try {
               fresh.setSelectionRange(pos, pos);
             } catch {}
           }
-        }
-      }, 160);
-    }
-  });
-
-  rootEl.addEventListener('focusin', (e) => {
-    if (e.target.id === 'global-search-input') {
-      state.searchOpen = true;
+        });
+      }, 320);
     }
   });
 
@@ -2262,26 +1540,6 @@ function bindEvents() {
     e.preventDefault();
     if (e.target.id === 'global-search-form') {
       runSearch(document.getElementById('global-search-input')?.value || state.searchQuery);
-    } else if (e.target.id === 'sonic-prompt-form') {
-      const q = (document.getElementById('sonic-track-input')?.value || '').trim();
-      state.prefs = savePlayerPrefs({ customTrackQuery: q });
-      const profile = getActiveSonicProfile();
-      showToast(`Tuned cinema to "${profile.trackTitle}"`);
-      render();
-    } else if (e.target.id === 'new-mixtape-form') {
-      const name = (document.getElementById('new-mixtape-input')?.value || '').trim();
-      state.creatingMixtape = false;
-      if (name) {
-        const id = `mix-${Date.now()}`;
-        state.collections = saveCollections([
-          ...state.collections,
-          { id, name, subtitle: 'Double feature', auto: false, items: [] },
-        ]);
-        state.route = 'collection';
-        state.collectionId = id;
-        showToast(`Created mixtape "${name}"`);
-      }
-      render();
     } else if (e.target.id === 'quick-launch-form') {
       const raw = document.getElementById('ql-input')?.value || '';
       const fallbackType = document.getElementById('ql-type')?.value || 'movie';
@@ -2299,91 +1557,27 @@ function bindEvents() {
           anilistId: parsed.anilistId,
           mediaType: parsed.mediaType,
           title: customTitle || `${parsed.mediaType.toUpperCase()} #${parsed.tmdbId || parsed.anilistId}`,
-          genres: ['Direct Stream'],
-          sonic: {
-            moodId: 'midnight-synth',
-            bpm: 96,
-            texture: 'Custom VidRift Stream',
-            listenBefore: 'Any Suno track',
-            cooldownCue: 'Ambient reverb',
-          },
         },
         { season: parsed.season || 1, episode: parsed.episode || 1 }
       );
     }
   });
 
-  document.addEventListener('mousedown', (e) => {
-    if (state.searchOpen && !e.target.closest('#searchbox-wrap')) {
-      state.searchOpen = false;
-      render();
-    }
-    if (state.ecosystemOpen && !e.target.closest('.topbar-right')) {
-      state.ecosystemOpen = false;
-      render();
-    }
-  });
-
-  window.addEventListener('keydown', (e) => {
-    if ((e.ctrlKey || e.metaKey) && e.key === ',') {
-      e.preventDefault();
-      state.modal = state.modal === 'settings' ? null : 'settings';
-      render();
-      return;
-    }
-    const tag = document.activeElement?.tagName;
-    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
-    if (e.key === '/') {
-      e.preventDefault();
-      document.getElementById('global-search-input')?.focus();
-    } else if (e.key === 'Escape') {
-      if (state.modal) {
-        state.modal = null;
-        render();
-      } else if (state.isExpanded) {
-        state.isExpanded = false;
-        antiRedirectGuard.setTheaterActive(false);
-        render();
-      }
-    }
-  });
-
   window.addEventListener('message', (event) => {
     const msg = parseVidriftMessage(event);
     if (!msg) return;
-
-    state.vidriftLog = [
-      `← ${msg.type} ${msg.currentTime != null ? `@ ${formatTime(msg.currentTime)}` : ''}`,
-      ...state.vidriftLog,
-    ].slice(0, 12);
-
     if (msg.type === 'vidrift:progress' && state.activeItem) {
       const currentTime = Number(msg.currentTime || 0);
       const duration = Number(msg.duration || 0);
       state.livePlayback = { currentTime, duration };
-      saveMediaProgress(state.activeItem, {
+      state.progressMap = saveMediaProgress(state.activeItem, {
         currentTime,
         duration,
         season: state.activeSeason,
         episode: state.activeEpisode,
       });
-      state.progressMap = loadProgressMap();
-
-      const fill = document.querySelector('.scrubber-fill');
-      const timeEl = document.querySelector('.playerbar-time');
-      if (fill && duration > 0) {
-        fill.style.width = `${Math.min(100, Math.round((currentTime / duration) * 100))}%`;
-      }
-      if (timeEl) {
-        timeEl.innerHTML = `${formatTime(currentTime)} <span class="dim">/ ${formatTime(duration)}</span>`;
-      }
-    } else if (msg.type === 'vidrift:ended' && state.activeItem) {
-      const currentKey = getMediaKey(state.activeItem);
-      const next = state.queue.find((q) => getMediaKey(q) !== currentKey) || null;
-      state.afterCreditsItem = next;
-      render();
     } else if (msg.type === 'vidrift:exit') {
-      state.isExpanded = false;
+      state.playerOpen = false;
       antiRedirectGuard.setTheaterActive(false);
       render();
     }
@@ -2396,46 +1590,37 @@ async function init() {
     state.shield = snapshot;
     const pill = document.getElementById('toggle-strict-shield-btn');
     if (pill && !snapshot.strictFrameMode) {
-      pill.querySelector('span').textContent = `Shield Active • ${snapshot.blockedCount} blocked`;
+      const span = pill.querySelector('span');
+      if (span) span.textContent = `Shield • ${snapshot.blockedCount}`;
     }
   });
 
   bindEvents();
   state.catalog = await loadCatalogData();
   registerItems(state.catalog);
+  state.progressMap = loadProgressMap(state.catalog);
   render();
 
-  clearInterval(heroTimer);
-  heroTimer = setInterval(() => {
-    if (state.route === 'home' && !state.isExpanded && !state.modal && !state.searchOpen) {
-      state.heroIndex = (state.heroIndex + 1) % 6;
-      render();
-    }
-  }, 9000);
-
-  // Hydrate all home feeds from 100% free keyless APIs (Cinemeta + AniList)
   try {
     const [movies, series, anime] = await Promise.all([
       fetchCinemetaCatalog('movie').catch(() => []),
       fetchCinemetaCatalog('series').catch(() => []),
       loadTrendingAnime().catch(() => []),
     ]);
-    if (movies.length > 0) {
+    if (movies.length) {
       registerItems(movies);
       state.liveMovies = movies;
     }
-    if (series.length > 0) {
+    if (series.length) {
       registerItems(series);
       state.liveSeries = series;
     }
-    if (anime.length > 0) {
+    if (anime.length) {
       registerItems(anime);
       state.liveAnimeTrending = anime;
     }
-    if (state.route === 'home') render();
-  } catch {
-    // Catalog already populated instantaneously above
-  }
+    if (state.tab === 'home') render();
+  } catch {}
 }
 
 init();

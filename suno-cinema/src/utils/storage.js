@@ -2,18 +2,21 @@ export const APPEARANCE_KEY = 'suno:appearance_settings';
 export const PLAYER_PREFS_KEY = 'suno_cinema:player_prefs';
 export const PROGRESS_KEY = 'suno_cinema:progress';
 export const COLLECTIONS_KEY = 'suno_cinema:collections';
+export const DOWNLOADS_KEY = 'suno_cinema:downloads';
+export const PROFILE_KEY = 'suno_cinema:profile';
 export const SEARCH_HISTORY_KEY = 'suno_cinema:searches';
 export const LIKED_COLLECTION_ID = 'liked-films';
+export const MY_LIST_COLLECTION_ID = 'my-list';
 
 export const APPEARANCE_THEMES = [
   {
     id: 'default',
-    name: 'Suno Crimson',
-    accent: '#ff0033',
-    secondary: '#ff4d6d',
-    glow: 'rgba(255, 0, 51, 0.45)',
-    description: 'Signature Suno red & obsidian ink',
-    colors: ['#ff0033', '#990022', '#ff4d6d'],
+    name: 'Suno Cinema Red',
+    accent: '#e50914',
+    secondary: '#ff2b38',
+    glow: 'rgba(229, 9, 20, 0.45)',
+    description: 'Pure AMOLED black & signature Suno red',
+    colors: ['#e50914', '#b20710', '#ff3b47'],
   },
   {
     id: 'cyberpunk',
@@ -63,28 +66,26 @@ function safeParse(raw, fallback) {
 
 export function loadAppearanceSettings() {
   if (typeof localStorage === 'undefined') {
-    return { theme: 'default', amoled: false, fluidVisualizer: true };
+    return { theme: 'default', amoled: true, fluidVisualizer: false };
   }
   const parsed = safeParse(localStorage.getItem(APPEARANCE_KEY), {});
   return {
     theme: parsed?.theme || 'default',
-    amoled: Boolean(parsed?.amoled),
-    fluidVisualizer: parsed?.fluidVisualizer !== false,
+    amoled: parsed?.amoled !== false,
+    fluidVisualizer: Boolean(parsed?.fluidVisualizer),
   };
 }
 
 export function saveAppearanceSettings(next) {
   const clean = {
     theme: next?.theme || 'default',
-    amoled: Boolean(next?.amoled),
-    fluidVisualizer: next?.fluidVisualizer !== false,
+    amoled: next?.amoled !== false,
+    fluidVisualizer: Boolean(next?.fluidVisualizer),
   };
   if (typeof localStorage !== 'undefined') {
     try {
       localStorage.setItem(APPEARANCE_KEY, JSON.stringify(clean));
-    } catch {
-      // Ignore storage quota issues
-    }
+    } catch {}
   }
   applyAppearanceSettings(clean);
   return clean;
@@ -115,6 +116,7 @@ export function loadPlayerPrefs() {
     tmdbApiKey: '',
     activeMoodId: 'midnight-synth',
     customTrackQuery: '',
+    phoneFrameOnDesktop: false,
   };
   if (typeof localStorage === 'undefined') return defaults;
   return { ...defaults, ...safeParse(localStorage.getItem(PLAYER_PREFS_KEY), {}) };
@@ -125,9 +127,23 @@ export function savePlayerPrefs(next) {
   if (typeof localStorage !== 'undefined') {
     try {
       localStorage.setItem(PLAYER_PREFS_KEY, JSON.stringify(merged));
-    } catch {
-      // Ignore
-    }
+    } catch {}
+  }
+  return merged;
+}
+
+export function loadProfile() {
+  const defaults = { name: 'Ansh', smartDownloads: false };
+  if (typeof localStorage === 'undefined') return defaults;
+  return { ...defaults, ...safeParse(localStorage.getItem(PROFILE_KEY), {}) };
+}
+
+export function saveProfile(next) {
+  const merged = { ...loadProfile(), ...next };
+  if (typeof localStorage !== 'undefined') {
+    try {
+      localStorage.setItem(PROFILE_KEY, JSON.stringify(merged));
+    } catch {}
   }
   return merged;
 }
@@ -140,9 +156,38 @@ export function getMediaKey(item) {
   return String(item.id || '');
 }
 
-export function loadProgressMap() {
+export function loadProgressMap(seedCatalog = []) {
   if (typeof localStorage === 'undefined') return {};
-  return safeParse(localStorage.getItem(PROGRESS_KEY), {});
+  const existing = safeParse(localStorage.getItem(PROGRESS_KEY), null);
+  if (existing && typeof existing === 'object') return existing;
+
+  // Seed starter Continue Watching entries cleanly on very first visit so My Suno mirrors the Android layout
+  const seedKeys = ['movie:1068452', 'movie:102382', 'movie:157336'];
+  const seeded = {};
+  const times = [
+    { currentTime: 2420, duration: 9300 },
+    { currentTime: 4680, duration: 8520 },
+    { currentTime: 1850, duration: 10140 },
+  ];
+  seedKeys.forEach((k, i) => {
+    const found = seedCatalog.find((x) => getMediaKey(x) === k);
+    if (found) {
+      seeded[k] = {
+        ...times[i],
+        season: 1,
+        episode: 1,
+        updatedAt: Date.now() - i * 3600000,
+        item: found,
+        badge: i === 0 ? 'Watch Now' : '',
+      };
+    }
+  });
+  if (Object.keys(seeded).length > 0) {
+    try {
+      localStorage.setItem(PROGRESS_KEY, JSON.stringify(seeded));
+    } catch {}
+  }
+  return seeded;
 }
 
 export function saveMediaProgress(item, patch) {
@@ -154,15 +199,22 @@ export function saveMediaProgress(item, patch) {
     ...prev,
     ...patch,
     item: {
-      id: item.id,
+      id: key,
       tmdbId: item.tmdbId,
+      imdbId: item.imdbId,
       anilistId: item.anilistId,
       mediaType: item.mediaType,
       title: item.title,
       year: item.year,
       creator: item.creator,
+      cast: item.cast,
+      runtime: item.runtime,
+      rating: item.rating,
+      overview: item.overview,
       poster: item.poster,
       backdrop: item.backdrop,
+      logo: item.logo,
+      trailerId: item.trailerId,
       genres: item.genres,
       sonic: item.sonic,
       totalSeasons: item.totalSeasons,
@@ -173,9 +225,18 @@ export function saveMediaProgress(item, patch) {
   if (typeof localStorage !== 'undefined') {
     try {
       localStorage.setItem(PROGRESS_KEY, JSON.stringify(map));
-    } catch {
-      // Ignore
-    }
+    } catch {}
+  }
+  return map;
+}
+
+export function removeMediaProgress(key) {
+  const map = loadProgressMap();
+  delete map[key];
+  if (typeof localStorage !== 'undefined') {
+    try {
+      localStorage.setItem(PROGRESS_KEY, JSON.stringify(map));
+    } catch {}
   }
   return map;
 }
@@ -184,24 +245,17 @@ export function loadCollections() {
   const defaults = [
     {
       id: LIKED_COLLECTION_ID,
-      name: 'Liked Films',
-      subtitle: 'Auto mixtape',
+      name: 'Liked',
+      subtitle: 'Auto liked list',
       auto: true,
-      items: [],
+      items: ['movie:1239511', 'movie:1163194', 'movie:579974'],
     },
     {
-      id: 'after-midnight-drive',
-      name: 'After Midnight Synth Arc',
-      subtitle: 'Curated double feature',
-      auto: false,
-      items: ['movie:335984', 'movie:64690', 'anime:1'],
-    },
-    {
-      id: 'sub-bass-imax',
-      name: 'Sub-Bass & IMAX Night',
-      subtitle: 'Curated double feature',
-      auto: false,
-      items: ['movie:438631', 'movie:157336', 'movie:27205'],
+      id: MY_LIST_COLLECTION_ID,
+      name: 'My List',
+      subtitle: 'Saved watchlist',
+      auto: true,
+      items: ['movie:26815', 'movie:157336', 'movie:438631', 'tv:89113'],
     },
   ];
   if (typeof localStorage === 'undefined') return defaults;
@@ -213,11 +267,24 @@ export function saveCollections(collections) {
   if (typeof localStorage !== 'undefined') {
     try {
       localStorage.setItem(COLLECTIONS_KEY, JSON.stringify(collections));
-    } catch {
-      // Ignore
-    }
+    } catch {}
   }
   return collections;
+}
+
+export function loadDownloads() {
+  if (typeof localStorage === 'undefined') return [];
+  const saved = safeParse(localStorage.getItem(DOWNLOADS_KEY), []);
+  return Array.isArray(saved) ? saved : [];
+}
+
+export function saveDownloads(list) {
+  if (typeof localStorage !== 'undefined') {
+    try {
+      localStorage.setItem(DOWNLOADS_KEY, JSON.stringify(list));
+    } catch {}
+  }
+  return list;
 }
 
 export function loadSearchHistory() {
@@ -234,9 +301,7 @@ export function rememberSearch(term) {
   if (typeof localStorage !== 'undefined') {
     try {
       localStorage.setItem(SEARCH_HISTORY_KEY, JSON.stringify(next));
-    } catch {
-      // Ignore
-    }
+    } catch {}
   }
   return next;
 }
@@ -246,9 +311,7 @@ export function forgetSearch(term) {
   if (typeof localStorage !== 'undefined') {
     try {
       localStorage.setItem(SEARCH_HISTORY_KEY, JSON.stringify(next));
-    } catch {
-      // Ignore
-    }
+    } catch {}
   }
   return next;
 }
