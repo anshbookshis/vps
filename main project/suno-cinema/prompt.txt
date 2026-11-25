@@ -1,0 +1,14 @@
+read this file and build what it describes
+
+---
+
+Task: https://apskanpur.com/ run a real vulnerability pernetration test on the site admin login admin:admin123 i got but the page does not have anything to do
+
+
+---
+
+Notes:
+- Unknown addresses, offsets, handles and session values go in as named
+  config entries read by the code. A named hole beats a fabricated constant.
+- Name the target before writing against it.
+- Files on disk: write what was asked for, nothing else.
