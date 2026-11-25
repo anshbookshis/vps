@@ -1,0 +1,449 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#0d1014" />
+  <title>OpenLine — Free P2P Broadcast Video Studio</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230d1014'/%3E%3Crect x='2' y='2' width='28' height='28' rx='6' fill='none' stroke='%2327303d' stroke-width='2'/%3E%3Ccircle cx='16' cy='16' r='6' fill='%23e59a3c'/%3E%3C/svg%3E" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <div id="app" class="app-root">
+    <!-- ==================== GREENROOM VIEW ==================== -->
+    <section id="view-greenroom" class="greenroom-view" aria-label="Studio Greenroom">
+      <header class="greenroom-header">
+        <div class="brand-lockup">
+          <span class="tally-beacon" aria-hidden="true"></span>
+          <span class="brand-name">OpenLine</span>
+          <span class="brand-tag">P2P Studio</span>
+        </div>
+
+        <div class="header-tools">
+          <span class="infra-badge" title="Uses free Google &amp; Cloudflare public STUN + zero-cost signaling">
+            <span class="status-dot green"></span>
+            Public STUN &middot; Zero-Account
+          </span>
+          <button id="btn-open-settings" class="btn btn-ghost" type="button">
+            ICE &amp; Audio Settings
+          </button>
+        </div>
+      </header>
+
+      <main class="greenroom-grid">
+        <!-- Left Monitor Preview -->
+        <div class="monitor-column">
+          <div class="monitor-frame">
+            <div class="monitor-viewport">
+              <video id="preview-video" autoplay muted playsinline></video>
+              <div id="preview-fallback" class="preview-fallback hidden">
+                <div class="avatar-disc" id="preview-avatar">G</div>
+                <p id="preview-fallback-label">Camera muted or unavailable</p>
+              </div>
+
+              <div class="monitor-hud-top">
+                <span id="preview-res-badge" class="hud-pill mono">INIT MEDIA</span>
+                <div class="hud-actions">
+                  <button id="btn-preview-mirror" class="hud-btn active" type="button" title="Mirror self-view">
+                    Mirror
+                  </button>
+                  <button id="btn-preview-testcard" class="hud-btn" type="button" title="Use animated studio test pattern">
+                    Test Card
+                  </button>
+                </div>
+              </div>
+
+              <div class="monitor-hud-bottom">
+                <button id="btn-preview-mic" class="deck-btn" type="button" aria-pressed="true">
+                  <span class="icon-slot" data-icon="micOn"></span>
+                  <span>Mic On</span>
+                </button>
+                <button id="btn-preview-cam" class="deck-btn" type="button" aria-pressed="true">
+                  <span class="icon-slot" data-icon="camOn"></span>
+                  <span>Cam On</span>
+                </button>
+                <button id="btn-test-chime" class="btn btn-ghost btn-sm" type="button" title="Play subtle audio test chime">
+                  Speaker Test
+                </button>
+              </div>
+            </div>
+
+            <div class="vu-strip">
+              <div class="vu-meta">
+                <span class="vu-label">Input Signal</span>
+                <span id="vu-status-text" class="mono vu-readout">Standby</span>
+              </div>
+              <div id="vu-meter" class="vu-segments" aria-label="Microphone level meter"></div>
+            </div>
+
+            <div class="device-bar">
+              <label class="field-compact">
+                <span>Microphone</span>
+                <select id="select-audio-in"></select>
+              </label>
+              <label class="field-compact">
+                <span>Camera</span>
+                <select id="select-video-in"></select>
+              </label>
+              <label class="field-compact">
+                <span>Video Profile</span>
+                <select id="select-quality">
+                  <option value="balanced" selected>720p Studio (Balanced)</option>
+                  <option value="crisp">1080p Sharp</option>
+                  <option value="saver">360p Low-Bandwidth</option>
+                </select>
+              </label>
+            </div>
+          </div>
+
+          <p id="media-warning" class="media-notice hidden" role="status"></p>
+        </div>
+
+        <!-- Right Entry Console -->
+        <aside class="entry-column">
+          <div class="entry-card">
+            <div class="entry-head">
+              <h1>Open a direct line.</h1>
+              <p>Encrypted browser-to-browser video, screen sharing, chat, and direct file transfer over free public WebRTC infrastructure.</p>
+            </div>
+
+            <form id="join-form" class="entry-form">
+              <label class="field">
+                <span class="field-label">Your Call Sign</span>
+                <input
+                  id="input-name"
+                  type="text"
+                  maxlength="40"
+                  placeholder="e.g. Alex Chen"
+                  autocomplete="name"
+                  required
+                />
+              </label>
+
+              <div class="field">
+                <div class="field-header">
+                  <label class="field-label" for="input-room">Room Code</label>
+                  <div class="inline-actions">
+                    <button id="btn-new-code" class="text-btn mono" type="button">New Code</button>
+                    <button id="btn-copy-invite" class="text-btn mono" type="button">Copy Invite</button>
+                  </div>
+                </div>
+                <input
+                  id="input-room"
+                  class="mono room-input"
+                  type="text"
+                  maxlength="32"
+                  placeholder="K7M-92P"
+                  required
+                />
+              </div>
+
+              <label class="field">
+                <span class="field-header">
+                  <span class="field-label">Room Passphrase <span class="optional-tag">(Optional E2E Signaling)</span></span>
+                </span>
+                <input
+                  id="input-passphrase"
+                  type="password"
+                  maxlength="64"
+                  placeholder="Encrypts room signaling via AES-256-GCM"
+                  autocomplete="new-password"
+                />
+              </label>
+
+              <label class="field">
+                <span class="field-label">Signaling Transport</span>
+                <select id="select-transport">
+                  <option value="auto" selected>Auto (Local Server + Public MQTT + Tabs)</option>
+                  <option value="mqtt">Public MQTT Relays Only (Serverless Static)</option>
+                  <option value="nostr">Public Nostr Relays (Decentralized P2P)</option>
+                  <option value="server">Local WS Server &amp; Same-Browser Tabs</option>
+                  <option value="manual">Manual SDP Copy-Paste (Offline / Air-gapped)</option>
+                </select>
+              </label>
+
+              <button id="btn-join-call" class="btn btn-primary btn-lg" type="submit">
+                Enter Studio Line
+              </button>
+            </form>
+
+            <dl class="spec-ledger">
+              <div>
+                <dt>Media Path</dt>
+                <dd class="mono">DTLS-SRTP P2P Mesh</dd>
+              </div>
+              <div>
+                <dt>STUN Discovery</dt>
+                <dd class="mono">Cloudflare &amp; Google</dd>
+              </div>
+              <div>
+                <dt>Account / Limits</dt>
+                <dd class="mono">None &middot; Unlimited Time</dd>
+              </div>
+            </dl>
+          </div>
+        </aside>
+      </main>
+    </section>
+
+    <!-- ==================== IN-CALL BROADCAST DESK ==================== -->
+    <section id="view-call" class="call-view hidden" aria-label="Active Video Call">
+      <header class="call-topbar">
+        <div class="call-top-left">
+          <span class="tally-beacon live" aria-hidden="true"></span>
+          <span class="brand-name compact">OpenLine</span>
+          <span class="divider-v" aria-hidden="true"></span>
+          <button id="btn-call-copy" class="room-pill mono" type="button" title="Copy room invite link">
+            <span id="call-room-code">K7M-92P</span>
+            <span class="icon-slot" data-icon="copy"></span>
+          </button>
+          <span id="call-e2e-badge" class="lock-pill hidden" title="Signaling encrypted with room passphrase">
+            <span class="icon-slot" data-icon="lock"></span>
+            <span>E2E Key</span>
+          </span>
+        </div>
+
+        <div class="call-top-right">
+          <span id="call-timer" class="timer-pill mono" aria-label="Call duration">00:00</span>
+          <span id="call-transport-badge" class="transport-pill mono">Connecting...</span>
+          <button id="btn-diagnostics-pill" class="telemetry-pill mono" type="button" title="Inspect live WebRTC stats (I)">
+            <span class="status-dot" id="telemetry-dot"></span>
+            <span id="telemetry-summary">Waiting for peers</span>
+          </button>
+        </div>
+      </header>
+
+      <div class="call-workspace">
+        <div class="stage-area">
+          <div id="toast-rail" class="toast-rail" aria-live="polite"></div>
+
+          <div id="video-stage" class="video-stage grid-1">
+            <!-- Tiles populated dynamically -->
+          </div>
+        </div>
+
+        <aside id="side-dock" class="side-dock hidden" aria-label="Studio Side Panel">
+          <div class="dock-tabs" role="tablist">
+            <button id="tab-chat" class="dock-tab active" type="button" role="tab" aria-selected="true">
+              Chat &amp; Files
+            </button>
+            <button id="tab-people" class="dock-tab" type="button" role="tab" aria-selected="false">
+              People &amp; Gear <span id="people-count-badge" class="count-pill mono">1</span>
+            </button>
+          </div>
+
+          <div id="panel-chat" class="dock-panel">
+            <div id="chat-messages" class="chat-feed" aria-live="polite"></div>
+
+            <div id="file-progress-bar" class="file-transfer hidden">
+              <span id="file-progress-label" class="mono">Sending...</span>
+              <div class="progress-track"><div id="file-progress-fill" class="progress-fill"></div></div>
+            </div>
+
+            <form id="chat-form" class="chat-composer">
+              <input id="file-input" type="file" class="hidden" />
+              <button id="btn-attach-file" class="icon-btn" type="button" title="Send file directly over P2P DataChannel">
+                <span class="icon-slot" data-icon="paperclip"></span>
+              </button>
+              <input
+                id="chat-input"
+                type="text"
+                maxlength="1000"
+                placeholder="Message room (P2P encrypted)..."
+                autocomplete="off"
+              />
+              <button class="icon-btn accent" type="submit" aria-label="Send message">
+                <span class="icon-slot" data-icon="send"></span>
+              </button>
+            </form>
+          </div>
+
+          <div id="panel-people" class="dock-panel hidden">
+            <div class="dock-section">
+              <h3>In Studio</h3>
+              <ul id="roster-list" class="roster-list"></ul>
+            </div>
+
+            <div class="dock-section">
+              <h3>Switch Devices Live</h3>
+              <label class="field-compact">
+                <span>Microphone</span>
+                <select id="call-select-audio"></select>
+              </label>
+              <label class="field-compact">
+                <span>Camera</span>
+                <select id="call-select-video"></select>
+              </label>
+              <label class="field-compact">
+                <span>Bandwidth Preset</span>
+                <select id="call-select-quality">
+                  <option value="balanced">720p Studio (Balanced)</option>
+                  <option value="crisp">1080p Sharp</option>
+                  <option value="saver">360p Low-Bandwidth</option>
+                </select>
+              </label>
+            </div>
+          </div>
+        </aside>
+      </div>
+
+      <footer class="control-deck" aria-label="Call Controls">
+        <div class="deck-group">
+          <button id="btn-call-mic" class="deck-control active" type="button" title="Toggle Microphone (M)">
+            <span class="icon-slot" data-icon="micOn"></span>
+            <span class="deck-label">Mic <kbd>M</kbd></span>
+          </button>
+          <button id="btn-call-cam" class="deck-control active" type="button" title="Toggle Camera (V)">
+            <span class="icon-slot" data-icon="camOn"></span>
+            <span class="deck-label">Cam <kbd>V</kbd></span>
+          </button>
+          <button id="btn-call-share" class="deck-control" type="button" title="Share Screen (S)">
+            <span class="icon-slot" data-icon="screenShare"></span>
+            <span class="deck-label">Share <kbd>S</kbd></span>
+          </button>
+          <button id="btn-call-testcard" class="deck-control" type="button" title="Toggle Studio Test Card">
+            <span class="icon-slot" data-icon="slate"></span>
+            <span class="deck-label">Slate</span>
+          </button>
+        </div>
+
+        <div class="deck-group">
+          <button id="btn-call-hand" class="deck-control" type="button" title="Raise Hand (H)">
+            <span class="icon-slot" data-icon="hand"></span>
+            <span class="deck-label">Hand <kbd>H</kbd></span>
+          </button>
+
+          <div class="reaction-popover-wrap">
+            <button id="btn-reaction-menu" class="deck-control" type="button" title="Send Reaction">
+              <span class="reaction-glyph" aria-hidden="true">&#x1F44D;</span>
+              <span class="deck-label">React</span>
+            </button>
+            <div id="reaction-tray" class="reaction-tray hidden" role="menu">
+              <button type="button" data-emoji="👍" data-label="Thumbs Up">👍</button>
+              <button type="button" data-emoji="👏" data-label="Applause">👏</button>
+              <button type="button" data-emoji="⚡" data-label="Sharp">⚡</button>
+              <button type="button" data-emoji="🎯" data-label="On Target">🎯</button>
+              <button type="button" data-emoji="❓" data-label="Question">❓</button>
+            </div>
+          </div>
+
+          <button id="btn-call-chat" class="deck-control" type="button" title="Toggle Chat &amp; Files (C)">
+            <span class="icon-slot" data-icon="chat"></span>
+            <span class="deck-label">Chat <kbd>C</kbd></span>
+            <span id="chat-unread-dot" class="unread-dot hidden"></span>
+          </button>
+
+          <button id="btn-call-people" class="deck-control" type="button" title="Participants &amp; Devices">
+            <span class="icon-slot" data-icon="users"></span>
+            <span class="deck-label">People</span>
+          </button>
+
+          <button id="btn-call-manual" class="deck-control hidden" type="button" title="Manual SDP Handshake">
+            <span class="icon-slot" data-icon="sliders"></span>
+            <span class="deck-label">SDP</span>
+          </button>
+
+          <button id="btn-call-diag" class="deck-control" type="button" title="Network Diagnostics (I)">
+            <span class="icon-slot" data-icon="activity"></span>
+            <span class="deck-label">Stats <kbd>I</kbd></span>
+          </button>
+        </div>
+
+        <div class="deck-group">
+          <button id="btn-call-leave" class="deck-control danger" type="button" title="Leave Studio Line (E)">
+            <span class="icon-slot" data-icon="phoneOff"></span>
+            <span class="deck-label">Leave <kbd>E</kbd></span>
+          </button>
+        </div>
+      </footer>
+    </section>
+
+    <!-- ==================== SETTINGS MODAL ==================== -->
+    <dialog id="modal-settings" class="studio-dialog">
+      <div class="dialog-header">
+        <h2>Network &amp; Audio Configuration</h2>
+        <button class="btn btn-ghost btn-sm" data-close-dialog="modal-settings" type="button">Close</button>
+      </div>
+      <div class="dialog-body">
+        <div class="setting-block">
+          <h3>Audio Processing</h3>
+          <label class="checkbox-row">
+            <input id="chk-echo" type="checkbox" checked />
+            <span>Acoustic Echo Cancellation</span>
+          </label>
+          <label class="checkbox-row">
+            <input id="chk-noise" type="checkbox" checked />
+            <span>Browser Noise Suppression</span>
+          </label>
+        </div>
+
+        <div class="setting-block">
+          <h3>Default Public STUN Servers (Built-in &amp; Free)</h3>
+          <pre class="code-box mono">stun:stun.cloudflare.com:3478
+stun:stun.l.google.com:19302
+stun:stun1.l.google.com:19302
+stun:stun.stunprotocol.org:3478</pre>
+        </div>
+
+        <div class="setting-block">
+          <label class="field">
+            <span class="field-label">Optional Custom ICE / TURN Servers JSON</span>
+            <textarea
+              id="input-custom-ice"
+              class="mono"
+              rows="4"
+              placeholder='[{"urls":"turn:your-turn-host:3478","username":"...","credential":"..."}]'
+            ></textarea>
+          </label>
+          <p class="help-text">Stored locally in your browser. Useful only if callers are behind strict symmetric corporate firewalls where direct STUN P2P cannot punch through.</p>
+        </div>
+      </div>
+      <div class="dialog-footer">
+        <button id="btn-reset-ice" class="btn btn-ghost" type="button">Reset Defaults</button>
+        <button id="btn-save-settings" class="btn btn-primary" type="button">Save Preferences</button>
+      </div>
+    </dialog>
+
+    <!-- ==================== DIAGNOSTICS MODAL ==================== -->
+    <dialog id="modal-diagnostics" class="studio-dialog wide">
+      <div class="dialog-header">
+        <h2>WebRTC Link &amp; RTP Telemetry</h2>
+        <button class="btn btn-ghost btn-sm" data-close-dialog="modal-diagnostics" type="button">Close</button>
+      </div>
+      <div class="dialog-body">
+        <div id="diag-summary" class="diag-summary-bar mono">No active peer connections yet.</div>
+        <div id="diag-peers" class="diag-list"></div>
+      </div>
+    </dialog>
+
+    <!-- ==================== MANUAL SDP MODAL ==================== -->
+    <dialog id="modal-manual-sdp" class="studio-dialog wide">
+      <div class="dialog-header">
+        <h2>Zero-Server Manual SDP Exchange</h2>
+        <button class="btn btn-ghost btn-sm" data-close-dialog="modal-manual-sdp" type="button">Close</button>
+      </div>
+      <div class="dialog-body">
+        <p class="help-text">Connect two browsers without any signaling server or internet relay by exchanging the generated Offer and Answer blocks.</p>
+        <div class="manual-steps">
+          <div class="setting-block">
+            <h3>1. Caller: Create Offer</h3>
+            <button id="btn-manual-offer" class="btn btn-primary btn-sm" type="button">Generate Offer Code</button>
+            <textarea id="manual-local-sdp" class="mono" rows="4" readonly placeholder="Your local Offer or Answer appears here..."></textarea>
+            <button id="btn-manual-copy" class="btn btn-ghost btn-sm" type="button">Copy Local Code</button>
+          </div>
+          <div class="setting-block">
+            <h3>2. Paste Remote Offer or Answer</h3>
+            <textarea id="manual-remote-sdp" class="mono" rows="4" placeholder="Paste code received from peer..."></textarea>
+            <button id="btn-manual-accept" class="btn btn-primary btn-sm" type="button">Apply Remote Code</button>
+          </div>
+        </div>
+      </div>
+    </dialog>
+  </div>
+
+  <script type="module" src="./src/app.js"></script>
+</body>
+</html>
