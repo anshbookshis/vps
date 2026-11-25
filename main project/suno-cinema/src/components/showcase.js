@@ -63,6 +63,114 @@ export function renderAndroidBillboard(items, activeIndex = 0, { myListSet = new
 }
 
 /**
+ * Wide rounded Desktop Billboard matching Screenshots 3 & 4.
+ */
+export function renderDesktopBillboard(items, activeIndex = 0, { myListSet = new Set() } = {}) {
+  const list = Array.isArray(items) ? items : items ? [items] : [];
+  if (list.length === 0) return '';
+  const safeIdx = ((activeIndex % list.length) + list.length) % list.length;
+  const item = list[safeIdx];
+  const key = getMediaKey(item);
+  const inMyList = myListSet.has(key);
+  const art = resolveArtUrl(item, 'wide');
+  const typeWord = item.mediaType === 'tv' ? 'Show' : item.mediaType === 'anime' ? 'Anime' : 'Movie';
+  const metaParts = [
+    typeWord,
+    ...(item.genres || []).slice(0, 2),
+    item.year,
+    item.runtime,
+    item.mediaType === 'anime' ? 'Sub / Dub' : 'U/A 16+',
+  ].filter(Boolean);
+  const castText =
+    item.cast && item.cast.length > 0
+      ? `${item.cast.slice(0, 3).join(', ')} star`
+      : item.country
+      ? `${item.country} • Popup-Free HD Stream`
+      : 'No-Redirect Ad Shield • Free Stream';
+
+  return `<section class="dk-hero-wrap" aria-label="Featured Spotlight">
+    <div class="dk-hero-card" data-open-detail="${escapeHtml(key)}">
+      <img
+        class="dk-hero-img"
+        src="${escapeHtml(art)}"
+        alt="${escapeHtml(item.title)}"
+        referrerpolicy="no-referrer"
+        ${attachFallbackImgAttr(item, 'wide')}
+      />
+      <div class="dk-hero-scrim"></div>
+      ${
+        list.length > 1
+          ? `<div class="billboard-spotlight-controls" style="top:18px;right:20px;" onclick="event.stopPropagation()">
+              <button type="button" class="spotlight-step-btn" data-hero-step="-1" aria-label="Previous spotlight">${svgIcon('chevronLeft', 14)}</button>
+              <span class="spotlight-counter">${safeIdx + 1}/${list.length}</span>
+              <button type="button" class="spotlight-step-btn" data-hero-step="1" aria-label="Next spotlight">${svgIcon('chevronRight', 14)}</button>
+            </div>`
+          : ''
+      }
+      <div class="dk-hero-content">
+        ${
+          item.logo
+            ? `<img class="dk-hero-logo" src="${escapeHtml(item.logo)}" alt="${escapeHtml(
+                item.title
+              )}" referrerpolicy="no-referrer" onerror="this.style.display='none';this.nextElementSibling.style.display='block';" />
+               <h1 class="dk-hero-title" style="display:none;">${escapeHtml(item.title)}</h1>`
+            : `<h1 class="dk-hero-title">${escapeHtml(item.title)}</h1>`
+        }
+        <div class="dk-hero-meta">${escapeHtml(metaParts.join(' • '))}</div>
+        <p class="dk-hero-desc">${escapeHtml(
+          item.overview || item.tagline || 'Stream full HD movies, series & anime free on Suno Cinema.'
+        )}</p>
+        <div class="dk-hero-actions" onclick="event.stopPropagation()">
+          <button type="button" class="dk-btn-play" data-play-key="${escapeHtml(key)}">
+            ${svgIcon('play', 18)} Play
+          </button>
+          <button type="button" class="dk-btn-info" data-open-detail="${escapeHtml(key)}">
+            More Info
+          </button>
+          <button type="button" class="dk-btn-circle" data-toggle-mylist="${escapeHtml(key)}" title="${
+            inMyList ? 'In My List' : 'Add to My List'
+          }" aria-label="Toggle My List">
+            ${svgIcon(inMyList ? 'check' : 'plus', 18)}
+          </button>
+        </div>
+      </div>
+      <div class="dk-hero-cast-badge" title="${escapeHtml(castText)}">🎬 ${escapeHtml(castText)}</div>
+    </div>
+  </section>`;
+}
+
+/**
+ * Clean 4-column Desktop Footer matching Screenshot 1 (adapted to Suno Cinema).
+ */
+export function renderDesktopFooter() {
+  return `<footer class="dk-footer">
+    <div class="dk-footer-socials">
+      <button type="button" class="dk-footer-pill" data-open-discover="movie">Movies</button>
+      <button type="button" class="dk-footer-pill" data-open-discover="tv">Shows</button>
+      <button type="button" class="dk-footer-pill" data-open-discover="anime">Anime</button>
+      <button type="button" class="dk-footer-pill" data-open-languages="true">Languages</button>
+    </div>
+    <div class="dk-footer-grid">
+      <button type="button" data-open-languages="true">Audio &amp; Subtitles</button>
+      <button type="button" data-open-discover="movie">Trending Movies</button>
+      <button type="button" id="open-settings-btn">Ad-Free Shield</button>
+      <button type="button" id="open-quicklaunch-btn">Quick Launch by ID</button>
+
+      <button type="button" data-open-discover="tv">Top TV Shows</button>
+      <button type="button" data-open-discover="anime">Anime &amp; OST</button>
+      <button type="button" data-nav-tab="downloads">Smart Downloads</button>
+      <button type="button" data-nav-tab="mysuno">My Suno Profile</button>
+
+      <button type="button" id="open-categories-btn">Browse Genres</button>
+      <button type="button" id="open-notifications-btn">What's New</button>
+      <button type="button" data-nav-tab="clips">Trailers &amp; Clips</button>
+      <button type="button" id="refresh-home-feed-btn">Refresh Live Feed</button>
+    </div>
+    <div class="dk-footer-copy">© 2026 Suno Cinema • A Suno Product • Powered by VidLink, VidRift, Cinemeta &amp; AniList</div>
+  </footer>`;
+}
+
+/**
  * Full Title Detail Screen matching Screenshot 2 (16:9 trailer stage, Play, Download, Starring, +/Rate/Share).
  */
 export function renderDetailView({

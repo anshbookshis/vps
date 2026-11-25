@@ -1,8 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { AntiRedirectGuard, isAllowedExternalUrl } from '../src/utils/anti-redirect.js';
-import { normalizeCinemetaItem, searchLocalItems } from '../src/utils/client-api.js';
+import { normalizeCinemetaItem, searchLocalItems, fetchLanguageCatalog } from '../src/utils/client-api.js';
 import { getMediaKey } from '../src/utils/storage.js';
+import { renderDesktopWideCard, renderDesktopTop10Card, renderShelf } from '../src/components/cards.js';
+import { renderDesktopBillboard, renderDesktopFooter } from '../src/components/showcase.js';
+import { renderSunoCinemaDesktopWordmark } from '../src/components/icons.js';
 
 test('isAllowedExternalUrl allows Suno ecosystem domains and rejects unknown popup destinations', () => {
   assert.equal(isAllowedExternalUrl('https://sunov2.vercel.app/app'), true);
@@ -74,4 +77,54 @@ test('normalizeCinemetaItem extracts moviedb_id, logo, backdrop, trailers, and m
   assert.equal(getMediaKey(searchHit), 'movie:imdb:tt1160419');
 
   assert.ok(searchLocalItems('interstellar').length >= 1);
+});
+
+test('desktop UI renderers and language catalog maintain Suno Cinema branding', async () => {
+  const sampleItem = {
+    id: 'movie:157336',
+    tmdbId: '157336',
+    imdbId: 'tt0816692',
+    mediaType: 'movie',
+    title: 'Interstellar',
+    year: 2014,
+    runtime: '2h 49m',
+    genres: ['Sci-Fi', 'Drama'],
+    cast: ['Matthew McConaughey', 'Anne Hathaway'],
+    overview: 'Explorers travel through a wormhole in space.',
+    poster: 'https://images.metahub.space/poster/medium/tt0816692/img',
+    backdrop: 'https://images.metahub.space/background/medium/tt0816692/img',
+  };
+
+  const wordmark = renderSunoCinemaDesktopWordmark();
+  assert.ok(wordmark.includes('SUNO CINEMA'));
+  assert.equal(/netflix/i.test(wordmark), false);
+
+  const hero = renderDesktopBillboard([sampleItem], 0, { myListSet: new Set(['movie:157336']) });
+  assert.ok(hero.includes('dk-hero-card'));
+  assert.ok(hero.includes('More Info'));
+  assert.ok(hero.includes('Matthew McConaughey'));
+
+  const card = renderDesktopWideCard(sampleItem, {
+    top10: true,
+    recentlyAdded: true,
+    progress: { currentTime: 1200, duration: 3600 },
+    inMyList: true,
+    isLiked: false,
+  });
+  assert.ok(card.includes('dk-hover-panel'));
+  assert.ok(card.includes('dk-progress-bar'));
+  assert.ok(card.includes('Recently Added'));
+
+  const top10 = renderDesktopTop10Card(sampleItem, 1, { recentlyAdded: true });
+  assert.ok(top10.includes('dk-top10-num'));
+
+  const shelf = renderShelf({ id: 's1', title: 'Top Picks', items: [sampleItem], kind: 'dk-wide' });
+  assert.ok(shelf.includes('data-scroll-row="s1"'));
+
+  const footer = renderDesktopFooter();
+  assert.ok(footer.includes('Suno Cinema'));
+  assert.equal(/netflix/i.test(footer), false);
+
+  const regional = await fetchLanguageCatalog('South Indian');
+  assert.ok(Array.isArray(regional) && regional.length >= 1);
 });
