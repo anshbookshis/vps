@@ -3,6 +3,12 @@ export const VIDLINK_ORIGIN = 'https://vidlink.pro';
 
 export const PLAYER_PROVIDERS = [
   {
+    id: 'hls-direct',
+    label: 'Native HLS (Zero Ads)',
+    sandboxed: true,
+    description: 'Direct MPEG-TS / HLS stream via native HTML5 video player (zero ads/popups)',
+  },
+  {
     id: 'vidlink',
     label: 'VidLink (No-Redirect)',
     sandboxed: true,
@@ -114,7 +120,7 @@ export function parseDirectTarget(rawInput, fallbackType = 'movie') {
     return { mediaType: 'movie', tmdbId: input };
   }
 
-  if (/^https:\/\/[^\s]+\.(m3u8|mp4)(\?[^\s]*)?$/i.test(input)) {
+  if (/^https?:\/\/[^\s]+\.(m3u8|mp4)(\?[^\s]*)?$/i.test(input)) {
     return {
       mediaType: 'hls',
       hlsUrl: input,
@@ -122,7 +128,103 @@ export function parseDirectTarget(rawInput, fallbackType = 'movie') {
     };
   }
 
+  // Magnet link or torrent infohash support (Method 3: Torrent-to-HLS pipeline)
+  const magnetMatch = input.match(/^magnet:\?xt=urn:btih:([a-zA-Z0-9]+)/i);
+  if (magnetMatch) {
+    return {
+      mediaType: 'hls',
+      infoHash: magnetMatch[1],
+      magnetUri: input,
+      hlsUrl: `./api/resolve/stream?magnet=${encodeURIComponent(input)}`,
+      format: 'hls',
+    };
+  }
+
+  if (/^[a-fA-F0-9]{40}$/.test(input)) {
+    return {
+      mediaType: 'hls',
+      infoHash: input,
+      hlsUrl: `./api/resolve/stream?hash=${encodeURIComponent(input)}`,
+      format: 'hls',
+    };
+  }
+
   return null;
+}
+
+/**
+ * Resolves available stream sources for a media item (Method 3 & Method 4 architecture).
+ * Queries the local /api/resolve/stream endpoint when available, and provides client-side fallbacks.
+ *
+ * @param {object} item
+ * @param {object} [options]
+ * @returns {Promise<Array<{id: string, name: string, type: string, url: string, quality: string, shielded: boolean}>>}
+ */
+export async function fetchStreamSources(item, options = {}) {
+  if (!item) return [];
+  const season = Math.max(1, Number(options.season ?? item.season ?? 1));
+  const episode = Math.max(1, Number(options.episode ?? item.episode ?? 1));
+  const tmdbId = item.tmdbId || (item.mediaType !== 'anime' ? item.id : '');
+  const anilistId = item.anilistId || (item.mediaType === 'anime' ? item.id : '');
+
+  // 1. If running with Node server, ask the stream resolver
+  try {
+    const q = new URLSearchParams();
+    if (tmdbId) q.set('tmdbId', String(tmdbId));
+    if (anilistId) q.set('anilistId', String(anilistId));
+    if (item.mediaType) q.set('mediaType', item.mediaType);
+    q.set('season', String(season));
+    q.set('episode', String(episode));
+    if (item.hlsStreamUrl) q.set('directUrl', item.hlsStreamUrl);
+
+    const resp = await fetch(`./api/resolve/stream?${q.toString()}`);
+    if (resp.ok) {
+      const data = await resp.json();
+      if (Array.isArray(data.sources) && data.sources.length) {
+        return data.sources;
+      }
+    }
+  } catch {
+    // Static hosting fallback (e.g. GitHub Pages)
+  }
+
+  // 2. Client-side fallback sources
+  const list = [];
+  if (item.hlsStreamUrl) {
+    list.push({
+      id: 'catalog-hls',
+      name: 'Direct HLS Stream (Zero Ads)',
+      type: 'hls',
+      url: item.hlsStreamUrl,
+      quality: '1080p UHD',
+      shielded: true,
+      direct: true,
+    });
+  }
+
+  const vidlinkUrl = buildVidlinkEmbedUrl(item, options);
+  list.push({
+    id: 'vidlink-shield',
+    name: 'VidLink (No-Redirect Shield)',
+    type: 'embed',
+    url: vidlinkUrl,
+    quality: '1080p',
+    shielded: true,
+    sandboxed: true,
+  });
+
+  const vidriftUrl = buildVidriftEmbedUrl(item, options);
+  list.push({
+    id: 'vidrift-sandboxed',
+    name: 'VidRift (Sandboxed)',
+    type: 'embed',
+    url: vidriftUrl,
+    quality: '720p/1080p',
+    shielded: true,
+    sandboxed: true,
+  });
+
+  return list;
 }
 
 /**

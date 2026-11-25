@@ -49,6 +49,100 @@ async function fetchJsonWithTimeout(url, options = {}, timeoutMs = 6000) {
   }
 }
 
+/**
+ * Rewrite HLS M3U8 manifest content to route all child playlists, chunks, and keys through the local HLS proxy.
+ * Implements Method 3/4 front-end pipeline requirements:
+ * - Rewrites segment URIs with upstream base URL resolution
+ * - Preserves upstream Referer/Origin tokens
+ * - Rewrites #EXT-X-KEY and #EXT-X-MAP URI attributes
+ *
+ * @param {string} manifestText
+ * @param {string} baseUrl
+ * @param {string} [proxyEndpoint='/api/proxy/hls']
+ * @param {string} [referer='']
+ * @returns {string}
+ */
+export function rewriteHlsManifest(manifestText, baseUrl, proxyEndpoint = '/api/proxy/hls', referer = '') {
+  if (typeof manifestText !== 'string') return '';
+  const lines = manifestText.split(/\r?\n/);
+  const rewritten = lines.map((line) => {
+    const trimmed = line.trim();
+    if (!trimmed) return line;
+
+    // Rewrite tags containing URI="..." such as #EXT-X-KEY or #EXT-X-MAP
+    if (trimmed.startsWith('#') && trimmed.includes('URI=')) {
+      return line.replace(/URI="([^"]+)"/g, (match, uri) => {
+        try {
+          const abs = new URL(uri, baseUrl).href;
+          const param = `${proxyEndpoint}?url=${encodeURIComponent(abs)}${
+            referer ? `&referer=${encodeURIComponent(referer)}` : ''
+          }`;
+          return `URI="${param}"`;
+        } catch {
+          return match;
+        }
+      });
+    }
+
+    // Rewrite segment and child playlist URI lines (do not start with #)
+    if (!trimmed.startsWith('#')) {
+      try {
+        const abs = new URL(trimmed, baseUrl).href;
+        return `${proxyEndpoint}?url=${encodeURIComponent(abs)}${
+          referer ? `&referer=${encodeURIComponent(referer)}` : ''
+        }`;
+      } catch {
+        return line;
+      }
+    }
+
+    return line;
+  });
+
+  return rewritten.join('\n');
+}
+
+/**
+ * Unmasks MPEG-TS / MP4 segments disguised with fake image headers or font wrappers (Method 4 CDN abuse mitigation).
+ * Detects PNG (89 50 4E 47), JPEG (FF D8 FF), and wOFF2 headers prepended to segment chunks,
+ * locating the 188-byte MPEG-TS 0x47 sync packet cadence or fragmented MP4 boxes.
+ *
+ * @param {Buffer} buffer
+ * @returns {Buffer}
+ */
+export function unmaskDisguisedSegment(buffer) {
+  if (!Buffer.isBuffer(buffer) || buffer.length < 188) return buffer;
+
+  const isPng = buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4e && buffer[3] === 0x47;
+  const isJpg = buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff;
+  const isWoff = buffer[0] === 0x77 && buffer[1] === 0x4f && buffer[2] === 0x46 && buffer[3] === 0x32;
+
+  if (isPng || isJpg || isWoff) {
+    // Scan for repeating 188-byte MPEG-TS sync byte (0x47)
+    const scanLimit = Math.min(buffer.length - 188 * 3, 16384);
+    for (let i = 0; i < scanLimit; i++) {
+      if (
+        buffer[i] === 0x47 &&
+        buffer[i + 188] === 0x47 &&
+        buffer[i + 376] === 0x47
+      ) {
+        return buffer.subarray(i);
+      }
+    }
+
+    // Scan for fragmented MP4 box header ('ftyp', 'moof', 'styp')
+    const boxLimit = Math.min(buffer.length - 8, 4096);
+    for (let i = 0; i < boxLimit; i++) {
+      const tag = buffer.toString('ascii', i + 4, i + 8);
+      if (tag === 'ftyp' || tag === 'moof' || tag === 'styp') {
+        return buffer.subarray(i);
+      }
+    }
+  }
+
+  return buffer;
+}
+
 export function searchLocalCatalog(query, type = 'all') {
   const q = String(query || '').trim().toLowerCase();
   return CATALOG_ITEMS.filter((item) => {
@@ -373,7 +467,220 @@ export function createSunoCinemaServer(rootDir = ROOT_DIR) {
         product: 'Suno Cinema',
         embedOrigin: 'https://embed.vidrift.net',
         tmdbConfigured: Boolean(process.env.TMDB_API_KEY),
+        debridConfigured: Boolean(process.env.DEBRID_API_KEY),
+        hlsProxyEnabled: true,
+        streamResolverEnabled: true,
         catalogCount: CATALOG_ITEMS.length,
+      });
+    }
+
+    if (pathname === '/api/proxy/hls') {
+      if (req.method === 'OPTIONS') {
+        res.writeHead(204, {
+          'Access-Control-Allow-Origin': '*',
+          'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
+          'Access-Control-Allow-Headers': '*',
+        });
+        return res.end();
+      }
+
+      const targetUrl = reqUrl.searchParams.get('url');
+      const referer = reqUrl.searchParams.get('referer') || '';
+      if (!targetUrl || !/^https?:\/\//i.test(targetUrl)) {
+        return sendJson(res, 400, { error: 'Valid http/https "url" query parameter required' });
+      }
+
+      try {
+        const upstreamHeaders = {
+          'User-Agent':
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+          Accept: '*/*',
+        };
+        if (referer) {
+          upstreamHeaders['Referer'] = referer;
+          try {
+            upstreamHeaders['Origin'] = new URL(referer).origin;
+          } catch {}
+        }
+
+        const upstreamResp = await fetch(targetUrl, {
+          headers: upstreamHeaders,
+          redirect: 'follow',
+        });
+
+        if (!upstreamResp.ok) {
+          return sendJson(res, upstreamResp.status, {
+            error: `Upstream HTTP ${upstreamResp.status} ${upstreamResp.statusText}`,
+            targetUrl,
+          });
+        }
+
+        const contentType = upstreamResp.headers.get('content-type') || '';
+        const isManifest =
+          contentType.includes('mpegurl') ||
+          contentType.includes('application/x-mpegURL') ||
+          targetUrl.includes('.m3u8');
+
+        if (isManifest) {
+          const text = await upstreamResp.text();
+          const rewritten = rewriteHlsManifest(text, targetUrl, '/api/proxy/hls', referer || targetUrl);
+          res.writeHead(200, {
+            'Content-Type': 'application/vnd.apple.mpegurl; charset=utf-8',
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
+            'Access-Control-Allow-Headers': '*',
+            'Cache-Control': 'no-cache',
+          });
+          return res.end(rewritten);
+        }
+
+        const arrayBuf = await upstreamResp.arrayBuffer();
+        const buf = Buffer.from(arrayBuf);
+        const unmasked = unmaskDisguisedSegment(buf);
+
+        let outMime = 'video/mp2t';
+        if (targetUrl.includes('.m4s') || targetUrl.includes('.mp4')) {
+          outMime = 'video/mp4';
+        } else if (targetUrl.includes('.aac')) {
+          outMime = 'audio/aac';
+        }
+
+        res.writeHead(200, {
+          'Content-Type': outMime,
+          'Content-Length': unmasked.length,
+          'Access-Control-Allow-Origin': '*',
+          'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
+          'Access-Control-Allow-Headers': '*',
+          'Access-Control-Expose-Headers': 'Content-Length, Content-Range',
+          'Cache-Control': 'public, max-age=3600',
+        });
+        return res.end(unmasked);
+      } catch (err) {
+        return sendJson(res, 502, {
+          error: 'HLS proxy upstream gateway error',
+          message: err.message,
+          targetUrl,
+        });
+      }
+    }
+
+    if (pathname === '/api/resolve/stream') {
+      const tmdbId = reqUrl.searchParams.get('tmdbId') || '';
+      const imdbId = reqUrl.searchParams.get('imdbId') || '';
+      const anilistId = reqUrl.searchParams.get('anilistId') || '';
+      const mediaType = reqUrl.searchParams.get('mediaType') || 'movie';
+      const season = Math.max(1, Number(reqUrl.searchParams.get('season') || 1));
+      const episode = Math.max(1, Number(reqUrl.searchParams.get('episode') || 1));
+      const directUrl = reqUrl.searchParams.get('directUrl') || '';
+
+      const sources = [];
+
+      // Custom Direct stream URL
+      if (directUrl) {
+        const isHls = directUrl.includes('.m3u8');
+        sources.push({
+          id: 'custom-stream',
+          name: isHls ? 'Direct HLS Stream' : 'Direct MP4 Video',
+          type: isHls ? 'hls' : 'direct',
+          url: isHls ? `/api/proxy/hls?url=${encodeURIComponent(directUrl)}` : directUrl,
+          rawUrl: directUrl,
+          quality: 'Original Quality',
+          shielded: true,
+          direct: true,
+        });
+      }
+
+      // Catalog stream reference (demo/tested direct streams)
+      const localItem = CATALOG_ITEMS.find(
+        (x) =>
+          (tmdbId && String(x.tmdbId) === String(tmdbId)) ||
+          (imdbId && String(x.imdbId) === String(imdbId)) ||
+          (anilistId && String(x.anilistId) === String(anilistId))
+      );
+
+      if (localItem?.hlsStreamUrl) {
+        sources.push({
+          id: 'catalog-hls',
+          name: 'Direct HLS Stream (Zero Ads)',
+          type: 'hls',
+          url: `/api/proxy/hls?url=${encodeURIComponent(localItem.hlsStreamUrl)}`,
+          rawUrl: localItem.hlsStreamUrl,
+          quality: '1080p UHD',
+          shielded: true,
+          direct: true,
+        });
+      }
+
+      // Method 3: Debrid / Torrent cache configuration
+      const debridApiKey = process.env.DEBRID_API_KEY || '';
+      const debridProvider = (process.env.DEBRID_PROVIDER || 'realdebrid').toLowerCase();
+      if (debridApiKey) {
+        sources.push({
+          id: 'debrid-instant-cache',
+          name: `Instant Cached Stream (${debridProvider.toUpperCase()})`,
+          type: 'debrid',
+          configured: true,
+          provider: debridProvider,
+          quality: '1080p Remux',
+          shielded: true,
+          direct: true,
+        });
+      }
+
+      // VidLink No-Redirect Pro Player (sandboxed ad-free shield)
+      if (tmdbId || imdbId) {
+        const idVal = tmdbId || imdbId;
+        const vidlinkUrl =
+          mediaType === 'tv'
+            ? `https://vidlink.pro/tv/${encodeURIComponent(idVal)}/${season}/${episode}?primaryColor=ff4d6d&secondaryColor=00f0ff&iconColor=ff4d6d&title=false&poster=true&autoplay=false`
+            : `https://vidlink.pro/movie/${encodeURIComponent(idVal)}?primaryColor=ff4d6d&secondaryColor=00f0ff&iconColor=ff4d6d&title=false&poster=true&autoplay=false`;
+
+        sources.push({
+          id: 'vidlink-shield',
+          name: 'VidLink (No-Redirect Shield)',
+          type: 'embed',
+          url: vidlinkUrl,
+          quality: '1080p',
+          shielded: true,
+          sandboxed: true,
+          direct: false,
+        });
+      }
+
+      // VidRift Sandboxed
+      if (tmdbId || imdbId || anilistId) {
+        let vidriftUrl;
+        if (mediaType === 'anime' && anilistId) {
+          vidriftUrl = `https://embed.vidrift.net/embed/anilist/${encodeURIComponent(anilistId)}/${episode}?primaryColor=ff4d6d&autoplay=false`;
+        } else if (mediaType === 'tv' && (tmdbId || imdbId)) {
+          const idVal = tmdbId || imdbId;
+          vidriftUrl = `https://embed.vidrift.net/embed/tv/${encodeURIComponent(idVal)}/${season}/${episode}?primaryColor=ff4d6d&autoplay=false`;
+        } else {
+          const idVal = tmdbId || imdbId;
+          vidriftUrl = `https://embed.vidrift.net/embed/movie/${encodeURIComponent(idVal)}?primaryColor=ff4d6d&autoplay=false`;
+        }
+
+        sources.push({
+          id: 'vidrift-sandboxed',
+          name: 'VidRift (Sandboxed)',
+          type: 'embed',
+          url: vidriftUrl,
+          quality: '720p/1080p',
+          shielded: true,
+          sandboxed: true,
+          direct: false,
+        });
+      }
+
+      return sendJson(res, 200, {
+        ok: true,
+        tmdbId,
+        imdbId,
+        anilistId,
+        mediaType,
+        season,
+        episode,
+        sources,
       });
     }
 

@@ -381,6 +381,9 @@ async function selectStudioHub(hubId) {
 function getCurrentEmbedUrl() {
   if (!state.activeItem) return '';
   if (state.activeItem.mediaType === 'hls') return state.activeItem.hlsUrl || '';
+  if (state.prefs.playerProvider === 'hls-direct' && state.activeItem.hlsStreamUrl) {
+    return state.activeItem.hlsStreamUrl;
+  }
   if (state.activeItem.mediaType !== 'anime' && !state.activeItem.tmdbId) return '';
   return buildPlayerEmbedUrl(state.activeItem, {
     provider: state.prefs.playerProvider || 'vidlink',
@@ -1851,8 +1854,8 @@ function syncPlayerMount({ forceReload = false } = {}) {
 
   const embedUrl = getCurrentEmbedUrl();
   const item = state.activeItem;
-  const isHls = item.mediaType === 'hls';
   const provider = state.prefs.playerProvider || 'vidlink';
+  const isHls = item.mediaType === 'hls' || provider === 'hls-direct' || Boolean(item.hlsStreamUrl);
   const isSandboxed = provider !== 'vidrift-direct' && state.shield.strictFrameMode;
   const existingFrame = document.getElementById('vidrift-player');
   const existingVideo = document.getElementById('hls-video-player');
@@ -2482,6 +2485,15 @@ function bindEvents() {
     if (shareBtn) {
       e.stopPropagation();
       shareItem(getItemByKey(shareBtn.dataset.shareKey));
+      return;
+    }
+
+    const hoverSoundBtn = target.closest('[data-toggle-hover-sound]');
+    if (hoverSoundBtn) {
+      e.stopPropagation();
+      state.heroTrailerMuted = !state.heroTrailerMuted;
+      showToast(state.heroTrailerMuted ? 'Muted' : 'Audio Preview ON');
+      render();
       return;
     }
 
