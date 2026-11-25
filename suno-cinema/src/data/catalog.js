@@ -954,6 +954,7 @@ export const CATALOG_ITEMS = [
     "overview": "K discovers a buried secret that threatens to plunge what remains of society into chaos.",
     "poster": "https://m.media-amazon.com/images/M/MV5BNzA1Njg4NzYxOV5BMl5BanBnXkFtZTgwODk5NjU3MzI@._V1_UX600_.jpg",
     "backdrop": "https://m.media-amazon.com/images/M/MV5BNzA1Njg4NzYxOV5BMl5BanBnXkFtZTgwODk5NjU3MzI@._V1_UX600_.jpg",
+    "hlsStreamUrl": "https://cph-p2p-msl.akamaized.net/hls/live/2000341/test/master.m3u8",
     "palette": [
       "#00f0ff",
       "#ff5e62",
@@ -1098,6 +1099,7 @@ export const CATALOG_ITEMS = [
     "overview": "A team of explorers travel through a wormhole in space in an attempt to ensure humanity's survival.",
     "poster": "https://m.media-amazon.com/images/M/MV5BYzdjMDAxZGItMjI2My00ODA1LTlkNzItOWFjMDU5ZDJlYWY3XkEyXkFqcGc@._V1_UX600_.jpg",
     "backdrop": "https://m.media-amazon.com/images/M/MV5BYzdjMDAxZGItMjI2My00ODA1LTlkNzItOWFjMDU5ZDJlYWY3XkEyXkFqcGc@._V1_UX600_.jpg",
+    "hlsStreamUrl": "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8",
     "palette": [
       "#38bdf8",
       "#f59e0b",
@@ -3080,6 +3082,7 @@ export const CATALOG_ITEMS = [
     "overview": "Enter a world in the distant future, where Bounty Hunters roam the solar system. Spike and Jet, bounty hunting partners, set out on journeys in an ever struggling effort to win bounty rewards to survive.\nWhile traveling, they meet up with other very interesting people. Could Faye, the beautiful and ",
     "poster": "https://s4.anilist.co/file/anilistcdn/media/anime/cover/large/bx1-GCsPm7waJ4kS.png",
     "backdrop": "https://s4.anilist.co/file/anilistcdn/media/anime/banner/1-OquNCNB6srGe.jpg",
+    "hlsStreamUrl": "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8",
     "palette": [
       "#f16b50",
       "#00f0ff",
@@ -3698,5 +3701,80 @@ export const CATALOG_ITEMS = [
       }
     },
     "malId": "227"
+  },
+  {
+    "id": "movie:test-bbb",
+    "tmdbId": "test-bbb",
+    "mediaType": "movie",
+    "title": "Big Buck Bunny (Direct HLS)",
+    "year": "2008",
+    "creator": "Blender Open Cinema",
+    "runtime": "10m",
+    "rating": "8.5",
+    "genres": [
+      "Animation",
+      "Short",
+      "Comedy"
+    ],
+    "overview": "Open source computer-animated comedy short film by the Blender Institute streaming via direct 1080p HLS.",
+    "poster": "https://upload.wikimedia.org/wikipedia/commons/thumb/c/c5/Big_buck_bunny_poster_big.jpg/600px-Big_buck_bunny_poster_big.jpg",
+    "backdrop": "https://upload.wikimedia.org/wikipedia/commons/thumb/c/c5/Big_buck_bunny_poster_big.jpg/1280px-Big_buck_bunny_poster_big.jpg",
+    "palette": [
+      "#1db954",
+      "#00f0ff",
+      "#0a1014"
+    ],
+    "hlsStreamUrl": "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8",
+    "sonic": {
+      "moodId": "indie-tape",
+      "bpm": 110,
+      "texture": "Orchestral Animation Score",
+      "listenBefore": "Jan Morgenstern",
+      "cooldownCue": "Gentle acoustic guitar",
+      "vector": {
+        "pulse": 0.72,
+        "nocturne": 0.35,
+        "warmth": 0.88,
+        "scale": 0.65,
+        "tension": 0.4
+      }
+    }
+  },
+  {
+    "id": "movie:test-tos",
+    "tmdbId": "test-tos",
+    "mediaType": "movie",
+    "title": "Tears of Steel (Direct HLS)",
+    "year": "2012",
+    "creator": "Ian Hubert / Blender Foundation",
+    "runtime": "12m",
+    "rating": "8.2",
+    "genres": [
+      "Sci-Fi",
+      "Short"
+    ],
+    "overview": "Open source science fiction short film exploring a dystopian future Amsterdam with VFX created using Blender, streaming via live Akamai HLS.",
+    "poster": "https://upload.wikimedia.org/wikipedia/commons/thumb/6/6f/Tears_of_Steel_poster.jpg/600px-Tears_of_Steel_poster.jpg",
+    "backdrop": "https://upload.wikimedia.org/wikipedia/commons/thumb/6/6f/Tears_of_Steel_poster.jpg/1280px-Tears_of_Steel_poster.jpg",
+    "palette": [
+      "#ff5e62",
+      "#00f0ff",
+      "#0b0c10"
+    ],
+    "hlsStreamUrl": "https://cph-p2p-msl.akamaized.net/hls/live/2000341/test/master.m3u8",
+    "sonic": {
+      "moodId": "imax-sub",
+      "bpm": 92,
+      "texture": "Cinematic Dystopian Synth",
+      "listenBefore": "Joris Hermans",
+      "cooldownCue": "Ambient Dutch dusk strings",
+      "vector": {
+        "pulse": 0.75,
+        "nocturne": 0.85,
+        "warmth": 0.45,
+        "scale": 0.88,
+        "tension": 0.82
+      }
+    }
   }
 ];
