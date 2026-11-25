@@ -204,6 +204,7 @@ function normalizeAniListItem(m) {
   return {
     id: `anime:${m.id}`,
     anilistId: String(m.id),
+    malId: m.idMal ? String(m.idMal) : '',
     mediaType: 'anime',
     title: m.title?.english || m.title?.romaji || 'Anime',
     year: m.seasonYear ? String(m.seasonYear) : '',
@@ -302,6 +303,7 @@ export async function loadTrendingAnime({ genre = '', page = 1 } = {}) {
         Page(page: $page, perPage: 20) {
           media(type: ANIME, sort: TRENDING_DESC, isAdult: false, genre: $genre) {
             id
+            idMal
             title { romaji english }
             episodes
             duration
@@ -406,6 +408,7 @@ async function searchAniListBrowser(query) {
       Page(page: 1, perPage: 12) {
         media(search: $search, type: ANIME, sort: POPULARITY_DESC, isAdult: false) {
           id
+          idMal
           title { romaji english }
           episodes
           duration
@@ -527,6 +530,35 @@ export async function searchAllMedia(query, tmdbApiKey = '', type = 'all') {
     }
   }
   return merged;
+}
+
+export async function fetchDynamicHomeFeeds({ pageOffset = 0 } = {}) {
+  const genrePairs = [
+    ['Action', 'Thriller'],
+    ['Sci-Fi', 'Comedy'],
+    ['Crime', 'Drama'],
+    ['Adventure', 'Mystery'],
+  ];
+  const [genreLabelA, genreLabelB] = genrePairs[pageOffset % genrePairs.length];
+  const skip = (pageOffset % 4) * 25;
+
+  const [trendingMovies, trendingSeries, genreFeedA, genreFeedB, trendingAnime] = await Promise.all([
+    fetchCinemetaCatalog('movie', { skip }).catch(() => []),
+    fetchCinemetaCatalog('series', { skip }).catch(() => []),
+    fetchCinemetaCatalog('movie', { genre: genreLabelA, skip: pageOffset > 0 ? 25 : 0 }).catch(() => []),
+    fetchCinemetaCatalog('movie', { genre: genreLabelB, skip: pageOffset > 0 ? 25 : 0 }).catch(() => []),
+    loadTrendingAnime({ page: 1 + (pageOffset % 3) }).catch(() => []),
+  ]);
+
+  return {
+    trendingMovies,
+    trendingSeries,
+    genreLabelA,
+    genreFeedA,
+    genreLabelB,
+    genreFeedB,
+    trendingAnime,
+  };
 }
 
 export async function fetchTvSeasonsData(tmdbId, tmdbApiKey = '', imdbId = '') {

@@ -30,7 +30,7 @@ export class AntiRedirectGuard {
     this.installed = false;
     this.blockedCount = 0;
     this.navigationLock = true;
-    this.strictFrameMode = false;
+    this.strictFrameMode = true;
     this.theaterActive = false;
     this.recentEvents = [];
     this.listeners = new Set();

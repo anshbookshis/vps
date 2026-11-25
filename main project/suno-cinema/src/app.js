@@ -1,7 +1,8 @@
 import {
-  buildVidriftEmbedUrl,
+  PLAYER_PROVIDERS,
+  buildPlayerEmbedUrl,
   parseDirectTarget,
-  parseVidriftMessage,
+  parseAnyPlayerMessage,
   buildVidriftCommand,
   VIDRIFT_ORIGIN,
 } from './utils/vidrift.js';
@@ -56,6 +57,7 @@ import {
   loadCatalogData,
   loadTrendingAnime,
   fetchCinemetaCatalog,
+  fetchDynamicHomeFeeds,
   resolveFullMetadata,
   searchAllMedia,
   fetchTvSeasonsData,
@@ -68,7 +70,14 @@ const state = {
   catalogMap: new Map(),
   liveMovies: [],
   liveSeries: [],
+  liveGenreLabelA: 'Action',
+  liveGenreFeedA: [],
+  liveGenreLabelB: 'Thriller',
+  liveGenreFeedB: [],
   liveAnimeTrending: [],
+  homeFeedOffset: 0,
+  homeRefreshing: false,
+  heroIndex: 0,
   discoverItems: [],
   discoverLoading: false,
   discoverSkip: 0,
@@ -110,6 +119,7 @@ const state = {
 
 let toastTimer = null;
 let searchDebounce = null;
+let heroTimer = null;
 
 function showToast(msg) {
   state.toast = msg;
@@ -214,7 +224,8 @@ function getAllKnownPool() {
 function getCurrentEmbedUrl() {
   if (!state.activeItem) return '';
   if (state.activeItem.mediaType !== 'anime' && !state.activeItem.tmdbId) return '';
-  return buildVidriftEmbedUrl(state.activeItem, {
+  return buildPlayerEmbedUrl(state.activeItem, {
+    provider: state.prefs.playerProvider || 'vidlink',
     themeId: state.appearance.theme,
     autoplay: state.prefs.autoplay,
     sub: state.prefs.sub,
@@ -435,33 +446,49 @@ function renderHomeTab() {
     return true;
   };
 
-  // Spotlight billboard (defaults to Rocket Singh like screenshot 5, or first filtered title)
-  const rocketSingh = getItemByKey('movie:26815');
-  const spotlightPool = pool.filter(matchesFilter);
-  const featured =
-    state.homeFilter === 'all' && rocketSingh
-      ? rocketSingh
-      : spotlightPool.find((x) => x.poster) || spotlightPool[0];
-
-  const southIndia = state.catalog.filter((x) => x.regionTag === 'south-india' && matchesFilter(x));
-  const indiaMoviesShows = state.catalog.filter(
-    (x) => (x.regionTag === 'india' || x.country?.includes('India')) && matchesFilter(x)
-  );
-  const englishMovies = [
-    ...state.catalog.filter(
-      (x) => x.mediaType === 'movie' && x.regionTag !== 'south-india' && x.regionTag !== 'india'
-    ),
-    ...state.liveMovies,
+  // Dynamic Rotating Billboard Spotlight from live trending feeds (never fixed!)
+  const dynamicSpotlightSource = [
+    ...state.liveMovies.slice(0, 6),
+    ...state.liveSeries.slice(0, 3),
+    ...state.liveAnimeTrending.slice(0, 2),
+    ...pool,
   ].filter(matchesFilter);
+  const spotSeen = new Set();
+  const spotlightList = dynamicSpotlightSource
+    .filter((item) => {
+      const k = getMediaKey(item);
+      if (spotSeen.has(k) || !item.poster) return false;
+      spotSeen.add(k);
+      return true;
+    })
+    .slice(0, 8);
 
   const continueEntries = Object.values(state.progressMap)
     .filter((e) => e?.item && e.currentTime > 0 && matchesFilter(e.item))
     .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
 
-  const seriesShelf = [
-    ...state.catalog.filter((x) => x.mediaType === 'tv'),
-    ...state.liveSeries,
-  ].filter(matchesFilter);
+  const trendingMovies = (state.liveMovies.length
+    ? state.liveMovies
+    : state.catalog.filter((x) => x.mediaType === 'movie')
+  ).filter(matchesFilter);
+
+  const trendingSeries = (state.liveSeries.length
+    ? state.liveSeries
+    : state.catalog.filter((x) => x.mediaType === 'tv')
+  ).filter(matchesFilter);
+
+  const genreShelfA = (state.liveGenreFeedA.length
+    ? state.liveGenreFeedA
+    : pool.filter((x) => (x.genres || []).includes(state.liveGenreLabelA))
+  ).filter(matchesFilter);
+
+  const genreShelfB = (state.liveGenreFeedB.length
+    ? state.liveGenreFeedB
+    : pool.filter((x) => (x.genres || []).includes(state.liveGenreLabelB))
+  ).filter(matchesFilter);
+
+  const regionalCinema = state.catalog
+    .filter((x) => (x.regionTag === 'south-india' || x.regionTag === 'india' || x.country?.includes('India')) && matchesFilter(x));
 
   const animeShelf = (state.liveAnimeTrending.length
     ? state.liveAnimeTrending
@@ -496,60 +523,71 @@ function renderHomeTab() {
       <button type="button" class="outline-chip" id="open-categories-btn">
         Categories ${svgIcon('chevronDown', 14)}
       </button>
+      <button type="button" class="outline-chip" id="refresh-home-feed-btn" ${state.homeRefreshing ? 'disabled' : ''}>
+        ${svgIcon('refresh', 13)} ${state.homeRefreshing ? 'Loading...' : 'Refresh'}
+      </button>
     </div>
 
-    ${renderAndroidBillboard(featured, {
-      inMyList: featured ? myListSet.has(getMediaKey(featured)) : false,
-    })}
-
-    ${renderShelf({
-      id: 'south-india',
-      title: 'South Indian Cinema',
-      items: southIndia.slice(0, 14),
-      top10Indices: new Set([1, 2]),
-      recentIndices: new Set([1, 2]),
-    })}
-
-    ${renderShelf({
-      id: 'india-cinema',
-      title: 'Movies & TV Shows set in India',
-      items: indiaMoviesShows.slice(0, 16),
-      top10Indices: new Set([0, 3]),
-      recentIndices: new Set([1]),
-    })}
-
-    ${renderShelf({
-      id: 'english-movies',
-      title: 'English Movies',
-      items: englishMovies.slice(0, 20),
-      top10Indices: new Set([3, 5]),
-      recentIndices: new Set([1, 3]),
-    })}
+    ${renderAndroidBillboard(spotlightList, state.heroIndex, { myListSet })}
 
     ${
       continueEntries.length > 0
         ? renderShelf({
             id: 'home-cw',
             title: 'Continue Watching',
-            items: continueEntries.slice(0, 10),
+            items: continueEntries.slice(0, 12),
             kind: 'continue',
           })
         : ''
     }
 
     ${renderShelf({
-      id: 'series-row',
-      title: 'Trending TV Series',
-      items: seriesShelf.slice(0, 20),
+      id: 'trending-movies',
+      title: 'Trending Movies Now',
+      items: trendingMovies.slice(0, 22),
+      top10Indices: new Set([0, 1, 2]),
+      recentIndices: new Set([0, 3]),
+      seeAllAttr: 'data-open-discover="movie"',
+    })}
+
+    ${renderShelf({
+      id: 'trending-series',
+      title: 'Top TV Shows Today',
+      items: trendingSeries.slice(0, 22),
       top10Indices: new Set([0, 2]),
+      recentIndices: new Set([1]),
+      seeAllAttr: 'data-open-discover="tv"',
+    })}
+
+    ${renderShelf({
+      id: 'genre-a',
+      title: `${state.liveGenreLabelA} Spotlight`,
+      items: genreShelfA.slice(0, 20),
+      top10Indices: new Set([1, 4]),
       recentIndices: new Set([0]),
     })}
 
     ${renderShelf({
+      id: 'genre-b',
+      title: `${state.liveGenreLabelB} & Suspense`,
+      items: genreShelfB.slice(0, 20),
+      recentIndices: new Set([1, 2]),
+    })}
+
+    ${renderShelf({
+      id: 'india-cinema',
+      title: 'South Indian & Bollywood Hits',
+      items: regionalCinema.slice(0, 20),
+      top10Indices: new Set([0, 2]),
+      recentIndices: new Set([1]),
+    })}
+
+    ${renderShelf({
       id: 'anime-row',
-      title: 'Anime & Soundtracks',
+      title: 'Trending Anime & Soundtracks',
       items: animeShelf.slice(0, 20),
       top10Indices: new Set([0, 1]),
+      seeAllAttr: 'data-open-discover="anime"',
     })}
   `;
 }
@@ -840,26 +878,49 @@ function renderMySunoTab() {
       </div>
     </button>
 
-    ${renderShelf({
-      id: 'mysuno-cw',
-      title: 'Continue Watching',
-      items: continueEntries,
-      kind: 'continue',
-    })}
+    ${
+      continueEntries.length > 0
+        ? renderShelf({
+            id: 'mysuno-cw',
+            title: 'Continue Watching',
+            items: continueEntries,
+            kind: 'continue',
+          })
+        : `<section class="nf-shelf">
+            <div class="nf-shelf-head"><h2 class="nf-shelf-title">Continue Watching</h2></div>
+            <p class="dim" style="padding:0 14px;font-size:13px;">Movies &amp; shows you start watching appear here automatically.</p>
+          </section>`
+    }
 
-    ${renderShelf({
-      id: 'mysuno-liked',
-      title: "TV Shows & Movies You've Liked",
-      items: likedItems,
-      kind: 'liked',
-    })}
+    ${
+      likedItems.length > 0
+        ? renderShelf({
+            id: 'mysuno-liked',
+            title: "TV Shows & Movies You've Liked",
+            items: likedItems,
+            kind: 'liked',
+          })
+        : `<section class="nf-shelf">
+            <div class="nf-shelf-head"><h2 class="nf-shelf-title">TV Shows &amp; Movies You've Liked</h2></div>
+            <p class="dim" style="padding:0 14px;font-size:13px;">Tap Rate (👍) on any title to save favorites here.</p>
+          </section>`
+    }
 
-    ${renderShelf({
-      id: 'mysuno-mylist',
-      title: 'My List',
-      items: myListItems,
-      seeAllAttr: 'data-nav-tab="discover"',
-    })}
+    ${
+      myListItems.length > 0
+        ? renderShelf({
+            id: 'mysuno-mylist',
+            title: 'My List',
+            items: myListItems,
+            seeAllAttr: 'data-nav-tab="discover"',
+          })
+        : renderShelf({
+            id: 'mysuno-suggested',
+            title: 'Trending Picks to Add',
+            items: getAllKnownPool().slice(0, 10),
+            seeAllAttr: 'data-nav-tab="discover"',
+          })
+    }
   `;
 }
 
@@ -961,7 +1022,9 @@ function renderFloatingBottomNav() {
 
 function applySandboxAttr(iframe) {
   if (!iframe) return;
-  if (state.shield.strictFrameMode) {
+  const provider = state.prefs.playerProvider || 'vidlink';
+  const useSandbox = provider === 'vidrift-direct' ? false : state.shield.strictFrameMode;
+  if (useSandbox) {
     iframe.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms allow-presentation');
   } else {
     iframe.removeAttribute('sandbox');
@@ -978,10 +1041,12 @@ function syncPlayerMount({ forceReload = false } = {}) {
 
   const embedUrl = getCurrentEmbedUrl();
   const item = state.activeItem;
+  const provider = state.prefs.playerProvider || 'vidlink';
+  const isSandboxed = provider !== 'vidrift-direct' && state.shield.strictFrameMode;
   const existingFrame = document.getElementById('vidrift-player');
 
   if (!existingFrame) {
-    mount.innerHTML = `<section class="player-fullscreen" aria-label="VidRift Player">
+    mount.innerHTML = `<section class="player-fullscreen" aria-label="Suno Cinema Player">
       <div class="player-top-bar">
         <div style="display:flex;align-items:center;gap:8px;min-width:0;">
           <button type="button" class="icon-btn" id="close-player-btn" aria-label="Close player">
@@ -996,13 +1061,13 @@ function syncPlayerMount({ forceReload = false } = {}) {
                 ? `Season ${state.activeSeason} • Episode ${state.activeEpisode}`
                 : item.mediaType === 'anime'
                 ? `Episode ${state.activeEpisode}`
-                : 'VidRift HD Stream'
+                : 'HD Stream'
             }</div>
           </div>
         </div>
-        <button type="button" class="shield-pill ${state.shield.strictFrameMode ? 'is-warn' : ''}" id="toggle-strict-shield-btn">
+        <button type="button" class="shield-pill ${isSandboxed ? '' : 'is-warn'}" id="toggle-strict-shield-btn">
           ${svgIcon('shield', 13)}
-          <span>${state.shield.strictFrameMode ? 'Sandbox ON' : `Shield • ${state.shield.blockedCount}`}</span>
+          <span>${isSandboxed ? 'No-Redirect ON' : 'Sandbox OFF'}</span>
         </button>
       </div>
 
@@ -1028,7 +1093,7 @@ function syncPlayerMount({ forceReload = false } = {}) {
   } else {
     const prevSandbox = existingFrame.hasAttribute('sandbox');
     applySandboxAttr(existingFrame);
-    if (forceReload || existingFrame.dataset.embedUrl !== embedUrl || prevSandbox !== state.shield.strictFrameMode) {
+    if (forceReload || existingFrame.dataset.embedUrl !== embedUrl || prevSandbox !== isSandboxed) {
       existingFrame.src = embedUrl;
       existingFrame.dataset.embedUrl = embedUrl;
     }
@@ -1037,28 +1102,43 @@ function syncPlayerMount({ forceReload = false } = {}) {
   const strip = document.getElementById('player-bottom-strip');
   if (strip) {
     const saved = state.progressMap[getMediaKey(item)];
-    strip.innerHTML = `<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+    strip.innerHTML = `<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+      ${PLAYER_PROVIDERS.map(
+        (p) => `<button type="button" class="outline-chip ${
+          provider === p.id ? 'is-active' : ''
+        }" data-switch-provider="${p.id}" style="height:30px;padding:0 10px;font-size:11px;">${escapeHtml(
+          p.label
+        )}</button>`
+      ).join('')}
       ${
-        saved?.currentTime > 15
-          ? `<button type="button" class="outline-chip" id="cmd-resume-btn">Resume ${formatTime(saved.currentTime)}</button>`
+        saved?.currentTime > 15 && provider !== 'vidlink'
+          ? `<button type="button" class="outline-chip" id="cmd-resume-btn" style="height:30px;font-size:11px;">Resume ${formatTime(
+              saved.currentTime
+            )}</button>`
           : ''
       }
-      <button type="button" class="outline-chip" id="reload-player-btn">${svgIcon('refresh', 13)} Reload</button>
+      <button type="button" class="outline-chip" id="reload-player-btn" style="height:30px;font-size:11px;">${svgIcon(
+        'refresh',
+        12
+      )} Reload</button>
       ${
         item.mediaType !== 'movie'
-          ? `<button type="button" class="outline-chip" id="next-ep-btn">Next Ep ${svgIcon('next', 13)}</button>`
+          ? `<button type="button" class="outline-chip" id="next-ep-btn" style="height:30px;font-size:11px;">Next Ep ${svgIcon(
+              'next',
+              12
+            )}</button>`
           : ''
       }
       ${
         item.mediaType === 'anime'
-          ? `<button type="button" class="outline-chip ${state.prefs.dub ? 'is-active' : ''}" id="toggle-dub-btn">${
+          ? `<button type="button" class="outline-chip ${state.prefs.dub ? 'is-active' : ''}" id="toggle-dub-btn" style="height:30px;font-size:11px;">${
               state.prefs.dub ? 'Dub ON' : 'Sub'
             }</button>`
           : ''
       }
     </div>
     <span class="dim" style="font-size:11px;">${
-      state.livePlayback.currentTime > 0 ? `Synced ${formatTime(state.livePlayback.currentTime)}` : 'Zero-Ad Host'
+      state.livePlayback.currentTime > 0 ? `Synced ${formatTime(state.livePlayback.currentTime)}` : 'Popups Blocked'
     }</span>`;
   }
 }
@@ -1203,6 +1283,27 @@ function bindEvents() {
       state.tab = 'home';
       state.homeFilter = 'all';
       render();
+      return;
+    }
+
+    const heroStep = target.closest('[data-hero-step]');
+    if (heroStep) {
+      state.heroIndex = (state.heroIndex + Number(heroStep.dataset.heroStep) + 8) % 8;
+      render();
+      return;
+    }
+
+    if (target.closest('#refresh-home-feed-btn')) {
+      state.homeFeedOffset += 1;
+      loadHomeDynamicFeeds();
+      return;
+    }
+
+    const openDiscBtn = target.closest('[data-open-discover]');
+    if (openDiscBtn) {
+      state.tab = 'discover';
+      state.discoverType = openDiscBtn.dataset.openDiscover;
+      refreshDiscoverFeed({ reset: true });
       return;
     }
 
@@ -1428,8 +1529,22 @@ function bindEvents() {
       const next = !state.shield.strictFrameMode;
       antiRedirectGuard.setStrictFrameMode(next);
       state.shield = antiRedirectGuard.getSnapshot();
-      showToast(next ? 'Strict Sandbox ON' : 'Strict Sandbox OFF (Default VidRift)');
-      render();
+      showToast(next ? 'No-Redirect Sandbox ON (blocks all popups)' : 'Sandbox OFF (unrestricted)');
+      render({ forceReload: true });
+      return;
+    }
+    const switchProvBtn = target.closest('[data-switch-provider]');
+    if (switchProvBtn) {
+      const prov = switchProvBtn.dataset.switchProvider;
+      state.prefs = savePlayerPrefs({ playerProvider: prov });
+      if (prov === 'vidrift-direct') {
+        antiRedirectGuard.setStrictFrameMode(false);
+      } else {
+        antiRedirectGuard.setStrictFrameMode(true);
+      }
+      state.shield = antiRedirectGuard.getSnapshot();
+      showToast(`Switched stream to ${PLAYER_PROVIDERS.find((x) => x.id === prov)?.label || prov}`);
+      render({ forceReload: true });
       return;
     }
     if (target.closest('#reload-player-btn')) {
@@ -1475,12 +1590,13 @@ function bindEvents() {
       const tmdbApiKey = (document.getElementById('pref-tmdb-key')?.value || '').trim();
       const navLock = Boolean(document.getElementById('pref-navlock')?.checked);
       const strictSandbox = Boolean(document.getElementById('pref-strict-sandbox')?.checked);
+      const playerProvider = document.getElementById('pref-provider')?.value || 'vidlink';
 
       state.profile = saveProfile({ name });
       antiRedirectGuard.setNavigationLock(navLock);
       antiRedirectGuard.setStrictFrameMode(strictSandbox);
       state.shield = antiRedirectGuard.getSnapshot();
-      state.prefs = savePlayerPrefs({ autoplay, dub, sub, tmdbApiKey, phoneFrameOnDesktop });
+      state.prefs = savePlayerPrefs({ autoplay, dub, sub, tmdbApiKey, phoneFrameOnDesktop, playerProvider });
       state.modal = null;
       showToast('Settings saved');
       render();
@@ -1564,11 +1680,11 @@ function bindEvents() {
   });
 
   window.addEventListener('message', (event) => {
-    const msg = parseVidriftMessage(event);
-    if (!msg) return;
-    if (msg.type === 'vidrift:progress' && state.activeItem) {
-      const currentTime = Number(msg.currentTime || 0);
-      const duration = Number(msg.duration || 0);
+    const parsed = parseAnyPlayerMessage(event);
+    if (!parsed) return;
+    if (parsed.eventType === 'progress' && state.activeItem) {
+      const currentTime = Number(parsed.currentTime || 0);
+      const duration = Number(parsed.duration || 0);
       state.livePlayback = { currentTime, duration };
       state.progressMap = saveMediaProgress(state.activeItem, {
         currentTime,
@@ -1576,12 +1692,34 @@ function bindEvents() {
         season: state.activeSeason,
         episode: state.activeEpisode,
       });
-    } else if (msg.type === 'vidrift:exit') {
+    } else if (parsed.eventType === 'exit') {
       state.playerOpen = false;
       antiRedirectGuard.setTheaterActive(false);
       render();
     }
   });
+}
+
+async function loadHomeDynamicFeeds() {
+  state.homeRefreshing = true;
+  if (state.tab === 'home') render();
+  try {
+    const feeds = await fetchDynamicHomeFeeds({ pageOffset: state.homeFeedOffset });
+    for (const list of [feeds.trendingMovies, feeds.trendingSeries, feeds.genreFeedA, feeds.genreFeedB, feeds.trendingAnime]) {
+      registerItems(list);
+    }
+    if (feeds.trendingMovies.length) state.liveMovies = feeds.trendingMovies;
+    if (feeds.trendingSeries.length) state.liveSeries = feeds.trendingSeries;
+    state.liveGenreLabelA = feeds.genreLabelA;
+    if (feeds.genreFeedA.length) state.liveGenreFeedA = feeds.genreFeedA;
+    state.liveGenreLabelB = feeds.genreLabelB;
+    if (feeds.genreFeedB.length) state.liveGenreFeedB = feeds.genreFeedB;
+    if (feeds.trendingAnime.length) state.liveAnimeTrending = feeds.trendingAnime;
+    state.heroIndex = 0;
+  } finally {
+    state.homeRefreshing = false;
+    if (state.tab === 'home') render();
+  }
 }
 
 async function init() {
@@ -1598,29 +1736,18 @@ async function init() {
   bindEvents();
   state.catalog = await loadCatalogData();
   registerItems(state.catalog);
-  state.progressMap = loadProgressMap(state.catalog);
+  state.progressMap = loadProgressMap();
   render();
 
-  try {
-    const [movies, series, anime] = await Promise.all([
-      fetchCinemetaCatalog('movie').catch(() => []),
-      fetchCinemetaCatalog('series').catch(() => []),
-      loadTrendingAnime().catch(() => []),
-    ]);
-    if (movies.length) {
-      registerItems(movies);
-      state.liveMovies = movies;
+  clearInterval(heroTimer);
+  heroTimer = setInterval(() => {
+    if (state.tab === 'home' && !state.playerOpen && !state.modal) {
+      state.heroIndex = (state.heroIndex + 1) % 8;
+      render();
     }
-    if (series.length) {
-      registerItems(series);
-      state.liveSeries = series;
-    }
-    if (anime.length) {
-      registerItems(anime);
-      state.liveAnimeTrending = anime;
-    }
-    if (state.tab === 'home') render();
-  } catch {}
+  }, 10000);
+
+  await loadHomeDynamicFeeds();
 }
 
 init();

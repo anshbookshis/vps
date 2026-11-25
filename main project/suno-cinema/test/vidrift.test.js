@@ -2,9 +2,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   VIDRIFT_ORIGIN,
+  VIDLINK_ORIGIN,
   parseDirectTarget,
   buildVidriftEmbedUrl,
+  buildPlayerEmbedUrl,
   parseVidriftMessage,
+  parseAnyPlayerMessage,
   buildVidriftCommand,
 } from '../src/utils/vidrift.js';
 
@@ -107,4 +110,39 @@ test('parseVidriftMessage strictly validates origin and message prefix', () => {
     type: 'vidrift:resume',
     currentTime: 812,
   });
+});
+
+test('buildPlayerEmbedUrl & parseAnyPlayerMessage support VidLink No-Redirect and VidRift fallback', () => {
+  const vlMovie = new URL(
+    buildPlayerEmbedUrl({ mediaType: 'movie', tmdbId: '27205' }, { provider: 'vidlink', themeId: 'default' })
+  );
+  assert.equal(vlMovie.origin, VIDLINK_ORIGIN);
+  assert.equal(vlMovie.pathname, '/movie/27205');
+  assert.equal(vlMovie.searchParams.get('primaryColor'), 'e50914');
+
+  const vlAnime = new URL(
+    buildPlayerEmbedUrl(
+      { mediaType: 'anime', anilistId: '1', malId: '1', title: 'Cowboy Bebop' },
+      { provider: 'vidlink', episode: 3, dub: true }
+    )
+  );
+  assert.equal(vlAnime.origin, VIDLINK_ORIGIN);
+  assert.equal(vlAnime.pathname, '/anime/1/3/dub');
+
+  // Falls back to VidRift if MAL ID is absent on anime
+  const fallbackAnime = new URL(
+    buildPlayerEmbedUrl({ mediaType: 'anime', anilistId: '154587' }, { provider: 'vidlink', episode: 2 })
+  );
+  assert.equal(fallbackAnime.origin, VIDRIFT_ORIGIN);
+
+  const vlMsg = parseAnyPlayerMessage({
+    origin: VIDLINK_ORIGIN,
+    data: { type: 'MEDIA_DATA', data: { progress: { watched: 310, duration: 5400 } } },
+  });
+  assert.deepEqual(vlMsg, { source: 'vidlink', eventType: 'progress', currentTime: 310, duration: 5400 });
+
+  assert.equal(
+    parseAnyPlayerMessage({ origin: 'https://evil.example', data: { type: 'MEDIA_DATA' } }),
+    null
+  );
 });

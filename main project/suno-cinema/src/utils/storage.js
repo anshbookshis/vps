@@ -117,6 +117,7 @@ export function loadPlayerPrefs() {
     activeMoodId: 'midnight-synth',
     customTrackQuery: '',
     phoneFrameOnDesktop: false,
+    playerProvider: 'vidlink',
   };
   if (typeof localStorage === 'undefined') return defaults;
   return { ...defaults, ...safeParse(localStorage.getItem(PLAYER_PREFS_KEY), {}) };
@@ -156,38 +157,10 @@ export function getMediaKey(item) {
   return String(item.id || '');
 }
 
-export function loadProgressMap(seedCatalog = []) {
+export function loadProgressMap() {
   if (typeof localStorage === 'undefined') return {};
   const existing = safeParse(localStorage.getItem(PROGRESS_KEY), null);
-  if (existing && typeof existing === 'object') return existing;
-
-  // Seed starter Continue Watching entries cleanly on very first visit so My Suno mirrors the Android layout
-  const seedKeys = ['movie:1068452', 'movie:102382', 'movie:157336'];
-  const seeded = {};
-  const times = [
-    { currentTime: 2420, duration: 9300 },
-    { currentTime: 4680, duration: 8520 },
-    { currentTime: 1850, duration: 10140 },
-  ];
-  seedKeys.forEach((k, i) => {
-    const found = seedCatalog.find((x) => getMediaKey(x) === k);
-    if (found) {
-      seeded[k] = {
-        ...times[i],
-        season: 1,
-        episode: 1,
-        updatedAt: Date.now() - i * 3600000,
-        item: found,
-        badge: i === 0 ? 'Watch Now' : '',
-      };
-    }
-  });
-  if (Object.keys(seeded).length > 0) {
-    try {
-      localStorage.setItem(PROGRESS_KEY, JSON.stringify(seeded));
-    } catch {}
-  }
-  return seeded;
+  return existing && typeof existing === 'object' ? existing : {};
 }
 
 export function saveMediaProgress(item, patch) {
@@ -248,14 +221,14 @@ export function loadCollections() {
       name: 'Liked',
       subtitle: 'Auto liked list',
       auto: true,
-      items: ['movie:1239511', 'movie:1163194', 'movie:579974'],
+      items: [],
     },
     {
       id: MY_LIST_COLLECTION_ID,
       name: 'My List',
       subtitle: 'Saved watchlist',
       auto: true,
-      items: ['movie:26815', 'movie:157336', 'movie:438631', 'tv:89113'],
+      items: [],
     },
   ];
   if (typeof localStorage === 'undefined') return defaults;

@@ -12,11 +12,11 @@ test('isAllowedExternalUrl allows Suno ecosystem domains and rejects unknown pop
   assert.equal(isAllowedExternalUrl('javascript:alert(1)'), false);
 });
 
-test('AntiRedirectGuard tracks blocked popups, navigation lock, and strict frame mode', () => {
+test('AntiRedirectGuard defaults to sandboxed strictFrameMode ON and tracks blocked popups', () => {
   const guard = new AntiRedirectGuard();
+  assert.equal(guard.strictFrameMode, true);
   guard.recordBlock('Blocked popup / window.open', 'https://ad.example/pop');
   guard.setNavigationLock(true);
-  guard.setStrictFrameMode(true);
   const snap = guard.getSnapshot();
   assert.equal(snap.blockedCount, 1);
   assert.equal(snap.navigationLock, true);

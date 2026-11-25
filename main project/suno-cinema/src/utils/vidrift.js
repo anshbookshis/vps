@@ -1,7 +1,29 @@
 export const VIDRIFT_ORIGIN = 'https://embed.vidrift.net';
+export const VIDLINK_ORIGIN = 'https://vidlink.pro';
+
+export const PLAYER_PROVIDERS = [
+  {
+    id: 'vidlink',
+    label: 'VidLink (No-Redirect)',
+    sandboxed: true,
+    description: 'Clean ad-free player inside browser sandbox (blocks popups & redirects)',
+  },
+  {
+    id: 'vidrift',
+    label: 'VidRift (Sandboxed)',
+    sandboxed: true,
+    description: 'VidRift player with browser popup & redirect sandbox enabled',
+  },
+  {
+    id: 'vidrift-direct',
+    label: 'VidRift (Unrestricted)',
+    sandboxed: false,
+    description: 'VidRift without iframe sandbox (use only if a stream refuses sandbox)',
+  },
+];
 
 export const THEME_ACCENT_HEX = {
-  default: 'ff0033',
+  default: 'e50914',
   cyberpunk: '00f0ff',
   sunset: 'ff5e62',
   emerald: '1db954',
@@ -9,7 +31,7 @@ export const THEME_ACCENT_HEX = {
 };
 
 /**
- * Resolve theme accent hex (6 chars, no leading #) for VidRift `brandColor`.
+ * Resolve theme accent hex (6 chars, no leading #) for embed branding.
  * @param {string} themeId
  * @returns {string}
  */
@@ -18,22 +40,14 @@ export function resolveThemeAccentHex(themeId = 'default') {
 }
 
 /**
- * Parse a direct TMDB / AniList URL or shorthand ID into a playable VidRift target.
- * Examples:
- * - "https://www.themoviedb.org/movie/438631-dune"
- * - "https://www.themoviedb.org/tv/1396-breaking-bad/season/2/episode/5"
- * - "https://anilist.co/anime/1535/Death-Note"
- * - "tv/1396/1/1" or "movie/438631" or "anilist/1535/1"
- * - "438631" (defaults to movie unless fallbackType specifies otherwise)
+ * Parse a direct TMDB / AniList URL or shorthand ID into a playable target.
  * @param {string} rawInput
  * @param {'movie'|'tv'|'anime'} [fallbackType='movie']
- * @returns {{ mediaType: 'movie'|'tv'|'anime', tmdbId?: string, anilistId?: string, season?: number, episode?: number } | null}
  */
 export function parseDirectTarget(rawInput, fallbackType = 'movie') {
   const input = String(rawInput || '').trim();
   if (!input) return null;
 
-  // TMDB TV URL with optional season/episode
   const tmdbTvUrl = input.match(
     /themoviedb\.org\/tv\/(\d+)(?:-[^/?#]*)?(?:\/season\/(\d+)(?:\/episode\/(\d+))?)?/i
   );
@@ -46,7 +60,6 @@ export function parseDirectTarget(rawInput, fallbackType = 'movie') {
     };
   }
 
-  // TMDB Movie URL
   const tmdbMovieUrl = input.match(/themoviedb\.org\/movie\/(\d+)/i);
   if (tmdbMovieUrl) {
     return {
@@ -55,7 +68,6 @@ export function parseDirectTarget(rawInput, fallbackType = 'movie') {
     };
   }
 
-  // AniList URL
   const anilistUrl = input.match(/anilist\.co\/anime\/(\d+)/i);
   if (anilistUrl) {
     return {
@@ -65,7 +77,6 @@ export function parseDirectTarget(rawInput, fallbackType = 'movie') {
     };
   }
 
-  // Shorthand: tv/1396/2/5 or tv:1396:2:5
   const tvShort = input.match(/^tv[:/](\d+)(?:[:/](\d+))?(?:[:/](\d+))?$/i);
   if (tvShort) {
     return {
@@ -76,7 +87,6 @@ export function parseDirectTarget(rawInput, fallbackType = 'movie') {
     };
   }
 
-  // Shorthand: movie/438631 or tmdb/438631
   const movieShort = input.match(/^(?:movie|tmdb)[:/](\d+)$/i);
   if (movieShort) {
     return {
@@ -85,7 +95,6 @@ export function parseDirectTarget(rawInput, fallbackType = 'movie') {
     };
   }
 
-  // Shorthand: anilist/1535/2 or anime/1535/2
   const animeShort = input.match(/^(?:anilist|anime)[:/](\d+)(?:[:/](\d+))?$/i);
   if (animeShort) {
     return {
@@ -95,7 +104,6 @@ export function parseDirectTarget(rawInput, fallbackType = 'movie') {
     };
   }
 
-  // Pure numeric ID
   if (/^\d{1,10}$/.test(input)) {
     if (fallbackType === 'anime') {
       return { mediaType: 'anime', anilistId: input, episode: 1 };
@@ -179,10 +187,62 @@ export function buildVidriftEmbedUrl(item, options = {}) {
 }
 
 /**
- * Safely parse an incoming postMessage event from embed.vidrift.net.
- * Rejects any message from an untrusted origin.
- * @param {MessageEvent} event
- * @returns {object | null}
+ * Build a clean VidLink embed URL (works inside browser sandbox with zero popups/redirects).
+ * Falls back to VidRift automatically for anime that lack a MAL ID.
+ * @param {object} item
+ * @param {object} [options]
+ * @returns {string}
+ */
+export function buildVidlinkEmbedUrl(item, options = {}) {
+  if (!item) throw new Error('A media item is required to build a VidLink URL.');
+  const mediaType = item.mediaType || 'movie';
+  const accent = String(
+    options.brandColor || resolveThemeAccentHex(options.themeId || 'default')
+  ).replace(/^#/, '');
+
+  let path;
+  if (mediaType === 'anime') {
+    if (!item.malId) {
+      return buildVidriftEmbedUrl(item, options);
+    }
+    const ep = Math.max(1, Number(options.episode ?? item.episode ?? 1));
+    const subOrDub = options.dub ? 'dub' : 'sub';
+    path = `/anime/${encodeURIComponent(String(item.malId))}/${ep}/${subOrDub}`;
+  } else if (mediaType === 'tv') {
+    const id = item.tmdbId || item.id;
+    if (!id) throw new Error('TV embed requires a tmdbId.');
+    const season = Math.max(1, Number(options.season ?? item.season ?? 1));
+    const episode = Math.max(1, Number(options.episode ?? item.episode ?? 1));
+    path = `/tv/${encodeURIComponent(String(id))}/${season}/${episode}`;
+  } else {
+    const id = item.tmdbId || item.id;
+    if (!id) throw new Error('Movie embed requires a tmdbId.');
+    path = `/movie/${encodeURIComponent(String(id))}`;
+  }
+
+  const params = new URLSearchParams();
+  params.set('primaryColor', accent);
+  params.set('secondaryColor', '27272a');
+  params.set('autoplay', options.autoplay === false ? 'false' : 'true');
+  params.set('nextbutton', mediaType === 'tv' || mediaType === 'anime' ? 'true' : 'false');
+  if (mediaType === 'anime') params.set('fallback', 'true');
+
+  return `${VIDLINK_ORIGIN}${path}?${params.toString()}`;
+}
+
+/**
+ * Unified embed URL builder supporting VidLink (No-Redirect) & VidRift providers.
+ */
+export function buildPlayerEmbedUrl(item, options = {}) {
+  const provider = options.provider || 'vidlink';
+  if (provider === 'vidlink') {
+    return buildVidlinkEmbedUrl(item, options);
+  }
+  return buildVidriftEmbedUrl(item, options);
+}
+
+/**
+ * Safely parse incoming postMessage from VidRift.
  */
 export function parseVidriftMessage(event) {
   if (!event || event.origin !== VIDRIFT_ORIGIN) return null;
@@ -193,11 +253,62 @@ export function parseVidriftMessage(event) {
 }
 
 /**
- * Construct a VidRift parent -> player command payload.
- * @param {'play'|'pause'|'resume'|'set'|'get-state'|'nextup-info'} action
- * @param {object} [payload]
- * @returns {object}
+ * Parse playback progress/events from either VidRift or VidLink safely.
+ * @param {MessageEvent} event
+ * @returns {{ source: 'vidrift'|'vidlink', eventType: string, currentTime?: number, duration?: number } | null}
  */
+export function parseAnyPlayerMessage(event) {
+  if (!event || !event.data || typeof event.data !== 'object') return null;
+
+  if (event.origin === VIDRIFT_ORIGIN) {
+    const d = parseVidriftMessage(event);
+    if (!d) return null;
+    if (d.type === 'vidrift:progress') {
+      return {
+        source: 'vidrift',
+        eventType: 'progress',
+        currentTime: Number(d.currentTime || 0),
+        duration: Number(d.duration || 0),
+      };
+    }
+    if (d.type === 'vidrift:ended') return { source: 'vidrift', eventType: 'ended' };
+    if (d.type === 'vidrift:exit') return { source: 'vidrift', eventType: 'exit' };
+    return null;
+  }
+
+  if (event.origin === VIDLINK_ORIGIN) {
+    const d = event.data;
+    if (d.type === 'MEDIA_DATA' && d.data) {
+      const firstKey = Object.keys(d.data)[0];
+      const itemData = d.data.progress ? d.data : firstKey ? d.data[firstKey] : null;
+      const watched = Number(itemData?.progress?.watched ?? 0);
+      const duration = Number(itemData?.progress?.duration ?? 0);
+      if (duration > 0) {
+        return {
+          source: 'vidlink',
+          eventType: 'progress',
+          currentTime: watched,
+          duration,
+        };
+      }
+    }
+    if (d.type === 'PLAYER_EVENT' && d.data) {
+      const ev = d.data.event;
+      if (ev === 'timeupdate' && d.data.duration > 0) {
+        return {
+          source: 'vidlink',
+          eventType: 'progress',
+          currentTime: Number(d.data.currentTime || 0),
+          duration: Number(d.data.duration || 0),
+        };
+      }
+      if (ev === 'ended') return { source: 'vidlink', eventType: 'ended' };
+    }
+  }
+
+  return null;
+}
+
 export function buildVidriftCommand(action, payload = {}) {
   return {
     type: `vidrift:${action}`,
