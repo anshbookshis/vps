@@ -1,0 +1,20 @@
+{
+  "name": "openline",
+  "version": "1.0.0",
+  "description": "Free peer-to-peer WebRTC video calling studio powered by public STUN/relay resources and zero-dependency signaling.",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test test/*.test.js"
+  },
+  "keywords": [
+    "webrtc",
+    "video-calling",
+    "p2p",
+    "stun",
+    "mqtt",
+    "nostr",
+    "zero-dependency"
+  ],
+  "license": "MIT"
+}
