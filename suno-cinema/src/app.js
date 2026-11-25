@@ -32,6 +32,7 @@ import {
   svgIcon,
   renderSunoRibbonSvg,
   renderSunoMascotSvg,
+  renderSunoCinemaDesktopWordmark,
 } from './components/icons.js';
 import {
   escapeHtml,
@@ -39,10 +40,13 @@ import {
   attachFallbackImgAttr,
   formatTime,
   renderPosterCard,
+  renderDesktopWideCard,
   renderShelf,
 } from './components/cards.js';
 import {
   renderAndroidBillboard,
+  renderDesktopBillboard,
+  renderDesktopFooter,
   renderDetailView,
 } from './components/showcase.js';
 import {
@@ -58,6 +62,7 @@ import {
   loadTrendingAnime,
   fetchCinemetaCatalog,
   fetchDynamicHomeFeeds,
+  fetchLanguageCatalog,
   resolveFullMetadata,
   searchAllMedia,
   fetchTvSeasonsData,
@@ -88,7 +93,13 @@ const state = {
   discoverMinRating: 0,
   discoverSort: 'trending',
   homeFilter: 'all', // 'all' | 'tv' | 'movie' | 'anime' | 'hot'
-  tab: 'home', // 'home' | 'clips' | 'discover' | 'search' | 'mysuno' | 'detail' | 'downloads'
+  tab: 'home', // 'home' | 'clips' | 'discover' | 'search' | 'mysuno' | 'detail' | 'downloads' | 'languages'
+  langPref: 'Original Language',
+  langValue: 'English',
+  langItems: [],
+  langLoading: false,
+  desktopSearchOpen: false,
+  isDesktop: typeof window !== 'undefined' && window.innerWidth >= 900,
   prevTab: 'home',
   detailKey: null,
   detailTab: 'episodes',
@@ -117,9 +128,14 @@ const state = {
   toast: '',
 };
 
+function isDesktopMode() {
+  return Boolean(state.isDesktop && !state.prefs.phoneFrameOnDesktop);
+}
+
 let toastTimer = null;
 let searchDebounce = null;
 let heroTimer = null;
+let resizeTimer = null;
 
 function showToast(msg) {
   state.toast = msg;
@@ -435,6 +451,288 @@ function renderTopHeader({ leftHtml, rightExtras = '' }) {
   </header>`;
 }
 
+async function loadLanguageFeed(lang = state.langValue) {
+  state.langValue = lang;
+  state.langLoading = true;
+  render();
+  try {
+    const items = await fetchLanguageCatalog(lang);
+    registerItems(items);
+    state.langItems = items;
+  } finally {
+    state.langLoading = false;
+    render();
+  }
+}
+
+function renderDesktopTopbar() {
+  const navItems = [
+    { id: 'home', label: 'Home', active: state.tab === 'home' && state.homeFilter === 'all', attr: 'data-reset-home="true"' },
+    { id: 'tv', label: 'Shows', active: state.tab === 'home' && state.homeFilter === 'tv', attr: 'data-dk-filter="tv"' },
+    { id: 'movie', label: 'Movies', active: state.tab === 'home' && state.homeFilter === 'movie', attr: 'data-dk-filter="movie"' },
+    { id: 'anime', label: 'Anime', active: state.tab === 'home' && state.homeFilter === 'anime', attr: 'data-dk-filter="anime"' },
+    { id: 'hot', label: 'New & Popular', active: state.tab === 'discover', attr: 'data-nav-tab="discover"' },
+    { id: 'mysuno', label: 'My Suno', active: state.tab === 'mysuno' || state.tab === 'downloads', attr: 'data-nav-tab="mysuno"' },
+    { id: 'languages', label: 'Browse by Languages', active: state.tab === 'languages', attr: 'data-open-languages="true"' },
+  ];
+
+  const searchExpanded = state.desktopSearchOpen || state.tab === 'search';
+
+  return `<header class="dk-topbar">
+    <div class="dk-topbar-left">
+      <button type="button" data-reset-home="true" aria-label="Suno Cinema Home">
+        ${renderSunoCinemaDesktopWordmark()}
+      </button>
+      <nav class="dk-nav-list" aria-label="Primary">
+        ${navItems
+          .map((n) => `<button type="button" class="dk-nav-link ${n.active ? 'is-active' : ''}" ${n.attr}>${n.label}</button>`)
+          .join('')}
+      </nav>
+    </div>
+    <div class="dk-topbar-right">
+      ${
+        searchExpanded
+          ? `<form class="dk-search-expand" id="dk-search-form">
+              ${svgIcon('search', 17)}
+              <input
+                id="dk-search-input"
+                type="text"
+                placeholder="Titles, anime, or TMDB ID"
+                value="${escapeHtml(state.searchQuery)}"
+                autocomplete="off"
+              />
+              <button type="button" id="dk-search-close" aria-label="Close search">
+                ${svgIcon('close', 15)}
+              </button>
+            </form>`
+          : `<button type="button" class="icon-btn" id="dk-search-toggle" title="Search" aria-label="Search">
+              ${svgIcon('search', 20)}
+            </button>`
+      }
+      <button type="button" class="icon-btn" id="open-notifications-btn" title="Notifications" aria-label="Notifications">
+        ${svgIcon('bell', 20)}
+        <span class="notif-badge">4</span>
+      </button>
+      <button type="button" class="dk-avatar-btn" id="open-settings-profile-btn" title="Profile, Ad-Shield & Phone Mode" aria-label="Account Settings">
+        ${renderSunoMascotSvg(28)}
+        ${svgIcon('chevronDown', 14)}
+      </button>
+    </div>
+  </header>`;
+}
+
+function renderDesktopHome({
+  spotlightList,
+  continueEntries,
+  trendingMovies,
+  trendingSeries,
+  genreShelfA,
+  genreShelfB,
+  regionalCinema,
+  animeShelf,
+  myListSet,
+  likedSet,
+  progressMap,
+}) {
+  const subLabels = {
+    tv: 'Shows',
+    movie: 'Movies',
+    anime: 'Anime',
+  };
+  const subLabel = subLabels[state.homeFilter];
+
+  const top10Pool = [];
+  const top10Seen = new Set();
+  for (const item of [...regionalCinema, ...trendingMovies, ...trendingSeries]) {
+    const k = getMediaKey(item);
+    if (!top10Seen.has(k) && item.poster) {
+      top10Seen.add(k);
+      top10Pool.push(item);
+    }
+    if (top10Pool.length >= 10) break;
+  }
+
+  return `
+    ${renderDesktopTopbar()}
+
+    ${
+      subLabel
+        ? `<div class="dk-subhead">
+            <div class="dk-subhead-left">
+              <h1 class="dk-subhead-title">${subLabel}</h1>
+              <button type="button" class="dk-genres-pill" id="open-categories-btn">
+                Genres ${svgIcon('chevronDown', 14)}
+              </button>
+            </div>
+            <button type="button" class="dk-genres-pill" id="refresh-home-feed-btn" ${state.homeRefreshing ? 'disabled' : ''}>
+              ${svgIcon('refresh', 13)} ${state.homeRefreshing ? 'Refreshing...' : 'Refresh Feed'}
+            </button>
+          </div>`
+        : ''
+    }
+
+    ${renderDesktopBillboard(spotlightList, state.heroIndex, { myListSet })}
+
+    ${
+      continueEntries.length > 0
+        ? renderShelf({
+            id: 'dk-cw',
+            title: `Continue Watching for ${state.profile.name || 'Ansh'}`,
+            items: continueEntries.slice(0, 14),
+            kind: 'dk-wide',
+            myListSet,
+            likedSet,
+            progressMap,
+          })
+        : ''
+    }
+
+    ${renderShelf({
+      id: 'dk-top-picks',
+      title: `Today's Top Picks for You`,
+      items: genreShelfA.slice(0, 18),
+      kind: 'dk-wide',
+      top10Indices: new Set([0, 1, 4, 5]),
+      recentIndices: new Set([1, 2, 3, 4]),
+      myListSet,
+      likedSet,
+      progressMap,
+    })}
+
+    ${
+      top10Pool.length > 0
+        ? renderShelf({
+            id: 'dk-top10',
+            title: 'Top 10 Titles in India Today',
+            items: top10Pool,
+            kind: 'dk-top10',
+            recentIndices: new Set([0, 1, 2, 3, 4, 5, 6, 7]),
+          })
+        : ''
+    }
+
+    ${renderShelf({
+      id: 'dk-trending-movies',
+      title: 'Trending Movies Now',
+      items: trendingMovies.slice(0, 20),
+      kind: 'dk-wide',
+      top10Indices: new Set([0, 2]),
+      recentIndices: new Set([0, 3]),
+      myListSet,
+      likedSet,
+      progressMap,
+    })}
+
+    ${renderShelf({
+      id: 'dk-trending-shows',
+      title: 'Only on Suno Cinema • Popular Shows',
+      items: trendingSeries.slice(0, 20),
+      kind: 'dk-wide',
+      top10Indices: new Set([0, 3]),
+      recentIndices: new Set([1, 2]),
+      myListSet,
+      likedSet,
+      progressMap,
+    })}
+
+    ${renderShelf({
+      id: 'dk-india',
+      title: 'South Indian & Bollywood Hits',
+      items: regionalCinema.slice(0, 20),
+      kind: 'dk-wide',
+      top10Indices: new Set([0, 2]),
+      recentIndices: new Set([1, 3]),
+      myListSet,
+      likedSet,
+      progressMap,
+    })}
+
+    ${renderShelf({
+      id: 'dk-genre-b',
+      title: `${state.liveGenreLabelB} & Suspense Spotlight`,
+      items: genreShelfB.slice(0, 20),
+      kind: 'dk-wide',
+      recentIndices: new Set([0, 2]),
+      myListSet,
+      likedSet,
+      progressMap,
+    })}
+
+    ${renderShelf({
+      id: 'dk-anime',
+      title: 'Trending Anime & Soundtracks',
+      items: animeShelf.slice(0, 20),
+      kind: 'dk-wide',
+      top10Indices: new Set([0, 1]),
+      recentIndices: new Set([0, 2]),
+      myListSet,
+      likedSet,
+      progressMap,
+    })}
+
+    ${renderDesktopFooter()}
+  `;
+}
+
+function renderDesktopLanguagesTab() {
+  const myListSet = getCollectionSet(MY_LIST_COLLECTION_ID);
+  const likedSet = getCollectionSet(LIKED_COLLECTION_ID);
+  const items = state.langItems.length ? state.langItems : getAllKnownPool();
+
+  const filtered =
+    state.langPref === 'Dubbing'
+      ? [...items].sort((a, b) => (b.mediaType === 'anime' ? 1 : 0) - (a.mediaType === 'anime' ? 1 : 0))
+      : items;
+
+  const languages = ['English', 'Hindi', 'South Indian', 'Japanese', 'Korean', 'Spanish'];
+  const prefs = ['Original Language', 'Dubbing', 'Subtitles'];
+
+  return `
+    ${renderDesktopTopbar()}
+    <div class="dk-lang-header">
+      <h1 class="dk-lang-title">Browse by Languages</h1>
+      <div class="dk-lang-controls">
+        <span class="dim" style="font-size:13px;font-weight:500;">Select Your Preferences</span>
+        <select id="lang-pref-select" class="dk-lang-select" aria-label="Audio or Subtitle Preference">
+          ${prefs
+            .map(
+              (p) => `<option value="${escapeHtml(p)}" ${state.langPref === p ? 'selected' : ''}>${escapeHtml(p)}</option>`
+            )
+            .join('')}
+        </select>
+        <select id="lang-val-select" class="dk-lang-select" aria-label="Language">
+          ${languages
+            .map(
+              (l) => `<option value="${escapeHtml(l)}" ${state.langValue === l ? 'selected' : ''}>${escapeHtml(l)}</option>`
+            )
+            .join('')}
+        </select>
+      </div>
+    </div>
+
+    ${
+      state.langLoading && filtered.length === 0
+        ? `<p class="dim" style="padding:30px 36px;">Loading ${escapeHtml(state.langValue)} catalog...</p>`
+        : `<div class="dk-grid-6">
+            ${filtered
+              .slice(0, 36)
+              .map((item, idx) =>
+                renderDesktopWideCard(item, {
+                  top10: idx === 0 || idx === 4 || idx === 17,
+                  recentlyAdded: idx === 0 || idx === 4,
+                  progress: state.progressMap[getMediaKey(item)],
+                  inMyList: myListSet.has(getMediaKey(item)),
+                  isLiked: likedSet.has(getMediaKey(item)),
+                })
+              )
+              .join('')}
+          </div>`
+    }
+
+    ${renderDesktopFooter()}
+  `;
+}
+
 function renderHomeTab() {
   const myListSet = getCollectionSet(MY_LIST_COLLECTION_ID);
   const pool = getAllKnownPool();
@@ -494,6 +792,22 @@ function renderHomeTab() {
     ? state.liveAnimeTrending
     : state.catalog.filter((x) => x.mediaType === 'anime')
   ).filter(matchesFilter);
+
+  if (isDesktopMode()) {
+    return renderDesktopHome({
+      spotlightList,
+      continueEntries,
+      trendingMovies,
+      trendingSeries,
+      genreShelfA,
+      genreShelfB,
+      regionalCinema,
+      animeShelf,
+      myListSet,
+      likedSet: getCollectionSet(LIKED_COLLECTION_ID),
+      progressMap: state.progressMap,
+    });
+  }
 
   const chips = [
     { id: 'tv', label: 'Shows' },
@@ -695,6 +1009,83 @@ function renderDiscoverTab() {
   const baseList = state.discoverItems.length ? state.discoverItems : getAllKnownPool();
   const visible = applyDiscoverFilters(baseList);
 
+  if (isDesktopMode()) {
+    const myListSet = getCollectionSet(MY_LIST_COLLECTION_ID);
+    const likedSet = getCollectionSet(LIKED_COLLECTION_ID);
+    return `
+      ${renderDesktopTopbar()}
+      <div class="dk-subhead">
+        <div class="dk-subhead-left">
+          <h1 class="dk-subhead-title">New &amp; Popular</h1>
+          <button type="button" class="dk-genres-pill" id="open-categories-btn">
+            Genres ${svgIcon('chevronDown', 14)}
+          </button>
+        </div>
+        <button type="button" class="dk-genres-pill" id="open-quicklaunch-btn">
+          ${svgIcon('link', 14)} Quick Launch ID
+        </button>
+      </div>
+
+      <div class="discover-bar">
+        <select id="disc-type" class="field-select" aria-label="Type">
+          <option value="all" ${state.discoverType === 'all' ? 'selected' : ''}>All Types</option>
+          <option value="movie" ${state.discoverType === 'movie' ? 'selected' : ''}>Movies</option>
+          <option value="tv" ${state.discoverType === 'tv' ? 'selected' : ''}>TV Shows</option>
+          <option value="anime" ${state.discoverType === 'anime' ? 'selected' : ''}>Anime</option>
+        </select>
+        <select id="disc-genre" class="field-select" aria-label="Genre">
+          ${BROWSE_GENRES.map(
+            (g) => `<option value="${escapeHtml(g)}" ${
+              state.discoverGenre === g ? 'selected' : ''
+            }>${escapeHtml(g)}</option>`
+          ).join('')}
+        </select>
+        <select id="disc-year" class="field-select" aria-label="Year">
+          <option value="all" ${state.discoverYear === 'all' ? 'selected' : ''}>All Years</option>
+          <option value="2026" ${state.discoverYear === '2026' ? 'selected' : ''}>2026</option>
+          <option value="2025" ${state.discoverYear === '2025' ? 'selected' : ''}>2025</option>
+          <option value="2024" ${state.discoverYear === '2024' ? 'selected' : ''}>2024</option>
+          <option value="2020s" ${state.discoverYear === '2020s' ? 'selected' : ''}>2020s</option>
+          <option value="2010s" ${state.discoverYear === '2010s' ? 'selected' : ''}>2010s</option>
+          <option value="classic" ${state.discoverYear === 'classic' ? 'selected' : ''}>Classics</option>
+        </select>
+        <select id="disc-sort" class="field-select" aria-label="Sort">
+          <option value="trending" ${state.discoverSort === 'trending' ? 'selected' : ''}>Trending</option>
+          <option value="rating" ${state.discoverSort === 'rating' ? 'selected' : ''}>Top Rated</option>
+          <option value="year" ${state.discoverSort === 'year' ? 'selected' : ''}>Newest</option>
+        </select>
+      </div>
+
+      ${
+        state.discoverLoading && visible.length === 0
+          ? `<p class="dim" style="padding:28px 36px;">Loading free catalog from Cinemeta &amp; AniList...</p>`
+          : `<div class="dk-grid-6">
+              ${visible
+                .map((item, idx) =>
+                  renderDesktopWideCard(item, {
+                    top10: idx < 3,
+                    recentlyAdded: idx < 6,
+                    progress: state.progressMap[getMediaKey(item)],
+                    inMyList: myListSet.has(getMediaKey(item)),
+                    isLiked: likedSet.has(getMediaKey(item)),
+                  })
+                )
+                .join('')}
+            </div>`
+      }
+
+      <div style="display:flex;justify-content:center;padding:8px 36px 24px;">
+        <button type="button" class="btn-dark" id="discover-load-more-btn" style="width:100%;max-width:320px;" ${
+          state.discoverLoading ? 'disabled' : ''
+        }>
+          ${state.discoverLoading ? 'Loading more...' : 'Load More Titles'}
+        </button>
+      </div>
+
+      ${renderDesktopFooter()}
+    `;
+  }
+
   return `
     ${renderTopHeader({
       leftHtml: `
@@ -757,6 +1148,64 @@ function renderDiscoverTab() {
 function renderSearchTab() {
   const direct = parseDirectTarget(state.searchQuery);
   const topRecommended = getAllKnownPool().slice(0, 14);
+
+  if (isDesktopMode()) {
+    const myListSet = getCollectionSet(MY_LIST_COLLECTION_ID);
+    const likedSet = getCollectionSet(LIKED_COLLECTION_ID);
+    const displayList = state.searchQuery.trim() ? state.searchResults : topRecommended;
+    const heading = state.searchQuery.trim()
+      ? `Results for "${state.searchQuery.trim()}"`
+      : 'Explore Popular Searches';
+
+    return `
+      ${renderDesktopTopbar()}
+      <div class="dk-subhead">
+        <div class="dk-subhead-left">
+          <h1 class="dk-subhead-title">${escapeHtml(heading)}</h1>
+        </div>
+        <button type="button" class="dk-genres-pill" id="open-quicklaunch-btn">
+          ${svgIcon('link', 14)} Quick Launch ID
+        </button>
+      </div>
+
+      ${
+        direct
+          ? `<div style="padding:4px 36px 14px;">
+              <button type="button" class="btn-white" style="max-width:340px;padding:0 20px;" data-launch-direct="true">
+                ${svgIcon('play', 16)} Stream ${escapeHtml(direct.mediaType.toUpperCase())} #${escapeHtml(
+              direct.tmdbId || direct.anilistId
+            )}
+              </button>
+            </div>`
+          : ''
+      }
+
+      ${
+        state.searchLoading
+          ? `<p class="dim" style="padding:28px 36px;">Searching free Cinemeta &amp; AniList...</p>`
+          : displayList.length > 0
+          ? `<div class="dk-grid-6">
+              ${displayList
+                .slice(0, 36)
+                .map((item, idx) =>
+                  renderDesktopWideCard(item, {
+                    top10: idx < 2,
+                    progress: state.progressMap[getMediaKey(item)],
+                    inMyList: myListSet.has(getMediaKey(item)),
+                    isLiked: likedSet.has(getMediaKey(item)),
+                  })
+                )
+                .join('')}
+            </div>`
+          : `<div style="padding:28px 36px;display:flex;flex-direction:column;gap:12px;max-width:440px;">
+              <p class="dim">No exact matches found for "${escapeHtml(state.searchQuery)}".</p>
+              <button type="button" class="btn-dark" id="open-quicklaunch-btn">Launch by TMDB / AniList ID</button>
+            </div>`
+      }
+
+      ${renderDesktopFooter()}
+    `;
+  }
 
   return `
     <div class="search-bar-sticky">
@@ -852,6 +1301,86 @@ function renderMySunoTab() {
   const myListItems = Array.from(getCollectionSet(MY_LIST_COLLECTION_ID))
     .map((k) => getItemByKey(k))
     .filter(Boolean);
+
+  if (isDesktopMode()) {
+    const myListSet = getCollectionSet(MY_LIST_COLLECTION_ID);
+    const likedSet = getCollectionSet(LIKED_COLLECTION_ID);
+    return `
+      ${renderDesktopTopbar()}
+      <div class="dk-subhead">
+        <div class="dk-subhead-left">
+          <span style="display:inline-flex;align-items:center;gap:12px;">
+            ${renderSunoMascotSvg(34)}
+            <h1 class="dk-subhead-title">My Suno • ${escapeHtml(state.profile.name || 'Ansh')}</h1>
+          </span>
+        </div>
+        <button type="button" class="dk-genres-pill" id="open-settings-profile-btn">
+          Profile &amp; Shield Settings
+        </button>
+      </div>
+
+      <button type="button" class="downloads-banner" id="open-downloads-card">
+        <span style="padding-top:2px;">${svgIcon('download', 22)}</span>
+        <div class="downloads-banner-body">
+          <div class="downloads-banner-title">
+            <span>Downloads</span>
+            ${svgIcon('chevronRight', 20)}
+          </div>
+          <div class="downloads-banner-sub">${
+            state.downloads.length > 0
+              ? `${state.downloads.length} saved title(s) in your offline &amp; quick-watch queue.`
+              : 'Movies and shows that you save appear here.'
+          }</div>
+        </div>
+      </button>
+
+      ${
+        continueEntries.length > 0
+          ? renderShelf({
+              id: 'dk-mysuno-cw',
+              title: 'Continue Watching',
+              items: continueEntries,
+              kind: 'dk-wide',
+              myListSet,
+              likedSet,
+              progressMap: state.progressMap,
+            })
+          : `<section class="nf-shelf is-dk-shelf">
+              <div class="nf-shelf-head"><h2 class="nf-shelf-title">Continue Watching</h2></div>
+              <p class="dim" style="padding:0 36px;font-size:13px;">Movies &amp; shows you start watching appear here automatically.</p>
+            </section>`
+      }
+
+      ${
+        likedItems.length > 0
+          ? renderShelf({
+              id: 'dk-mysuno-liked',
+              title: "TV Shows & Movies You've Liked",
+              items: likedItems,
+              kind: 'dk-wide',
+              myListSet,
+              likedSet,
+              progressMap: state.progressMap,
+            })
+          : `<section class="nf-shelf is-dk-shelf">
+              <div class="nf-shelf-head"><h2 class="nf-shelf-title">TV Shows &amp; Movies You've Liked</h2></div>
+              <p class="dim" style="padding:0 36px;font-size:13px;">Click Like (👍) on any title to save favorites here.</p>
+            </section>`
+      }
+
+      ${renderShelf({
+        id: 'dk-mysuno-mylist',
+        title: myListItems.length > 0 ? 'My List' : 'Recommended Picks to Add',
+        items: myListItems.length > 0 ? myListItems : getAllKnownPool().slice(0, 12),
+        kind: 'dk-wide',
+        myListSet,
+        likedSet,
+        progressMap: state.progressMap,
+      })}
+
+      ${renderDesktopFooter()}
+    `;
+  }
 
   return `
     ${renderTopHeader({
@@ -1144,9 +1673,14 @@ function syncPlayerMount({ forceReload = false } = {}) {
 }
 
 function renderActiveView() {
+  const dk = isDesktopMode();
   switch (state.tab) {
+    case 'languages':
+      return dk ? renderDesktopLanguagesTab() : renderDiscoverTab();
     case 'clips':
-      return renderClipsTab();
+      return dk
+        ? `${renderDesktopTopbar()}${renderClipsTab()}${renderDesktopFooter()}`
+        : renderClipsTab();
     case 'discover':
       return renderDiscoverTab();
     case 'search':
@@ -1154,7 +1688,9 @@ function renderActiveView() {
     case 'mysuno':
       return renderMySunoTab();
     case 'downloads':
-      return renderDownloadsView();
+      return dk
+        ? `${renderDesktopTopbar()}${renderDownloadsView()}${renderDesktopFooter()}`
+        : renderDownloadsView();
     case 'detail': {
       const item = getItemByKey(state.detailKey);
       const key = item ? getMediaKey(item) : '';
@@ -1164,7 +1700,7 @@ function renderActiveView() {
             item.seasonsList || [{ seasonNumber: 1, name: 'Season 1', episodeCount: item.totalEpisodes || 10 }]
           : [];
       const related = getAllKnownPool().filter((x) => getMediaKey(x) !== key);
-      return renderDetailView({
+      const detailHtml = renderDetailView({
         item,
         inMyList: getCollectionSet(MY_LIST_COLLECTION_ID).has(key),
         isLiked: getCollectionSet(LIKED_COLLECTION_ID).has(key),
@@ -1179,6 +1715,7 @@ function renderActiveView() {
         relatedItems: related,
         dubEnabled: state.prefs.dub,
       });
+      return dk ? `${renderDesktopTopbar()}${detailHtml}${renderDesktopFooter()}` : detailHtml;
     }
     case 'home':
     default:
@@ -1202,7 +1739,8 @@ function render(options = {}) {
   root.className = `sc-shell ${state.prefs.phoneFrameOnDesktop ? 'is-phone-preview' : ''}`;
 
   document.getElementById('view-mount').innerHTML = renderActiveView();
-  document.getElementById('nav-mount').innerHTML = state.playerOpen ? '' : renderFloatingBottomNav();
+  document.getElementById('nav-mount').innerHTML =
+    state.playerOpen || isDesktopMode() ? '' : renderFloatingBottomNav();
   syncPlayerMount(options);
 
   const modalMount = document.getElementById('modal-mount');
@@ -1282,7 +1820,58 @@ function bindEvents() {
     if (target.closest('[data-reset-home="true"]')) {
       state.tab = 'home';
       state.homeFilter = 'all';
+      state.desktopSearchOpen = false;
+      window.scrollTo({ top: 0, behavior: 'instant' });
       render();
+      return;
+    }
+
+    const dkFilterBtn = target.closest('[data-dk-filter]');
+    if (dkFilterBtn) {
+      state.tab = 'home';
+      state.homeFilter = dkFilterBtn.dataset.dkFilter;
+      state.desktopSearchOpen = false;
+      window.scrollTo({ top: 0, behavior: 'instant' });
+      render();
+      return;
+    }
+
+    if (target.closest('[data-open-languages="true"]')) {
+      state.prevTab = state.tab;
+      state.tab = 'languages';
+      state.desktopSearchOpen = false;
+      window.scrollTo({ top: 0, behavior: 'instant' });
+      if (state.langItems.length === 0) {
+        loadLanguageFeed(state.langValue);
+      } else {
+        render();
+      }
+      return;
+    }
+
+    if (target.closest('#dk-search-toggle')) {
+      state.desktopSearchOpen = true;
+      render();
+      setTimeout(() => document.getElementById('dk-search-input')?.focus(), 20);
+      return;
+    }
+
+    if (target.closest('#dk-search-close')) {
+      state.desktopSearchOpen = false;
+      if (state.tab === 'search' && !state.searchQuery.trim()) {
+        state.tab = state.prevTab || 'home';
+      }
+      render();
+      return;
+    }
+
+    const scrollRowBtn = target.closest('[data-scroll-row]');
+    if (scrollRowBtn) {
+      const row = document.getElementById(`row-${scrollRowBtn.dataset.scrollRow}`);
+      if (row) {
+        const dir = Number(scrollRowBtn.dataset.dir) || 1;
+        row.scrollBy({ left: dir * Math.max(480, row.clientWidth * 0.78), behavior: 'smooth' });
+      }
       return;
     }
 
@@ -1629,18 +2218,33 @@ function bindEvents() {
     if (t.id === 'disc-sort') {
       state.discoverSort = t.value;
       render();
+      return;
+    }
+    if (t.id === 'lang-pref-select') {
+      state.langPref = t.value;
+      render();
+      return;
+    }
+    if (t.id === 'lang-val-select') {
+      loadLanguageFeed(t.value);
     }
   });
 
   rootEl.addEventListener('input', (e) => {
     const t = e.target;
-    if (t.id === 'global-search-input') {
+    if (t.id === 'global-search-input' || t.id === 'dk-search-input') {
+      const sourceId = t.id;
+      const isDk = sourceId === 'dk-search-input';
       state.searchQuery = t.value;
+      if (isDk && state.tab !== 'search') {
+        state.prevTab = state.tab;
+        state.tab = 'search';
+      }
       clearTimeout(searchDebounce);
       searchDebounce = setTimeout(() => {
         const pos = t.selectionStart;
         runSearch(state.searchQuery).then(() => {
-          const fresh = document.getElementById('global-search-input');
+          const fresh = document.getElementById(sourceId);
           if (fresh && state.tab === 'search') {
             fresh.focus();
             try {
@@ -1654,8 +2258,16 @@ function bindEvents() {
 
   rootEl.addEventListener('submit', (e) => {
     e.preventDefault();
-    if (e.target.id === 'global-search-form') {
-      runSearch(document.getElementById('global-search-input')?.value || state.searchQuery);
+    if (e.target.id === 'global-search-form' || e.target.id === 'dk-search-form') {
+      if (e.target.id === 'dk-search-form') {
+        state.tab = 'search';
+        state.desktopSearchOpen = true;
+      }
+      const val =
+        e.target.querySelector('input')?.value ??
+        document.getElementById('global-search-input')?.value ??
+        state.searchQuery;
+      runSearch(val);
     } else if (e.target.id === 'quick-launch-form') {
       const raw = document.getElementById('ql-input')?.value || '';
       const fallbackType = document.getElementById('ql-type')?.value || 'movie';
@@ -1697,6 +2309,17 @@ function bindEvents() {
       antiRedirectGuard.setTheaterActive(false);
       render();
     }
+  });
+
+  window.addEventListener('resize', () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => {
+      const next = window.innerWidth >= 900;
+      if (next !== state.isDesktop) {
+        state.isDesktop = next;
+        render();
+      }
+    }, 120);
   });
 }
 
@@ -1741,7 +2364,8 @@ async function init() {
 
   clearInterval(heroTimer);
   heroTimer = setInterval(() => {
-    if (state.tab === 'home' && !state.playerOpen && !state.modal) {
+    const busyHover = typeof document !== 'undefined' && document.querySelector('.dk-card:hover, #dk-search-input:focus');
+    if (state.tab === 'home' && !state.playerOpen && !state.modal && !busyHover) {
       state.heroIndex = (state.heroIndex + 1) % 8;
       render();
     }

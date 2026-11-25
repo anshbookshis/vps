@@ -561,6 +561,52 @@ export async function fetchDynamicHomeFeeds({ pageOffset = 0 } = {}) {
   };
 }
 
+export async function fetchLanguageCatalog(language = 'English') {
+  const lang = String(language || 'English');
+  if (lang === 'Japanese') {
+    return loadTrendingAnime({ page: 1 });
+  }
+  if (lang === 'Hindi' || lang === 'South Indian') {
+    const regional = CATALOG_ITEMS.filter(
+      (x) => x.regionTag === 'south-india' || x.regionTag === 'india' || (x.country || '').includes('India')
+    );
+    const extra = await Promise.all([
+      searchCinemetaBrowser('RRR', 'movie').catch(() => []),
+      searchCinemetaBrowser('Shah Rukh Khan', 'movie').catch(() => []),
+    ]);
+    return [...regional, ...extra.flat()];
+  }
+  if (lang === 'Korean') {
+    const res = await Promise.all([
+      searchCinemetaBrowser('Squid', 'tv').catch(() => []),
+      searchCinemetaBrowser('Parasite', 'movie').catch(() => []),
+      searchCinemetaBrowser('Business Proposal', 'tv').catch(() => []),
+      searchCinemetaBrowser('Train to Busan', 'movie').catch(() => []),
+    ]);
+    return res.flat();
+  }
+  if (lang === 'Spanish') {
+    const res = await Promise.all([
+      searchCinemetaBrowser('Money Heist', 'tv').catch(() => []),
+      searchCinemetaBrowser('Elite', 'tv').catch(() => []),
+      searchCinemetaBrowser('Pan', 'movie').catch(() => []),
+    ]);
+    return res.flat();
+  }
+  // English / All Languages -> live Cinemeta mixed movies & series
+  const [movies, series] = await Promise.all([
+    fetchCinemetaCatalog('movie').catch(() => []),
+    fetchCinemetaCatalog('series').catch(() => []),
+  ]);
+  const combined = [];
+  const max = Math.max(movies.length, series.length);
+  for (let i = 0; i < max; i += 1) {
+    if (movies[i]) combined.push(movies[i]);
+    if (series[i]) combined.push(series[i]);
+  }
+  return combined;
+}
+
 export async function fetchTvSeasonsData(tmdbId, tmdbApiKey = '', imdbId = '') {
   if (imdbId) {
     try {

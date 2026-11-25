@@ -37,6 +37,8 @@ export function svgIcon(name, size = 20, cls = '') {
       return `<svg ${s}><circle cx="12" cy="12" r="9.5"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>`;
     case 'moreVert':
       return `<svg ${s}><circle cx="12" cy="5" r="1.4" fill="currentColor"/><circle cx="12" cy="12" r="1.4" fill="currentColor"/><circle cx="12" cy="19" r="1.4" fill="currentColor"/></svg>`;
+    case 'chevronLeft':
+      return `<svg ${s}><polyline points="15 18 9 12 15 6"/></svg>`;
     case 'chevronRight':
       return `<svg ${s}><polyline points="9 18 15 12 9 6"/></svg>`;
     case 'chevronDown':
@@ -96,4 +98,11 @@ export function renderSunoMascotSvg(size = 24) {
 
 export function renderWordmarkSvg() {
   return renderSunoRibbonSvg(22, 26);
+}
+
+/**
+ * Desktop navbar crimson wordmark replacing Netflix text logo with SUNO CINEMA.
+ */
+export function renderSunoCinemaDesktopWordmark() {
+  return `<span class="dk-wordmark" aria-label="Suno Cinema">SUNO CINEMA</span>`;
 }
