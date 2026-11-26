@@ -475,7 +475,15 @@ async function handleHlsProxy(request, reqUrl, env = {}, ctx = null) {
   }
 
   const proxyEndpoint = reqUrl.pathname === '/' ? '/' : '/api/proxy/hls';
-  const rangeHeader = request.headers.get('range') || '';
+  const rawRangeHeader = request.headers.get('range') || '';
+  let rangeHeader = rawRangeHeader;
+  const openRangeMatch = rawRangeHeader.match(/^bytes=(\d+)-$/i);
+  if (openRangeMatch && /\.(mp4|m4v|mkv|webm|mov|avi)(?:$|\?|#)/i.test(targetUrl)) {
+    const startByte = Number(openRangeMatch[1]);
+    if (Number.isFinite(startByte) && startByte >= 0) {
+      rangeHeader = `bytes=${startByte}-${startByte + 12 * 1024 * 1024 - 1}`;
+    }
+  }
   const upstreamHeaders = buildUpstreamHeaders(referer, rangeHeader);
 
   let upstreamResp;
@@ -961,17 +969,19 @@ function computeBrowserCompatibilityBonus(metaText, filename) {
   const combined = `${filename || ''} ${metaText || ''}`;
   let bonus = 0;
   if (/\.(rar|zip|7z|iso|tar)\b/i.test(combined)) return -100;
-  if (/\b(?:vvc|h\.?266|vvenc)\b/i.test(combined)) return -120;
-  if (/\.(mp4|m4v)\b/i.test(combined)) bonus += 25;
-  if (/\b(?:x264|h\.?264|avc|aac)\b/i.test(combined)) bonus += 15;
-  if (/\b(?:4320p|8k)\b/i.test(combined)) bonus -= 40;
-  if (/\b(?:hevc|x265|h\.?265|av1|dolby[\s.-]?vision|dovi|dts(?:-hd)?|truehd|ac3|eac3)\b/i.test(combined)) {
-    bonus -= 15;
+  if (/\b(?:vvc|h\.?266|vvenc)\b/i.test(combined)) return -200;
+  if (/\.(mp4|m4v)\b/i.test(combined)) bonus += 30;
+  if (/\.(mkv|avi|wmv)\b/i.test(combined)) bonus -= 35;
+  if (/\b(?:x264|h\.?264|avc|aac)\b/i.test(combined)) bonus += 20;
+  if (/\b(?:4320p|8k)\b/i.test(combined)) bonus -= 50;
+  if (/\b(?:dts(?:-hd)?|truehd|ac3|eac3|ddp?5\.?1)\b/i.test(combined)) bonus -= 30;
+  if (/\b(?:hevc|x265|h\.?265|av1|dolby[\s.-]?vision|dovi)\b/i.test(combined)) {
+    bonus -= 25;
   }
   return bonus;
 }
 
-async function resolveRealDebridStream(apiKey, magnetUri, preferredFileIdx) {
+async function resolveRealDebridStream(apiKey, magnetUri, preferredFileIdx, diagOut = null) {
   const headers = { Authorization: `Bearer ${apiKey}` };
   const addResp = await fetchWithRetry(
     'https://api.real-debrid.com/rest/1.0/torrents/addMagnet',
@@ -982,7 +992,13 @@ async function resolveRealDebridStream(apiKey, magnetUri, preferredFileIdx) {
     },
     { timeoutMs: 6000, maxRetries: 1 }
   );
-  if (!addResp.ok) return null;
+  if (!addResp.ok) {
+    if (diagOut && !diagOut.error) {
+      const errJson = await addResp.json().catch(() => null);
+      if (errJson?.error) diagOut.error = errJson.error;
+    }
+    return null;
+  }
   const added = await addResp.json();
   if (!added?.id) return null;
 
@@ -1078,7 +1094,7 @@ async function resolveRealDebridStream(apiKey, magnetUri, preferredFileIdx) {
     }
   }
 
-  const unrestrictResp = await fetchWithRetry(
+    const unrestrictResp = await fetchWithRetry(
     'https://api.real-debrid.com/rest/1.0/unrestrict/link',
     {
       method: 'POST',
@@ -1088,6 +1104,10 @@ async function resolveRealDebridStream(apiKey, magnetUri, preferredFileIdx) {
     { timeoutMs: 6000, maxRetries: 1 }
   );
   if (!unrestrictResp.ok) {
+    if (diagOut && !diagOut.error) {
+      const errJson = await unrestrictResp.json().catch(() => null);
+      if (errJson?.error) diagOut.error = errJson.error;
+    }
     await cleanupTorrent();
     return null;
   }
@@ -1298,17 +1318,21 @@ export async function resolveDebridCandidates({ provider = 'realdebrid', apiKey,
     }
   }
 
+  const rdDiag = {};
   for (const candidate of orderedCandidates.slice(0, MAX_RD_PROBES)) {
     const magnetUri = buildMagnetUri(candidate);
     if (!magnetUri) continue;
     try {
-      const playable = await resolveRealDebridStream(apiKey, magnetUri, candidate.fileIdx);
+      const playable = await resolveRealDebridStream(apiKey, magnetUri, candidate.fileIdx, rdDiag);
       if (playable) return { url: playable, candidate };
+      if (rdDiag.error === 'bad_token' || rdDiag.error === 'hoster_not_free' || rdDiag.error === 'traffic_exhausted') {
+        return { url: null, debridError: rdDiag.error };
+      }
     } catch {
       // Try next candidate
     }
   }
-  return null;
+  return rdDiag.error ? { url: null, debridError: rdDiag.error } : null;
 }
 
 function buildAddonStreamEndpoint({ addonUrl, tmdbId, imdbId, anilistId, malId, mediaType, season, episode }) {
@@ -1831,7 +1855,13 @@ async function resolveTorrentioDebridDirect({
       }
       const loc = resolveResp?.headers?.get('location') || '';
       await resolveResp?.body?.cancel?.().catch(() => {});
-      if (loc && /^https?:\/\//i.test(loc) && !loc.includes(debridKey) && !isArchiveOrNonMediaUrl(loc)) {
+      if (
+        loc &&
+        /^https?:\/\//i.test(loc) &&
+        !loc.includes(debridKey) &&
+        !/failed_access/i.test(loc) &&
+        !isArchiveOrNonMediaUrl(loc)
+      ) {
         const hashMatch = item.s.url.match(/\/([a-fA-F0-9]{40})\//);
         return {
           url: loc,
@@ -1998,11 +2028,12 @@ async function handleResolveStream(request, reqUrl, env = {}) {
     }
   }
 
-  if (tmdbId && !imdbId && env.TMDB_API_KEY && (mediaType === 'movie' || mediaType === 'tv' || mediaType === 'series')) {
+  let resolvedTmdbId = tmdbId;
+  if (resolvedTmdbId && !imdbId && env.TMDB_API_KEY && (mediaType === 'movie' || mediaType === 'tv' || mediaType === 'series')) {
     try {
       const tmdbPath = mediaType === 'tv' || mediaType === 'series' ? 'tv' : 'movie';
       const extResp = await fetchWithRetry(
-        `https://api.themoviedb.org/3/${tmdbPath}/${encodeURIComponent(tmdbId)}/external_ids?api_key=${encodeURIComponent(
+        `https://api.themoviedb.org/3/${tmdbPath}/${encodeURIComponent(resolvedTmdbId)}/external_ids?api_key=${encodeURIComponent(
           env.TMDB_API_KEY
         )}`,
         { headers: { Accept: 'application/json' }, signal: request.signal },
@@ -2017,12 +2048,32 @@ async function handleResolveStream(request, reqUrl, env = {}) {
     } catch {
       // Proceed smoothly if external_ids lookup is unavailable
     }
+  } else if (imdbId && !resolvedTmdbId && env.TMDB_API_KEY && (mediaType === 'movie' || mediaType === 'tv' || mediaType === 'series')) {
+    try {
+      const findResp = await fetchWithRetry(
+        `https://api.themoviedb.org/3/find/${encodeURIComponent(imdbId)}?external_source=imdb_id&api_key=${encodeURIComponent(
+          env.TMDB_API_KEY
+        )}`,
+        { headers: { Accept: 'application/json' }, signal: request.signal },
+        { timeoutMs: 2500, maxRetries: 0 }
+      );
+      if (findResp.ok) {
+        const findData = await findResp.json().catch(() => null);
+        const isTv = mediaType === 'tv' || mediaType === 'series';
+        const hit = isTv ? findData?.tv_results?.[0] : findData?.movie_results?.[0];
+        if (hit?.id) resolvedTmdbId = String(hit.id);
+      } else {
+        await findResp.body?.cancel?.().catch(() => {});
+      }
+    } catch {
+      // Proceed cleanly if IMDb->TMDB lookup is unavailable
+    }
   }
 
   const addonTasks = addonEntries.map(async (entry) => {
     const endpoint = buildAddonStreamEndpoint({
       addonUrl: entry.url,
-      tmdbId,
+      tmdbId: resolvedTmdbId,
       imdbId,
       anilistId,
       malId,
@@ -2072,7 +2123,7 @@ async function handleResolveStream(request, reqUrl, env = {}) {
     ? resolveCustomEndpoint({
         origin,
         customResolverUrl,
-        tmdbId,
+        tmdbId: resolvedTmdbId,
         imdbId,
         anilistId,
         malId,
@@ -2091,7 +2142,7 @@ async function handleResolveStream(request, reqUrl, env = {}) {
           addonEntries,
           debridProvider,
           debridKey,
-          tmdbId,
+          tmdbId: resolvedTmdbId,
           imdbId,
           mediaType,
           season,
@@ -2148,7 +2199,7 @@ async function handleResolveStream(request, reqUrl, env = {}) {
   }
 
   const isMockAddonEnv = addonEntries.some((e) => /127\.0\.0\.1|localhost|\.example/i.test(e.url || ''));
-  if (!torrentioDebridResult?.url && debridKey && candidateMap.size === 0 && !explicitHash && !magnet && title && !isMockAddonEnv) {
+  if (!torrentioDebridResult?.url && debridKey && candidateMap.size < 2 && !explicitHash && !magnet && title && !isMockAddonEnv) {
     await searchOpenTorrentIndexers({ title, year, signal: request.signal, candidateMap });
   }
 
@@ -2184,6 +2235,17 @@ async function handleResolveStream(request, reqUrl, env = {}) {
     });
   }
 
+  let debridWarning = '';
+  if (!debridResult?.url && debridResult?.debridError) {
+    if (debridResult.debridError === 'hoster_not_free') {
+      debridWarning = 'Real-Debrid account is on Free tier — switched to Cloud Stream Servers.';
+    } else if (debridResult.debridError === 'bad_token') {
+      debridWarning = 'Debrid API key is invalid or expired — switched to Cloud Stream Servers.';
+    } else {
+      debridWarning = `Debrid unavailable (${debridResult.debridError}) — switched to Cloud Stream Servers.`;
+    }
+    warnings.push(debridWarning);
+  }
   if (debridResult?.url) {
     const playable = debridResult.url;
     const winning = debridResult.candidate;
@@ -2223,16 +2285,16 @@ async function handleResolveStream(request, reqUrl, env = {}) {
     }
   }
 
-  if (tmdbId || imdbId || (mediaType === 'anime' && malId)) {
+  if (resolvedTmdbId || imdbId || (mediaType === 'anime' && malId)) {
     let vidlinkUrl;
     if (mediaType === 'anime' && malId) {
-      vidlinkUrl = `https://vidlink.pro/anime/${encodeURIComponent(malId)}/${episode}/sub?primaryColor=ff4d6d&secondaryColor=00f0ff&autoplay=false&fallback=true`;
+      vidlinkUrl = `https://vidlink.pro/anime/${encodeURIComponent(malId)}/${episode}/sub?primaryColor=e50914&secondaryColor=00f0ff&autoplay=true&fallback=true`;
     } else if (mediaType === 'tv') {
-      const idVal = tmdbId || imdbId;
-      vidlinkUrl = `https://vidlink.pro/tv/${encodeURIComponent(idVal)}/${season}/${episode}?primaryColor=ff4d6d&secondaryColor=00f0ff&iconColor=ff4d6d&title=false&poster=true&autoplay=false`;
+      const idVal = resolvedTmdbId || imdbId;
+      vidlinkUrl = `https://vidlink.pro/tv/${encodeURIComponent(idVal)}/${season}/${episode}?primaryColor=e50914&secondaryColor=00f0ff&iconColor=e50914&title=false&poster=true&autoplay=true`;
     } else {
-      const idVal = tmdbId || imdbId;
-      vidlinkUrl = `https://vidlink.pro/movie/${encodeURIComponent(idVal)}?primaryColor=ff4d6d&secondaryColor=00f0ff&iconColor=ff4d6d&title=false&poster=true&autoplay=false`;
+      const idVal = resolvedTmdbId || imdbId;
+      vidlinkUrl = `https://vidlink.pro/movie/${encodeURIComponent(idVal)}?primaryColor=e50914&secondaryColor=00f0ff&iconColor=e50914&title=false&poster=true&autoplay=true`;
     }
 
     sources.push({
@@ -2247,9 +2309,9 @@ async function handleResolveStream(request, reqUrl, env = {}) {
     });
   }
 
-  if (tmdbId || imdbId) {
-    const idVal = tmdbId || imdbId;
-    const toIdVal = imdbId || tmdbId;
+  if (resolvedTmdbId || imdbId) {
+    const idVal = resolvedTmdbId || imdbId;
+    const toIdVal = imdbId || resolvedTmdbId;
     const isTv = mediaType === 'tv' || mediaType === 'series';
     sources.push({
       id: 'vidfast-shield',
@@ -2289,15 +2351,15 @@ async function handleResolveStream(request, reqUrl, env = {}) {
     });
   }
 
-  if (tmdbId || imdbId || anilistId) {
+  if (resolvedTmdbId || imdbId || anilistId) {
     let vidriftUrl;
     if (mediaType === 'anime' && anilistId) {
       vidriftUrl = `https://embed.vidrift.net/embed/anilist/${encodeURIComponent(anilistId)}/${episode}?primaryColor=ff4d6d&autoplay=false`;
-    } else if (mediaType === 'tv' && (tmdbId || imdbId)) {
-      const idVal = tmdbId || imdbId;
+    } else if (mediaType === 'tv' && (resolvedTmdbId || imdbId)) {
+      const idVal = resolvedTmdbId || imdbId;
       vidriftUrl = `https://embed.vidrift.net/embed/tv/${encodeURIComponent(idVal)}/${season}/${episode}?primaryColor=ff4d6d&autoplay=false`;
     } else {
-      const idVal = tmdbId || imdbId;
+      const idVal = resolvedTmdbId || imdbId;
       vidriftUrl = `https://embed.vidrift.net/embed/movie/${encodeURIComponent(idVal)}?primaryColor=ff4d6d&autoplay=false`;
     }
 
@@ -2315,7 +2377,7 @@ async function handleResolveStream(request, reqUrl, env = {}) {
 
   return jsonResponse({
     ok: true,
-    tmdbId,
+    tmdbId: resolvedTmdbId,
     imdbId,
     anilistId,
     mediaType,
@@ -2323,6 +2385,7 @@ async function handleResolveStream(request, reqUrl, env = {}) {
     episode,
     addonCount: addonEntries.length,
     sources,
+    ...(debridWarning ? { debridWarning } : {}),
     ...(warnings.length ? { warnings } : {}),
   });
 }
@@ -2468,50 +2531,111 @@ export default {
       const q = (reqUrl.searchParams.get('q') || '').trim();
       const type = reqUrl.searchParams.get('type') || 'all';
       const tmdbKey = (request.headers.get('x-tmdb-key') || env.TMDB_API_KEY || '').trim();
-      if (!q || q.length < 2 || !tmdbKey) {
+      if (!q || q.length < 2) {
         return jsonResponse({ items: [], sources: [] });
       }
       try {
-        const isV4 = tmdbKey.length > 45;
-        const headers = isV4 ? { Authorization: `Bearer ${tmdbKey}`, Accept: 'application/json' } : { Accept: 'application/json' };
-        const keyParam = isV4 ? '' : `&api_key=${encodeURIComponent(tmdbKey)}`;
-        const endpoint =
-          type === 'movie'
-            ? `https://api.themoviedb.org/3/search/movie?query=${encodeURIComponent(q)}&include_adult=false${keyParam}`
-            : type === 'tv'
-            ? `https://api.themoviedb.org/3/search/tv?query=${encodeURIComponent(q)}&include_adult=false${keyParam}`
-            : `https://api.themoviedb.org/3/search/multi?query=${encodeURIComponent(q)}&include_adult=false${keyParam}`;
-        const resp = await fetchWithRetry(endpoint, { headers }, { timeoutMs: 6000, maxRetries: 1 });
-        if (!resp.ok) return jsonResponse({ items: [], sources: [] });
-        const data = await resp.json();
-        const items = (data?.results || [])
-          .filter((r) => {
-            const mt = r.media_type || (type === 'tv' ? 'tv' : 'movie');
-            return mt === 'movie' || mt === 'tv';
-          })
-          .slice(0, 14)
-          .map((r) => {
-            const mediaType = r.media_type === 'tv' || type === 'tv' ? 'tv' : 'movie';
-            return {
-              id: `${mediaType}:${r.id}`,
-              tmdbId: String(r.id),
-              mediaType,
-              title: r.title || r.name || 'Untitled',
-              year: (r.release_date || r.first_air_date || '').slice(0, 4),
-              creator: mediaType === 'tv' ? 'TMDB Series' : 'TMDB Feature',
-              runtime: mediaType === 'tv' ? 'Series' : 'Feature',
-              totalSeasons: mediaType === 'tv' ? 3 : undefined,
-              totalEpisodes: mediaType === 'tv' ? 10 : undefined,
-              rating: r.vote_average ? r.vote_average.toFixed(1) : '7.5',
-              genres: [mediaType === 'tv' ? 'Series' : 'Cinema'],
-              overview: r.overview || '',
-              poster: r.poster_path ? `https://image.tmdb.org/t/p/w500${r.poster_path}` : '',
-              backdrop: r.backdrop_path ? `https://image.tmdb.org/t/p/w1280${r.backdrop_path}` : '',
-              palette: ['#ff0033', '#27272a', '#09090b'],
-              source: 'tmdb-edge',
-            };
-          });
-        return jsonResponse({ items, sources: items.length ? ['tmdb'] : [] });
+        const queryTmdb = async (searchQuery) => {
+          if (!tmdbKey || !searchQuery) return [];
+          const isV4 = tmdbKey.length > 45;
+          const headers = isV4 ? { Authorization: `Bearer ${tmdbKey}`, Accept: 'application/json' } : { Accept: 'application/json' };
+          const keyParam = isV4 ? '' : `&api_key=${encodeURIComponent(tmdbKey)}`;
+          const endpoint =
+            type === 'movie'
+              ? `https://api.themoviedb.org/3/search/movie?query=${encodeURIComponent(searchQuery)}&include_adult=false${keyParam}`
+              : type === 'tv'
+              ? `https://api.themoviedb.org/3/search/tv?query=${encodeURIComponent(searchQuery)}&include_adult=false${keyParam}`
+              : `https://api.themoviedb.org/3/search/multi?query=${encodeURIComponent(searchQuery)}&include_adult=false${keyParam}`;
+          const resp = await fetchWithRetry(endpoint, { headers }, { timeoutMs: 5500, maxRetries: 1 }).catch(() => null);
+          if (!resp || !resp.ok) return [];
+          const data = await resp.json().catch(() => null);
+          return (data?.results || [])
+            .filter((r) => {
+              const mt = r.media_type || (type === 'tv' ? 'tv' : 'movie');
+              return mt === 'movie' || mt === 'tv';
+            })
+            .slice(0, 14)
+            .map((r) => {
+              const mediaType = r.media_type === 'tv' || type === 'tv' ? 'tv' : 'movie';
+              return {
+                id: `${mediaType}:${r.id}`,
+                tmdbId: String(r.id),
+                mediaType,
+                title: r.title || r.name || 'Untitled',
+                year: (r.release_date || r.first_air_date || '').slice(0, 4),
+                creator: mediaType === 'tv' ? 'TMDB Series' : 'TMDB Feature',
+                runtime: mediaType === 'tv' ? 'Series' : 'Feature',
+                totalSeasons: mediaType === 'tv' ? 3 : undefined,
+                totalEpisodes: mediaType === 'tv' ? 10 : undefined,
+                rating: r.vote_average ? r.vote_average.toFixed(1) : '7.5',
+                genres: [mediaType === 'tv' ? 'Series' : 'Cinema'],
+                overview: r.overview || '',
+                poster: r.poster_path ? `https://image.tmdb.org/t/p/w500${r.poster_path}` : '',
+                backdrop: r.backdrop_path ? `https://image.tmdb.org/t/p/w1280${r.backdrop_path}` : '',
+                palette: ['#ff0033', '#27272a', '#09090b'],
+                source: 'tmdb-edge',
+              };
+            });
+        };
+
+        const items = await queryTmdb(q);
+        const sourcesUsed = items.length ? ['tmdb'] : [];
+
+        // Fuzzy / typo fallback via IMDb suggestion API (e.g. "ramanayan" -> "Ramayana", "openheimer" -> "Oppenheimer")
+        if (items.length === 0) {
+          const firstChar = q.toLowerCase().replace(/[^a-z0-9]/g, '').charAt(0) || 'x';
+          const sugResp = await fetchWithRetry(
+            `https://v3.sg.media-imdb.com/suggestion/${firstChar}/${encodeURIComponent(q)}.json`,
+            { headers: { Accept: 'application/json' } },
+            { timeoutMs: 3500, maxRetries: 0 }
+          ).catch(() => null);
+          if (sugResp?.ok) {
+            const sugJson = await sugResp.json().catch(() => null);
+            const sugList = (Array.isArray(sugJson?.d) ? sugJson.d : []).filter(
+              (x) => /^tt\d+$/i.test(x?.id || '') && /feature|movie|tv/i.test(x?.q || x?.qid || '')
+            );
+            const topCorrectedTitle = sugList[0]?.l || '';
+            if (topCorrectedTitle && topCorrectedTitle.toLowerCase() !== q.toLowerCase() && tmdbKey) {
+              const correctedHits = await queryTmdb(topCorrectedTitle);
+              const seenIds = new Set(items.map((x) => x.id));
+              for (const hit of correctedHits) {
+                if (!seenIds.has(hit.id)) {
+                  seenIds.add(hit.id);
+                  items.push(hit);
+                }
+              }
+              if (correctedHits.length && !sourcesUsed.includes('tmdb')) sourcesUsed.push('tmdb');
+            }
+            const seenTitles = new Set(items.map((x) => `${x.mediaType}:${(x.title || '').toLowerCase()}`));
+            for (const s of sugList.slice(0, 8)) {
+              const isTv = /tv|series/i.test(s.q || s.qid || '');
+              const mediaType = isTv ? 'tv' : 'movie';
+              if (type !== 'all' && type !== mediaType) continue;
+              const sig = `${mediaType}:${String(s.l || '').toLowerCase()}`;
+              if (seenTitles.has(sig)) continue;
+              seenTitles.add(sig);
+              items.push({
+                id: `${mediaType}:imdb:${s.id}`,
+                imdbId: s.id,
+                mediaType,
+                title: s.l || 'Untitled',
+                year: s.y ? String(s.y) : '',
+                creator: mediaType === 'tv' ? 'TV Series' : 'Feature Film',
+                runtime: mediaType === 'tv' ? 'Series' : 'Feature',
+                rating: '7.6',
+                genres: [mediaType === 'tv' ? 'Series' : 'Cinema'],
+                overview: s.s || '',
+                poster: s.i?.imageUrl || '',
+                backdrop: '',
+                palette: ['#ff0033', '#27272a', '#09090b'],
+                source: 'imdb-suggest',
+              });
+            }
+            if (sugList.length) sourcesUsed.push('imdb-suggest');
+          }
+        }
+
+        return jsonResponse({ items, sources: sourcesUsed });
       } catch {
         return jsonResponse({ items: [], sources: [] });
       }

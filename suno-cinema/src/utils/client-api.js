@@ -641,7 +641,7 @@ export async function searchAllMedia(query, tmdbApiKey = '', type = 'all', hlsPr
     tmdbApiKey ? searchTmdbBrowser(clean, tmdbApiKey).catch(() => []) : Promise.resolve([]),
   ];
 
-  // Query configured Edge Proxy or same-origin Node /api/search so server-side TMDB key can enrich results
+  // Query configured Edge Proxy or same-origin Node /api/search so server-side TMDB key & IMDb fuzzy lookup can enrich results
   const cleanProxy = String(hlsProxyUrl || '').trim().replace(/\/+$/, '');
   const searchEndpoints = [];
   if (cleanProxy && /^https?:\/\//i.test(cleanProxy)) {
@@ -659,7 +659,7 @@ export async function searchAllMedia(query, tmdbApiKey = '', type = 'all', hlsPr
     );
   }
 
-  const external = await Promise.all(parallel);
+  let external = await Promise.all(parallel);
   const merged = [...local];
   const seenKeys = new Set(merged.map((x) => x.id));
   const seenTitles = new Set(merged.map((x) => `${x.mediaType}:${x.title.toLowerCase()}:${x.year}`));
@@ -671,6 +671,27 @@ export async function searchAllMedia(query, tmdbApiKey = '', type = 'all', hlsPr
         seenKeys.add(item.id);
         seenTitles.add(titleSig);
         merged.push(item);
+      }
+    }
+  }
+
+  // Typo/prefix fallback if primary queries returned very few hits (e.g. "ramanayan" -> "ramana")
+  if (merged.length < 2 && clean.length >= 5) {
+    const trimmedPrefix = clean.slice(0, Math.max(4, clean.length - 3));
+    if (trimmedPrefix !== clean) {
+      const fallbackLists = await Promise.all([
+        searchCinemetaBrowser(trimmedPrefix, type).catch(() => []),
+        tmdbApiKey ? searchTmdbBrowser(trimmedPrefix, tmdbApiKey).catch(() => []) : Promise.resolve([]),
+      ]);
+      for (const list of fallbackLists) {
+        for (const item of list) {
+          const titleSig = `${item.mediaType}:${(item.title || '').toLowerCase()}:${item.year || ''}`;
+          if (!seenKeys.has(item.id) && !seenTitles.has(titleSig)) {
+            seenKeys.add(item.id);
+            seenTitles.add(titleSig);
+            merged.push(item);
+          }
+        }
       }
     }
   }
