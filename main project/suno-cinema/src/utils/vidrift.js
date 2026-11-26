@@ -990,10 +990,12 @@ export async function fetchStreamSources(item, options = {}) {
               .map((s, idx) => {
                 const text = `${s.name || ''} ${s.title || ''} ${s.behaviorHints?.filename || ''}`;
                 let score = /2160|4k/i.test(text) ? 40 : /1080/i.test(text) ? 30 : /720/i.test(text) ? 20 : 10;
-                if (/\.(mp4|m4v)\b/i.test(text)) score += 25;
-                if (/\b(?:x264|h\.?264|avc|aac)\b/i.test(text)) score += 15;
-                if (/\b(?:hevc|x265|h\.?265|av1|dolby[\s.-]?vision|dts|truehd)\b/i.test(text)) score -= 15;
-                if (/\b(?:vvc|h\.?266|vvenc)\b/i.test(text)) score -= 120;
+                if (/\.(mp4|m4v)\b/i.test(text)) score += 30;
+                if (/\.(mkv|avi|wmv)\b/i.test(text)) score -= 35;
+                if (/\b(?:x264|h\.?264|avc|aac)\b/i.test(text)) score += 20;
+                if (/\b(?:dts(?:-hd)?|truehd|ac3|eac3|ddp?5\.?1)\b/i.test(text)) score -= 30;
+                if (/\b(?:hevc|x265|h\.?265|av1|dolby[\s.-]?vision|dovi)\b/i.test(text)) score -= 25;
+                if (/\b(?:vvc|h\.?266|vvenc)\b/i.test(text)) score -= 200;
                 if (/\.(rar|zip|7z|iso)\b/i.test(text)) score -= 100;
                 return { hash: s.infoHash.toLowerCase(), score, idx };
               })
@@ -1381,13 +1383,13 @@ export function buildVidriftEmbedUrl(item, options = {}) {
     const ep = Math.max(1, Number(options.episode ?? item.episode ?? 1));
     path = `/embed/anilist/${encodeURIComponent(String(item.anilistId))}/${ep}`;
   } else if (mediaType === 'tv') {
-    const id = item.tmdbId || item.id;
+    const id = item.tmdbId || item.imdbId || item.id;
     if (!id) throw new Error('TV embed requires a tmdbId.');
     const season = Math.max(1, Number(options.season ?? item.season ?? 1));
     const episode = Math.max(1, Number(options.episode ?? item.episode ?? 1));
     path = `/embed/tv/${encodeURIComponent(String(id))}/${season}/${episode}`;
   } else {
-    const id = item.tmdbId || item.id;
+    const id = item.tmdbId || item.imdbId || item.id;
     if (!id) throw new Error('Movie embed requires a tmdbId.');
     path = `/embed/movie/${encodeURIComponent(String(id))}`;
   }
@@ -1457,13 +1459,13 @@ export function buildVidlinkEmbedUrl(item, options = {}) {
     const subOrDub = options.dub ? 'dub' : 'sub';
     path = `/anime/${encodeURIComponent(String(item.malId))}/${ep}/${subOrDub}`;
   } else if (mediaType === 'tv') {
-    const id = item.tmdbId || item.id;
+    const id = item.tmdbId || item.imdbId || item.id;
     if (!id) throw new Error('TV embed requires a tmdbId.');
     const season = Math.max(1, Number(options.season ?? item.season ?? 1));
     const episode = Math.max(1, Number(options.episode ?? item.episode ?? 1));
     path = `/tv/${encodeURIComponent(String(id))}/${season}/${episode}`;
   } else {
-    const id = item.tmdbId || item.id;
+    const id = item.tmdbId || item.imdbId || item.id;
     if (!id) throw new Error('Movie embed requires a tmdbId.');
     path = `/movie/${encodeURIComponent(String(id))}`;
   }

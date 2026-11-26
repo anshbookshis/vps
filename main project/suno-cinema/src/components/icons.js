@@ -67,6 +67,24 @@ export function svgIcon(name, size = 20, cls = '') {
       return `<svg ${s}><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>`;
     case 'sparkles':
       return `<svg ${s}><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3z"/></svg>`;
+    case 'rewind10':
+      return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" class="${cls}" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/><text x="12" y="15.2" text-anchor="middle" fill="currentColor" stroke="none" font-size="7.5" font-weight="800" font-family="system-ui, sans-serif">10</text></svg>`;
+    case 'forward10':
+      return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" class="${cls}" aria-hidden="true"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/><text x="12" y="15.2" text-anchor="middle" fill="currentColor" stroke="none" font-size="7.5" font-weight="800" font-family="system-ui, sans-serif">10</text></svg>`;
+    case 'fullscreen':
+      return `<svg ${s}><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>`;
+    case 'exitFullscreen':
+      return `<svg ${s}><path d="M8 3v3a2 2 0 0 1-2 2H3m18 0h-3a2 2 0 0 1-2-2V3m0 18v-3a2 2 0 0 1 2-2h3M3 16h3a2 2 0 0 1 2 2v3"/></svg>`;
+    case 'subtitles':
+      return `<svg ${s}><rect x="2" y="4" width="20" height="16" rx="2.5"/><path d="M7 15h4m2 0h4M7 11h10"/></svg>`;
+    case 'speed':
+      return `<svg ${s}><circle cx="12" cy="12" r="9"/><path d="M12 12l4-3"/><circle cx="12" cy="12" r="1.4" fill="currentColor"/></svg>`;
+    case 'servers':
+      return `<svg ${s}><rect x="3" y="4" width="18" height="6" rx="1.5"/><rect x="3" y="14" width="18" height="6" rx="1.5"/><circle cx="7" cy="7" r="1" fill="currentColor"/><circle cx="7" cy="17" r="1" fill="currentColor"/></svg>`;
+    case 'episodes':
+      return `<svg ${s}><rect x="3" y="5" width="14" height="11" rx="2"/><path d="M7 19h12a2 2 0 0 0 2-2V9"/></svg>`;
+    case 'pip':
+      return `<svg ${s}><rect x="2" y="4" width="20" height="16" rx="2"/><rect x="11" y="11" width="9" height="6" rx="1" fill="currentColor" stroke="none"/></svg>`;
     default:
       return `<svg ${s}><circle cx="12" cy="12" r="9"/></svg>`;
   }

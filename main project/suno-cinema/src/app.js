@@ -479,7 +479,9 @@ function computeBufferedSeconds(videoEl) {
 function wakePlayerHud(keepOpen = false) {
   state.hudVisible = true;
   const playerRoot = document.getElementById('n77-player');
+  const stageRoot = document.querySelector('.player-fullscreen');
   if (playerRoot) playerRoot.classList.add('is-hud-visible');
+  if (stageRoot) stageRoot.classList.add('is-hud-visible');
   clearTimeout(hudIdleTimer);
   const videoEl = document.getElementById('hls-video-player');
   if (keepOpen || !videoEl || videoEl.paused || state.hudOpenMenu) return;
@@ -488,6 +490,7 @@ function wakePlayerHud(keepOpen = false) {
     if (v && !v.paused && !state.hudOpenMenu) {
       state.hudVisible = false;
       document.getElementById('n77-player')?.classList.remove('is-hud-visible');
+      document.querySelector('.player-fullscreen')?.classList.remove('is-hud-visible');
     }
   }, 3000);
 }
@@ -497,29 +500,41 @@ function updateHudControlsVisuals() {
   if (!videoEl) return;
 
   const isPaused = videoEl.paused;
-  const playIcon = svgIcon(isPaused ? 'play' : 'pause', 20);
-  const centerIcon = svgIcon(isPaused ? 'play' : 'pause', 32);
+  const playIcon = svgIcon(isPaused ? 'play' : 'pause', 22);
+  const centerIcon = svgIcon(isPaused ? 'play' : 'pause', 36);
   const barBtn = document.getElementById('n77-play-btn');
   const centerBtn = document.getElementById('n77-center-play-btn');
   if (barBtn) barBtn.innerHTML = playIcon;
   if (centerBtn) centerBtn.innerHTML = centerIcon;
 
   const playerRoot = document.getElementById('n77-player');
+  const stageRoot = document.querySelector('.player-fullscreen');
   if (playerRoot) {
     playerRoot.classList.toggle('is-paused', isPaused);
+    if (stageRoot) stageRoot.classList.toggle('is-paused', isPaused);
     if (isPaused) wakePlayerHud(true);
+  }
+
+  const fsBtn = document.getElementById('n77-fullscreen-btn');
+  if (fsBtn && typeof document !== 'undefined') {
+    fsBtn.innerHTML = svgIcon(document.fullscreenElement ? 'exitFullscreen' : 'fullscreen', 19);
   }
 
   const muteBtn = document.getElementById('n77-mute-btn');
   const volSlider = document.getElementById('n77-vol-slider');
-  if (muteBtn) muteBtn.innerHTML = svgIcon(videoEl.muted || videoEl.volume === 0 ? 'volumeOff' : 'volumeOn', 19);
+  if (muteBtn) muteBtn.innerHTML = svgIcon(videoEl.muted || videoEl.volume === 0 ? 'volumeOff' : 'volumeOn', 20);
   if (volSlider) volSlider.value = videoEl.muted ? '0' : String(videoEl.volume ?? 1);
 
   const cur = Number(videoEl.currentTime || 0);
   const dur = Number(videoEl.duration || 0);
   const readout = document.getElementById('n77-time-readout');
   if (readout) {
-    readout.textContent = dur > 0 && Number.isFinite(dur) ? `${formatTime(cur)} / ${formatTime(dur)}` : `${formatTime(cur)} / LIVE`;
+    readout.textContent = dur > 0 && Number.isFinite(dur) ? `${formatTime(cur)} / ${formatTime(dur)}` : `${formatTime(cur)}`;
+  }
+  const remEl = document.getElementById('nf-time-remaining');
+  if (remEl) {
+    const rem = dur > 0 && Number.isFinite(dur) ? Math.max(0, dur - cur) : 0;
+    remEl.textContent = dur > 0 && Number.isFinite(dur) ? `-${formatTime(rem)}` : 'LIVE';
   }
 
   const pct = dur > 0 && Number.isFinite(dur) ? Math.min(100, Math.max(0, (cur / dur) * 100)) : 0;
@@ -546,24 +561,21 @@ function updateTelemetryBadge(videoEl, precomputedBuf) {
   t.bufferSec = buf;
 
   const h = t.height || videoEl?.videoHeight || 0;
-  const resText = h > 0 ? `${h}p` : 'HLS';
-  const mbpsText = t.bitrateMbps > 0 ? `${t.bitrateMbps.toFixed(1)} Mbps` : '';
-  const bufText = `${buf.toFixed(1)}s buf`;
+  const resText = h >= 2160 ? '4K' : h > 0 ? `${h}p` : 'HD';
   const activeSrc = getActiveResolvedSource();
-  const nodeTag = activeSrc?.node || t.nodeName || 'Direct';
 
-  badge.textContent = [resText, mbpsText, bufText, nodeTag].filter(Boolean).join(' • ');
-  badge.classList.toggle('is-warn', Boolean(t.stalled || (videoEl && !videoEl.paused && buf < 2)));
+  badge.textContent = t.stalled ? `${resText} • Buffering` : resText;
+  badge.classList.toggle('is-warn', Boolean(t.stalled));
 
   const hudBadgesEl = document.getElementById('n77-hud-node-badges');
   if (hudBadgesEl) {
-    hudBadgesEl.innerHTML = activeSrc ? renderSourceBadgesHtml(activeSrc) : '';
+    hudBadgesEl.innerHTML = '';
   }
 
   const qLabel = document.getElementById('n77-quality-label');
   if (qLabel) {
     if (t.levelIndex === -1 || !activeHlsInstance) {
-      qLabel.textContent = h > 0 ? `Auto (${h}p)` : 'Auto';
+      qLabel.textContent = h > 0 ? `${h}p` : 'Auto';
     } else {
       const lvl = t.levels.find((l) => l.index === t.levelIndex);
       qLabel.textContent = lvl ? `${lvl.height}p` : 'Auto';
@@ -579,7 +591,7 @@ function updateTelemetryBadge(videoEl, precomputedBuf) {
   const ccLabel = document.getElementById('n77-cc-label');
   const ccBtn = document.getElementById('n77-menu-subtitles');
   const hasSubOn = t.subtitleTrackIndex >= 0 || state.activeExternalSubId !== 'off';
-  if (ccLabel) ccLabel.textContent = hasSubOn ? 'CC ON' : 'CC';
+  if (ccLabel) ccLabel.textContent = hasSubOn ? 'Subtitles ON' : 'Subtitles';
   if (ccBtn) ccBtn.classList.toggle('is-active', hasSubOn);
 
   const spLabel = document.getElementById('n77-speed-label');
@@ -591,15 +603,12 @@ function updateTelemetryBadge(videoEl, precomputedBuf) {
       activeSrc?.addonName ||
       (activeSrc?.node === 'archive-org' ? 'Archive.org' : '') ||
       (activeSrc?.node === 'debrid' ? 'Debrid' : '');
-    const qText = activeSrc?.quality && activeSrc.quality !== 'HD' ? activeSrc.quality : '';
-    const shortName =
-      [qText, primaryNode].filter(Boolean).join(' • ') ||
-      (activeSrc?.name ? activeSrc.name.split('(')[0].trim().slice(0, 14) : 'Node');
-    mLabel.textContent = shortName.slice(0, 22);
+    const shortName = primaryNode || 'Servers';
+    mLabel.textContent = shortName.slice(0, 16);
   }
 }
 
-function setSpinnerState(visible, label = 'Buffering stream...') {
+function setSpinnerState(visible, label = '') {
   const el = document.getElementById('n77-spinner');
   const lbl = document.getElementById('n77-spinner-label');
   if (lbl) lbl.textContent = label;
@@ -612,6 +621,15 @@ function flashSeekFeedback(side) {
   el.classList.remove('is-flash');
   void el.offsetWidth;
   el.classList.add('is-flash');
+}
+
+function flashCenterBurst(isPlaying) {
+  const el = document.getElementById('nf-center-burst');
+  if (!el) return;
+  el.innerHTML = svgIcon(isPlaying ? 'play' : 'pause', 34);
+  el.classList.remove('is-burst');
+  void el.offsetWidth;
+  el.classList.add('is-burst');
 }
 
 function seekVideoBy(deltaSeconds) {
@@ -632,8 +650,10 @@ function toggleVideoPlayPause() {
   if (!videoEl) return;
   if (videoEl.paused) {
     videoEl.play().catch(() => {});
+    flashCenterBurst(true);
   } else {
     videoEl.pause();
+    flashCenterBurst(false);
   }
   wakePlayerHud();
   updateHudControlsVisuals();
@@ -839,7 +859,7 @@ function renderHudPopupMenu() {
 }
 
 function togglePlayerFullscreen() {
-  const target = document.getElementById('n77-player') || document.querySelector('.player-fullscreen');
+  const target = document.querySelector('.player-fullscreen') || document.getElementById('n77-player');
   if (!target || typeof document === 'undefined') return;
   if (document.fullscreenElement) {
     document.exitFullscreen?.().catch(() => {});
@@ -856,7 +876,7 @@ async function triggerHlsFailover(item, reason = 'Playback failed') {
   const { next } = recordFailoverAttempt(state.failoverState, reason);
   if (next && next.kind === 'hls') {
     state.activeSourceIndex = next.index;
-    showToast(`Failover: ${next.source.name}`);
+    showToast(`Switching mirror: ${next.source.name}`);
     const videoEl = document.getElementById('hls-video-player');
     if (videoEl) {
       videoEl.dataset.embedUrl = next.source.url;
@@ -869,89 +889,37 @@ async function triggerHlsFailover(item, reason = 'Playback failed') {
     return;
   }
 
+  if (next && Number.isInteger(next.index)) {
+    state.activeSourceIndex = next.index;
+  }
   const embedUrl = next?.kind === 'embed' ? next.source.url : '';
   fallbackToEmbedPlayer(
     item,
-    'HLS mirrors unavailable or stalled. Switched to VidLink shield player.',
+    'Switching to Cloud Stream Server...',
     embedUrl
   );
 }
 
-function fallbackToEmbedPlayer(item, message = 'Switched to VidLink shield player.', explicitUrl = '') {
+function fallbackToEmbedPlayer(item, message = 'Switched to Cloud Stream Server.', explicitUrl = '') {
   destroyHlsInstance();
   revokeActiveExternalSubBlob();
   if (message) {
     showToast(message);
   }
 
-  const fallbackUrl =
-    explicitUrl ||
-    buildPlayerEmbedUrl(item, {
-      provider: 'vidlink',
-      themeId: state.appearance.theme,
-      autoplay: state.prefs.autoplay,
-      sub: state.prefs.sub,
-      dub: state.prefs.dub,
-      uiScale: state.prefs.uiScale,
-      season: state.activeSeason,
-      episode: state.activeEpisode,
-    });
-
-  const frameBox = document.getElementById('player-frame-box');
-  if (frameBox) {
-    frameBox.innerHTML = `<iframe
-      id="vidrift-player"
-      src="${escapeHtml(fallbackUrl)}"
-      title="${escapeHtml(item.title)}"
-      allow="autoplay; fullscreen; picture-in-picture; encrypted-media"
-      allowfullscreen
-      referrerpolicy="strict-origin-when-cross-origin"
-    ></iframe>
-    ${renderPlayerEpisodesDrawer(item)}`;
-
-    const frame = document.getElementById('vidrift-player');
-    if (frame) {
-      frame.dataset.embedUrl = fallbackUrl;
-      applySandboxAttr(frame);
+  if (explicitUrl && Array.isArray(state.resolvedSources)) {
+    const matchIdx = state.resolvedSources.findIndex((s) => s.url === explicitUrl);
+    if (matchIdx >= 0) {
+      state.activeSourceIndex = matchIdx;
     }
+  } else if (Array.isArray(state.resolvedSources)) {
+    const vidlinkIdx = state.resolvedSources.findIndex((s) => s.id === 'vidlink-shield');
+    if (vidlinkIdx >= 0) state.activeSourceIndex = vidlinkIdx;
   }
 
-  const topBar = document.querySelector('.player-top-bar');
-  if (topBar) {
-    const sourcesBtn = document.getElementById('player-open-sources-btn');
-    if (sourcesBtn) {
-      sourcesBtn.classList.add('is-unlock');
-      const sp = sourcesBtn.querySelector('span');
-      if (sp) sp.textContent = 'Unlock HLS Addons';
-    }
-    const shieldMount = topBar.querySelector('.shield-pill');
-    if (shieldMount) {
-      shieldMount.outerHTML = `<button type="button" class="shield-pill" id="toggle-strict-shield-btn">
-        ${svgIcon('shield', 13)}
-        <span>No-Redirect ON</span>
-      </button>`;
-    }
-  }
-
-  const strip = document.getElementById('player-bottom-strip');
-  if (strip) {
-    strip.innerHTML = `<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
-      ${PLAYER_PROVIDERS.filter((p) => p.id !== 'vidrift' && p.id !== 'vidrift-direct').map(
-        (p) => `<button type="button" class="outline-chip ${
-          state.prefs.playerProvider === p.id ? 'is-active' : ''
-        }" data-switch-provider="${p.id}" style="height:30px;padding:0 10px;font-size:11px;">${escapeHtml(
-          p.label
-        )}</button>`
-      ).join('')}
-      <button type="button" class="outline-chip is-sources-cta is-unlock" data-open-sources="addons" style="height:30px;font-size:11px;">
-        ${svgIcon('sparkles', 12)} Unlock HLS Addons
-      </button>
-      <button type="button" class="outline-chip" id="reload-player-btn" style="height:30px;font-size:11px;">${svgIcon(
-        'refresh',
-        12
-      )} Reload</button>
-    </div>
-    <span class="dim" style="font-size:11px;">Not loading? Try VidFast HD or VidSrc Pro</span>`;
+  if (state.playerOpen && state.activeItem) {
+    syncPlayerMount({ forceReload: true });
+    return;
   }
 }
 
@@ -1045,7 +1013,7 @@ async function attachDirectVideoStream(videoEl, streamUrl, item, sourceMeta = nu
     if (sessionSeq !== hlsSessionSeq) return;
     if (!bufferingSince) bufferingSince = Date.now();
     state.hlsTelemetry.loading = true;
-    setSpinnerState(true, 'Buffering stream...');
+    setSpinnerState(true, '');
   };
   videoEl.onstalled = () => {
     if (sessionSeq !== hlsSessionSeq) return;
@@ -1057,7 +1025,13 @@ async function attachDirectVideoStream(videoEl, streamUrl, item, sourceMeta = nu
     state.hlsTelemetry.speed = Number(videoEl.playbackRate || 1);
     updateHudControlsVisuals();
   };
-  videoEl.onprogress = () => updateHudControlsVisuals();
+  videoEl.onprogress = () => {
+    if (sessionSeq !== hlsSessionSeq) return;
+    if (videoEl.buffered?.length > 0) {
+      lastProgressAt = Date.now();
+    }
+    updateHudControlsVisuals();
+  };
 
   videoEl.addEventListener(
     'loadedmetadata',
@@ -1076,20 +1050,23 @@ async function attachDirectVideoStream(videoEl, streamUrl, item, sourceMeta = nu
   videoEl.onerror = () => {
     if (sessionSeq !== hlsSessionSeq || didFailover) return;
     didFailover = true;
-    console.error('[Player] Direct video element error. Triggering failover.');
+    console.error('[Player] Direct video element error:', videoEl.error?.code, videoEl.error?.message);
     triggerHlsFailover(item, 'Direct video error');
   };
 
-  // >8s Playback Stall Watchdog & 1s Telemetry updater
+  const streamKind = classifyDirectStreamKind(streamUrl, sourceMeta);
+  const stallLimitMs = streamKind === 'video' ? 18000 : 12000;
+
+  // Stall Watchdog & 1s Telemetry updater (accounts for active buffering on large MP4s)
   stallWatchdogTimer = setInterval(() => {
     if (sessionSeq !== hlsSessionSeq || didFailover) return;
     const now = Date.now();
     const isPlayingIntent = !videoEl.paused && !videoEl.ended && !videoEl.seeking;
-    const stallRef = bufferingSince || lastProgressAt;
-    if (isPlayingIntent && videoEl.readyState < 3 && now - stallRef > 8000) {
+    const stallRef = Math.max(lastProgressAt, bufferingSince || 0);
+    if (isPlayingIntent && videoEl.readyState < 3 && now - stallRef > stallLimitMs) {
       didFailover = true;
-      console.warn('[HLS Watchdog] Playback stalled >8s. Failing over to next mirror...');
-      triggerHlsFailover(item, 'Playback stalled >8s');
+      console.warn('[HLS Watchdog] Playback stalled. Failing over to next mirror...');
+      triggerHlsFailover(item, 'Playback stalled');
       return;
     }
     if (activeHlsInstance?.bandwidthEstimate) {
@@ -1098,7 +1075,6 @@ async function attachDirectVideoStream(videoEl, streamUrl, item, sourceMeta = nu
     updateTelemetryBadge(videoEl);
   }, 1000);
 
-  const streamKind = classifyDirectStreamKind(streamUrl, sourceMeta);
   if (streamKind === 'video') {
     if (streamUrl.includes('/api/proxy/')) {
       videoEl.setAttribute('crossorigin', 'anonymous');
@@ -2985,80 +2961,124 @@ function renderPlayerEpisodesDrawer(item) {
 }
 
 function renderProHlsPlayerStage(item) {
+  const isEpisodic = item.mediaType === 'tv' || item.mediaType === 'anime';
   return `<div class="n77-player is-hud-visible is-paused" id="n77-player" tabindex="0">
-    <video id="hls-video-player" playsinline autoplay crossorigin="anonymous"></video>
+    <video id="hls-video-player" playsinline autoplay></video>
     <div class="n77-tap-layer" id="n77-tap-layer">
       <div class="n77-tap-zone n77-tap-left" data-tap-side="left" aria-hidden="true"></div>
       <div class="n77-tap-zone n77-tap-center" data-tap-side="center" aria-hidden="true"></div>
       <div class="n77-tap-zone n77-tap-right" data-tap-side="right" aria-hidden="true"></div>
     </div>
-    <div class="n77-seek-feedback is-left" id="n77-seek-fb-left">↺ 10s</div>
-    <div class="n77-seek-feedback is-right" id="n77-seek-fb-right">10s ↻</div>
+    <div class="n77-seek-feedback is-left" id="n77-seek-fb-left">
+      <span class="nf-seek-ring"></span>
+      ${svgIcon('rewind10', 32)}
+    </div>
+    <div class="n77-seek-feedback is-right" id="n77-seek-fb-right">
+      <span class="nf-seek-ring"></span>
+      ${svgIcon('forward10', 32)}
+    </div>
+    <div class="nf-center-burst" id="nf-center-burst" aria-hidden="true"></div>
     <div class="n77-spinner-overlay" id="n77-spinner">
       <div class="n77-spinner"></div>
-      <span class="n77-spinner-label" id="n77-spinner-label">Connecting stream...</span>
+      <span class="n77-spinner-label" id="n77-spinner-label" hidden></span>
     </div>
     <div class="n77-center-controls" id="n77-center-controls">
       <button type="button" class="n77-center-btn n77-skip-btn" id="n77-back10" aria-label="Rewind 10 seconds" title="Rewind 10s (J / Left)">
-        <span class="n77-skip-num">-10</span>
+        ${svgIcon('rewind10', 28)}
       </button>
       <button type="button" class="n77-center-btn n77-play-btn" id="n77-center-play-btn" aria-label="Play or Pause" title="Play/Pause (Space / K)">
-        ${svgIcon('play', 32)}
+        ${svgIcon('play', 36)}
       </button>
       <button type="button" class="n77-center-btn n77-skip-btn" id="n77-fwd10" aria-label="Forward 10 seconds" title="Forward 10s (L / Right)">
-        <span class="n77-skip-num">+10</span>
+        ${svgIcon('forward10', 28)}
       </button>
     </div>
     <div class="n77-hud" id="n77-hud">
       <div class="n77-hud-telemetry-row">
         <div class="n77-hud-badges-wrap">
-          <span class="n77-telemetry-badge" id="n77-telemetry-badge">HLS • Connecting...</span>
+          <span class="n77-telemetry-badge" id="n77-telemetry-badge">HD</span>
           <div class="n77-hud-node-badges" id="n77-hud-node-badges"></div>
         </div>
         <div class="n77-hud-popups" id="n77-hud-popups"></div>
       </div>
-      <div class="n77-timeline-wrap" id="n77-timeline-wrap" role="slider" aria-label="Seek timeline" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" tabindex="0">
-        <div class="n77-timeline-tooltip" id="n77-timeline-tooltip">0:00</div>
-        <div class="n77-timeline-track">
-          <div class="n77-timeline-buffered" id="n77-timeline-buffered"></div>
-          <div class="n77-timeline-progress" id="n77-timeline-progress">
-            <span class="n77-timeline-thumb"></span>
+      <div class="nf-scrubber-row">
+        <div class="n77-timeline-wrap" id="n77-timeline-wrap" role="slider" aria-label="Seek timeline" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" tabindex="0">
+          <div class="n77-timeline-tooltip" id="n77-timeline-tooltip">0:00</div>
+          <div class="n77-timeline-track">
+            <div class="n77-timeline-buffered" id="n77-timeline-buffered"></div>
+            <div class="n77-timeline-progress" id="n77-timeline-progress">
+              <span class="n77-timeline-thumb"></span>
+            </div>
           </div>
         </div>
+        <span class="nf-time-remaining" id="nf-time-remaining">0:00</span>
       </div>
       <div class="n77-controls-row">
         <div class="n77-controls-left">
-          <button type="button" class="n77-ctrl-btn" id="n77-play-btn" aria-label="Play or Pause">${svgIcon('play', 20)}</button>
-          <button type="button" class="n77-ctrl-btn n77-hide-xs" id="n77-bar-back10" title="Rewind 10s">-10s</button>
-          <button type="button" class="n77-ctrl-btn n77-hide-xs" id="n77-bar-fwd10" title="Forward 10s">+10s</button>
+          <button type="button" class="n77-ctrl-btn nf-icon-btn" id="n77-play-btn" aria-label="Play or Pause" title="Play/Pause (Space)">${svgIcon('play', 22)}</button>
+          <button type="button" class="n77-ctrl-btn nf-icon-btn n77-hide-xs" id="n77-bar-back10" title="Rewind 10s (J / Left)" aria-label="Rewind 10 seconds">${svgIcon('rewind10', 22)}</button>
+          <button type="button" class="n77-ctrl-btn nf-icon-btn n77-hide-xs" id="n77-bar-fwd10" title="Forward 10s (L / Right)" aria-label="Forward 10 seconds">${svgIcon('forward10', 22)}</button>
           <div class="n77-vol-group">
-            <button type="button" class="n77-ctrl-btn" id="n77-mute-btn" aria-label="Mute or Unmute (M)">${svgIcon('volumeOn', 19)}</button>
-            <input type="range" class="n77-vol-slider" id="n77-vol-slider" min="0" max="1" step="0.05" value="1" aria-label="Volume" />
+            <button type="button" class="n77-ctrl-btn nf-icon-btn" id="n77-mute-btn" aria-label="Mute or Unmute (M)" title="Mute (M)">${svgIcon('volumeOn', 20)}</button>
+            <div class="nf-vol-slider-wrap">
+              <input type="range" class="n77-vol-slider" id="n77-vol-slider" min="0" max="1" step="0.05" value="1" aria-label="Volume" />
+            </div>
           </div>
           <span class="n77-time-readout" id="n77-time-readout">0:00 / 0:00</span>
+          <span class="nf-hud-title n77-hide-xs">${escapeHtml(item.title || '')}</span>
         </div>
         <div class="n77-controls-right">
-          <button type="button" class="n77-pill-btn" id="n77-menu-mirrors" data-hud-menu="mirrors" title="Switch Stream Mirror / Node">
-            <span id="n77-mirror-label">Node</span>
+          ${
+            isEpisodic
+              ? `<button type="button" class="n77-pill-btn nf-action-pill" id="next-ep-btn" title="Next Episode">${svgIcon('next', 16)}<span class="n77-hide-xs">Next Ep</span></button>
+                 <button type="button" class="n77-ctrl-btn nf-icon-btn" id="toggle-player-ep-drawer-btn" title="Episodes" aria-label="Episodes">${svgIcon('episodes', 19)}</button>`
+              : ''
+          }
+          <button type="button" class="n77-pill-btn" id="n77-menu-subtitles" data-hud-menu="subtitles" title="Audio &amp; Subtitles (C)">
+            ${svgIcon('subtitles', 17)}
+            <span id="n77-cc-label" class="n77-hide-xs">Subtitles</span>
           </button>
-          <button type="button" class="n77-pill-btn" id="n77-menu-quality" data-hud-menu="quality" title="ABR Video Quality">
-            <span id="n77-quality-label">Auto</span>
-          </button>
-          <button type="button" class="n77-pill-btn" id="n77-menu-audio" data-hud-menu="audio" title="Audio Track">
+          <button type="button" class="n77-pill-btn n77-hide-xs" id="n77-menu-audio" data-hud-menu="audio" title="Audio Track">
             <span id="n77-audio-label">Audio</span>
           </button>
-          <button type="button" class="n77-pill-btn" id="n77-menu-subtitles" data-hud-menu="subtitles" title="Subtitles / CC (C)">
-            <span id="n77-cc-label">CC</span>
-          </button>
-          <button type="button" class="n77-pill-btn" id="n77-menu-speed" data-hud-menu="speed" title="Playback Speed">
+          <button type="button" class="n77-pill-btn n77-hide-xs" id="n77-menu-speed" data-hud-menu="speed" title="Playback Speed">
+            ${svgIcon('speed', 16)}
             <span id="n77-speed-label">1x</span>
           </button>
-          <button type="button" class="n77-ctrl-btn n77-hide-xs" id="n77-pip-btn" title="Picture in Picture" aria-label="Picture in Picture">PiP</button>
-          <button type="button" class="n77-ctrl-btn" id="n77-fullscreen-btn" title="Fullscreen (F)" aria-label="Fullscreen">⛶</button>
+          <button type="button" class="n77-pill-btn n77-hide-xs" id="n77-menu-quality" data-hud-menu="quality" title="Video Quality">
+            <span id="n77-quality-label">Auto</span>
+          </button>
+          <button type="button" class="n77-pill-btn" id="n77-menu-mirrors" data-hud-menu="mirrors" title="Switch Stream Server / Mirror">
+            ${svgIcon('servers', 16)}
+            <span id="n77-mirror-label">Servers</span>
+          </button>
+          <button type="button" class="n77-ctrl-btn nf-icon-btn n77-hide-xs" id="n77-pip-btn" title="Picture in Picture" aria-label="Picture in Picture">${svgIcon('pip', 19)}</button>
+          <button type="button" class="n77-ctrl-btn nf-icon-btn" id="n77-fullscreen-btn" title="Fullscreen (F)" aria-label="Fullscreen">${svgIcon('fullscreen', 19)}</button>
         </div>
       </div>
     </div>
     ${renderPlayerEpisodesDrawer(item)}
+  </div>`;
+}
+
+function buildEmbedServerButtonsHtml(effectiveProvider, item) {
+  const servers = PLAYER_PROVIDERS.filter((p) => p.id !== 'vidrift' && p.id !== 'vidrift-direct');
+  return `<div class="nf-server-bar">
+    ${servers
+      .map(
+        (p) => `<button type="button" class="nf-server-pill ${
+          effectiveProvider === p.id ? 'is-active' : ''
+        }" data-switch-provider="${p.id}">${escapeHtml(
+          p.id === 'hls-direct' ? 'Direct HLS' : p.id === 'vidlink' ? 'VidLink' : p.label.replace(' HD', ' HD')
+        )}</button>`
+      )
+      .join('')}
+    <button type="button" class="nf-server-pill" id="reload-player-btn" title="Reload server">${svgIcon('refresh', 13)}</button>
+    ${
+      item.mediaType !== 'movie' && item.mediaType !== 'hls'
+        ? `<button type="button" class="nf-server-pill" id="next-ep-btn" title="Next Episode">Next Ep ${svgIcon('next', 12)}</button>`
+        : ''
+    }
   </div>`;
 }
 
@@ -3143,50 +3163,47 @@ function syncPlayerMount({ forceReload = false } = {}) {
 
   if (modeMismatch || forceReload) {
     destroyHlsInstance();
-    mount.innerHTML = `<section class="player-fullscreen" aria-label="Suno Cinema Player">
+    mount.innerHTML = `<section class="player-fullscreen ${isHls ? 'is-hls-mode is-hud-visible is-paused' : 'is-embed-mode'}" aria-label="Suno Cinema Player">
       <div class="player-top-bar">
-        <div style="display:flex;align-items:center;gap:8px;min-width:0;">
-          <button type="button" class="icon-btn" id="close-player-btn" aria-label="Close player">
-            ${svgIcon('back', 22)}
+        <div class="nf-top-left">
+          <button type="button" class="icon-btn nf-back-btn" id="close-player-btn" aria-label="Back to browse">
+            ${svgIcon('back', 24)}
           </button>
           <div style="min-width:0;">
-            <div id="player-title-text" style="font-size:15px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(
+            <div id="player-title-text" class="nf-player-title">${escapeHtml(
               item.title
             )}</div>
-            <div class="dim" id="player-stream-subtitle" style="font-size:11px;">${
+            <div class="nf-player-sub" id="player-stream-subtitle">${
               item.mediaType === 'tv'
                 ? `Season ${state.activeSeason} • Episode ${state.activeEpisode}`
                 : item.mediaType === 'anime'
                 ? `Episode ${state.activeEpisode}`
                 : isHls
-                ? escapeHtml(activeSrc?.name || 'Pro HLS Stream')
-                : 'HD Stream'
+                ? ''
+                : escapeHtml(PLAYER_PROVIDERS.find((p) => p.id === effectiveProvider)?.label || 'Cloud Stream')
             }</div>
           </div>
         </div>
-        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end;">
+        <div class="nf-top-right">
+          ${!stillResolving && !isHls ? buildEmbedServerButtonsHtml(effectiveProvider, item) : ''}
           ${
-            item.mediaType === 'tv' || item.mediaType === 'anime'
-              ? `<button type="button" class="outline-chip ${
+            !isHls && (item.mediaType === 'tv' || item.mediaType === 'anime')
+              ? `<button type="button" class="nf-top-pill ${
                   state.playerEpisodesOpen ? 'is-active' : ''
-                }" id="toggle-player-ep-drawer-btn" style="height:28px;font-size:11px;">
-                  Episodes
-                </button>`
+                }" id="toggle-player-ep-drawer-btn">${svgIcon('episodes', 14)}<span>Episodes</span></button>`
               : ''
           }
-          <button type="button" class="sources-player-btn ${isHls ? '' : 'is-unlock'}" id="player-open-sources-btn" data-open-sources="addons" title="Manage Stremio Addons, Debrid, Edge Proxy &amp; Direct HLS">
+          <button type="button" class="nf-top-pill" id="player-open-sources-btn" data-open-sources="addons" title="Manage Stremio Addons, Debrid &amp; Direct HLS">
             ${svgIcon('sparkles', 13)}
-            <span>${isHls ? 'Manage Sources' : 'Unlock HLS Addons'}</span>
+            <span>Sources</span>
           </button>
           ${
-            isHls
-              ? `<span class="shield-pill" id="player-hls-pill">${svgIcon('shield', 13)}<span>Pro HLS${
-                  hlsNodes.length > 1 ? ` • ${hlsNodes.length} Nodes` : ''
-                }</span></span>`
-              : `<button type="button" class="shield-pill ${isSandboxed ? '' : 'is-warn'}" id="toggle-strict-shield-btn">
+            !isHls
+              ? `<button type="button" class="shield-pill ${isSandboxed ? '' : 'is-warn'}" id="toggle-strict-shield-btn" title="Popup &amp; Redirect Shield">
                   ${svgIcon('shield', 13)}
-                  <span>${isSandboxed ? 'No-Redirect ON' : 'Sandbox OFF'}</span>
+                  <span>${isSandboxed ? 'Shield ON' : 'Shield OFF'}</span>
                 </button>`
+              : ''
           }
         </div>
       </div>
@@ -3196,7 +3213,6 @@ function syncPlayerMount({ forceReload = false } = {}) {
           stillResolving
             ? `<div class="n77-resolving-box" id="n77-resolving-box">
                 <div class="n77-spinner"></div>
-                <span class="n77-spinner-label">Resolving stream nodes &amp; mirrors...</span>
               </div>`
             : isHls
             ? renderProHlsPlayerStage(item)
@@ -3211,8 +3227,8 @@ function syncPlayerMount({ forceReload = false } = {}) {
               ></iframe>
               ${renderPlayerEpisodesDrawer(item)}`
             : `<div class="n77-resolving-box">
-                <p style="font-size:14px;font-weight:700;color:#fff;">No direct stream resolved for this entry</p>
-                <p class="dim" style="font-size:12px;max-width:340px;text-align:center;">Connect a Stremio addon, Debrid key, or Edge Proxy to resolve direct HLS streams.</p>
+                <p style="font-size:15px;font-weight:700;color:#fff;">Playback unavailable for this entry</p>
+                <p class="dim" style="font-size:12px;max-width:340px;text-align:center;">Try another Cloud Server or connect a Stream Source.</p>
                 <button type="button" class="btn-white" data-open-sources="${
                   item.magnetUri || item.infoHash ? 'debrid' : 'addons'
                 }" style="pointer-events:auto;">${svgIcon('sparkles', 15)} Open Stream Sources</button>
@@ -3220,7 +3236,7 @@ function syncPlayerMount({ forceReload = false } = {}) {
         }
       </div>
 
-      <div class="player-bottom-strip" id="player-bottom-strip"></div>
+      <div class="player-bottom-strip" id="player-bottom-strip" hidden></div>
     </section>`;
 
     if (!stillResolving && isHls) {
@@ -3235,6 +3251,11 @@ function syncPlayerMount({ forceReload = false } = {}) {
       }
     }
   } else if (!stillResolving) {
+    const stageSection = document.querySelector('.player-fullscreen');
+    if (stageSection) {
+      stageSection.classList.toggle('is-hls-mode', isHls);
+      stageSection.classList.toggle('is-embed-mode', !isHls);
+    }
     if (!isHls && existingFrame && streamUrl) {
       const prevSandbox = existingFrame.hasAttribute('sandbox');
       applySandboxAttr(existingFrame);
@@ -3257,76 +3278,10 @@ function syncPlayerMount({ forceReload = false } = {}) {
     const epToggle = document.getElementById('toggle-player-ep-drawer-btn');
     if (epToggle) epToggle.classList.toggle('is-active', Boolean(state.playerEpisodesOpen));
 
-    const playerSourcesBtn = document.getElementById('player-open-sources-btn');
-    if (playerSourcesBtn) {
-      playerSourcesBtn.classList.toggle('is-unlock', !isHls);
-      const sp = playerSourcesBtn.querySelector('span');
-      if (sp) sp.textContent = isHls ? 'Manage Sources' : 'Unlock HLS Addons';
-    }
-
-    const hlsPillSpan = document.querySelector('#player-hls-pill span');
-    if (hlsPillSpan && isHls) {
-      hlsPillSpan.textContent = `Pro HLS${hlsNodes.length > 1 ? ` • ${hlsNodes.length} Nodes` : ''}`;
-    }
     const subLabelEl = document.getElementById('player-stream-subtitle');
-    if (subLabelEl && isHls && item.mediaType !== 'tv' && item.mediaType !== 'anime') {
-      subLabelEl.textContent = activeSrc?.name || 'Pro HLS Stream';
+    if (subLabelEl && item.mediaType !== 'tv' && item.mediaType !== 'anime') {
+      subLabelEl.textContent = isHls ? '' : PLAYER_PROVIDERS.find((p) => p.id === effectiveProvider)?.label || 'Cloud Stream';
     }
-  }
-
-  const strip = document.getElementById('player-bottom-strip');
-  if (strip) {
-    const saved = state.progressMap[getMediaKey(item)];
-    strip.innerHTML = `<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
-      ${
-        isHls && state.resolvedSources.length > 0
-          ? `<span class="dim" style="font-size:11.5px;">Node ${state.activeSourceIndex + 1}/${state.resolvedSources.length}</span>`
-          : ''
-      }
-      ${PLAYER_PROVIDERS.filter((p) => p.id !== 'vidrift' && p.id !== 'vidrift-direct').map(
-        (p) => `<button type="button" class="outline-chip ${
-          effectiveProvider === p.id ? 'is-active' : ''
-        }" data-switch-provider="${p.id}" style="height:30px;padding:0 10px;font-size:11px;">${escapeHtml(
-          p.label
-        )}</button>`
-      ).join('')}
-      <button type="button" class="outline-chip is-sources-cta ${isHls ? '' : 'is-unlock'}" data-open-sources="addons" style="height:30px;font-size:11px;">
-        ${svgIcon('sparkles', 12)} ${isHls ? 'Manage Sources' : 'Unlock HLS Addons'}
-      </button>
-      ${
-        saved?.currentTime > 15 && provider !== 'vidlink' && !isHls
-          ? `<button type="button" class="outline-chip" id="cmd-resume-btn" style="height:30px;font-size:11px;">Resume ${formatTime(
-              saved.currentTime
-            )}</button>`
-          : ''
-      }
-      <button type="button" class="outline-chip" id="reload-player-btn" style="height:30px;font-size:11px;">${svgIcon(
-        'refresh',
-        12
-      )} Reload</button>
-      ${
-        item.mediaType !== 'movie' && item.mediaType !== 'hls'
-          ? `<button type="button" class="outline-chip" id="next-ep-btn" style="height:30px;font-size:11px;">Next Ep ${svgIcon(
-              'next',
-              12
-            )}</button>`
-          : ''
-      }
-      ${
-        item.mediaType === 'anime'
-          ? `<button type="button" class="outline-chip ${state.prefs.dub ? 'is-active' : ''}" id="toggle-dub-btn" style="height:30px;font-size:11px;">${
-              state.prefs.dub ? 'Dub ON' : 'Sub'
-            }</button>`
-          : ''
-      }
-    </div>
-    <span class="dim" style="font-size:11px;">${
-      state.livePlayback.currentTime > 0
-        ? `Synced ${formatTime(state.livePlayback.currentTime)}`
-        : isHls
-        ? 'Native HLS Active'
-        : 'Video missing? Try VidFast HD or VidSrc Pro'
-    }</span>`;
   }
 }
 
@@ -4797,13 +4752,20 @@ function bindEvents() {
   });
 
   rootEl.addEventListener('pointermove', (e) => {
-    if (e.target?.closest?.('#n77-player')) {
+    if (e.target?.closest?.('.player-fullscreen')) {
       wakePlayerHud();
     }
     if (timelineDragging || e.target?.closest?.('#n77-timeline-wrap')) {
       updateSeekFromPointer(e.clientX, timelineDragging);
     }
   });
+
+  if (typeof document !== 'undefined') {
+    document.addEventListener('fullscreenchange', () => {
+      updateHudControlsVisuals();
+      wakePlayerHud();
+    });
+  }
 
   window.addEventListener('pointerup', (e) => {
     if (timelineDragging) {

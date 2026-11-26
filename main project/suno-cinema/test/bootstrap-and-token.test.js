@@ -766,3 +766,79 @@ test('Worker /api/resolve/stream accepts client hashes param to resolve Debrid w
     globalThis.fetch = origFetch;
   }
 });
+
+test('imdbId-only items build clean embed URLs and Worker /api/search recovers from typos via IMDb suggestions', async () => {
+  const { buildVidlinkEmbedUrl, buildVidriftEmbedUrl } = await import('../src/utils/vidrift.js');
+  const imdbOnlyMovie = { id: 'movie:imdb:tt0259534', imdbId: 'tt0259534', mediaType: 'movie', title: 'Ramayana' };
+  const vidlinkUrl = buildVidlinkEmbedUrl(imdbOnlyMovie);
+  const vidriftUrl = buildVidriftEmbedUrl(imdbOnlyMovie);
+  assert.ok(vidlinkUrl.includes('/movie/tt0259534'), `Expected tt0259534 in ${vidlinkUrl}`);
+  assert.ok(!vidlinkUrl.includes('movie%3Aimdb'), 'Must not leak internal catalog key into VidLink URL');
+  assert.ok(vidriftUrl.includes('/embed/movie/tt0259534'), `Expected tt0259534 in ${vidriftUrl}`);
+
+  const { default: worker } = await import('../cloudflare-hls-proxy.js');
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const href = typeof url === 'string' ? url : url.url;
+    if (href.includes('api.themoviedb.org/3/search/') && href.includes('ramanayan')) {
+      return new Response(JSON.stringify({ results: [] }), { status: 200 });
+    }
+    if (href.includes('v3.sg.media-imdb.com/suggestion/r/ramanayan.json')) {
+      return new Response(
+        JSON.stringify({
+          d: [{ id: 'tt0259534', l: 'Ramayana', y: 1993, q: 'feature', i: { imageUrl: 'https://img.example/rama.jpg' } }],
+        }),
+        { status: 200 }
+      );
+    }
+    if (href.includes('api.themoviedb.org/3/search/') && href.includes('Ramayana')) {
+      return new Response(
+        JSON.stringify({
+          results: [{ id: 84092, media_type: 'movie', title: 'Ramayana: The Legend of Prince Rama', release_date: '1993-01-01', vote_average: 8.3 }],
+        }),
+        { status: 200 }
+      );
+    }
+    return origFetch(url);
+  };
+
+  try {
+    const resp = await worker.fetch(new Request('https://edge.workers.dev/api/search?q=ramanayan'), {
+      TMDB_API_KEY: 'tmdb-key',
+    });
+    assert.equal(resp.status, 200);
+    const json = await resp.json();
+    assert.ok(json.items.some((x) => x.tmdbId === '84092' || x.imdbId === 'tt0259534'));
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
+test('Worker /api/proxy/hls bounds open-ended Range bytes=0- on large binary video files to 12MB chunks', async () => {
+  const { default: worker } = await import('../cloudflare-hls-proxy.js');
+  const origFetch = globalThis.fetch;
+  let capturedRange = '';
+  globalThis.fetch = async (url, opts = {}) => {
+    capturedRange = opts?.headers?.Range || opts?.headers?.range || '';
+    return new Response(new Uint8Array([0, 0, 0, 32]), {
+      status: 206,
+      headers: {
+        'Content-Type': 'video/mp4',
+        'Content-Range': 'bytes 0-12582911/4219823308',
+        'Accept-Ranges': 'bytes',
+      },
+    });
+  };
+
+  try {
+    const resp = await worker.fetch(
+      new Request('https://edge.workers.dev/api/proxy/hls?url=https%3A%2F%2Fcdn.example%2Foppenheimer.mp4', {
+        headers: { Range: 'bytes=0-' },
+      })
+    );
+    assert.equal(resp.status, 206);
+    assert.equal(capturedRange, 'bytes=0-12582911');
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
