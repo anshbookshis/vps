@@ -607,6 +607,143 @@ export async function fetchLanguageCatalog(language = 'English') {
   return combined;
 }
 
+export function srtToVtt(rawText) {
+  if (typeof rawText !== 'string' || !rawText.trim()) return 'WEBVTT\n\n';
+  const clean = rawText.replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n');
+  const trimmedStart = clean.trimStart();
+  if (/^WEBVTT(?:[ \t\n]|$)/i.test(trimmedStart)) {
+    return trimmedStart;
+  }
+  const converted = trimmedStart.replace(
+    /^(\d{1,2}):(\d{2}:\d{2})[,.](\d{3})([ \t]*-->[ \t]*)(\d{1,2}):(\d{2}:\d{2})[,.](\d{3})(.*)$/gm,
+    (_, h1, ms1, f1, arrow, h2, ms2, f2, rest) =>
+      `${h1.padStart(2, '0')}:${ms1}.${f1}${arrow}${h2.padStart(2, '0')}:${ms2}.${f2}${rest}`
+  );
+  return `WEBVTT\n\n${converted}`;
+}
+
+const SUB_LANG_ALIASES = {
+  en: ['eng', 'en', 'english'],
+  hi: ['hin', 'hi', 'hindi'],
+  es: ['spa', 'es', 'spanish'],
+  ja: ['jpn', 'ja', 'japanese'],
+  fr: ['fre', 'fra', 'fr', 'french'],
+  de: ['ger', 'deu', 'de', 'german'],
+  it: ['ita', 'it', 'italian'],
+  pt: ['por', 'pt', 'portuguese'],
+  ko: ['kor', 'ko', 'korean'],
+  zh: ['chi', 'zho', 'zh', 'chinese'],
+};
+
+function normalizeSubtitleLang(lang) {
+  const lower = String(lang || 'und').trim().toLowerCase();
+  for (const [iso2, list] of Object.entries(SUB_LANG_ALIASES)) {
+    if (list.includes(lower)) return { iso2, label: list[2].charAt(0).toUpperCase() + list[2].slice(1), raw: lower };
+  }
+  return { iso2: lower.slice(0, 2) || 'en', label: String(lang || 'Subtitles').toUpperCase(), raw: lower };
+}
+
+/**
+ * Fetch free CORS-enabled subtitles from OpenSubtitles v3 Stremio addon (zero API key required).
+ */
+export async function fetchFreeSubtitles(item, { season = 1, episode = 1, preferredLang = 'en' } = {}) {
+  if (!item?.imdbId) return [];
+  const isSeries = item.mediaType === 'tv' || item.mediaType === 'series';
+  const stremioType = isSeries ? 'series' : 'movie';
+  const stremioId = isSeries ? `${item.imdbId}:${Math.max(1, Number(season))}:${Math.max(1, Number(episode))}` : item.imdbId;
+  const endpoint = `https://opensubtitles-v3.strem.io/subtitles/${stremioType}/${encodeURIComponent(stremioId)}.json`;
+
+  try {
+    const data = await fetchJsonSafe(endpoint);
+    const subs = Array.isArray(data?.subtitles) ? data.subtitles : [];
+    const prefNorm = normalizeSubtitleLang(preferredLang).iso2;
+
+    const mapped = subs
+      .filter((s) => s?.url && /^https?:\/\//i.test(s.url))
+      .map((s, idx) => {
+        const norm = normalizeSubtitleLang(s.lang);
+        const rawUrl = String(s.url);
+        const format = rawUrl.toLowerCase().includes('.vtt') ? 'vtt' : 'srt';
+        return {
+          id: String(s.id || `os-${idx}`),
+          lang: norm.iso2,
+          rawLang: String(s.lang || ''),
+          label: `${norm.label}${s.subtitleFileName ? ` • ${String(s.subtitleFileName).slice(0, 28)}` : ''}`,
+          url: rawUrl,
+          format,
+          source: 'opensubtitles-v3',
+          priority: norm.iso2 === prefNorm ? 0 : norm.iso2 === 'en' ? 1 : 2,
+        };
+      })
+      .sort((a, b) => a.priority - b.priority);
+
+    // Keep up to 18 tracks with max 3 per language to keep HUD picker clean
+    const counts = new Map();
+    const trimmed = [];
+    for (const track of mapped) {
+      const c = counts.get(track.lang) || 0;
+      if (c >= 3) continue;
+      counts.set(track.lang, c + 1);
+      trimmed.push(track);
+      if (trimmed.length >= 18) break;
+    }
+    return trimmed;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Fetch an external .srt or .vtt track, convert SRT to WebVTT in-browser, and return a playable VTT URL.
+ * Falls back to configurable Edge Proxy /api/proxy/subtitles if direct CORS fetch fails.
+ */
+export async function loadSubtitleTrackAsVttUrl(track, { hlsProxyUrl = '' } = {}) {
+  if (!track?.url) return null;
+  const cleanBase = String(hlsProxyUrl || '')
+    .trim()
+    .replace(/\/api\/proxy\/(hls|subtitles)\/?$/i, '')
+    .replace(/\/+$/, '');
+  const proxyUrl = cleanBase
+    ? `${cleanBase}/api/proxy/subtitles?url=${encodeURIComponent(track.url)}`
+    : `./api/proxy/subtitles?url=${encodeURIComponent(track.url)}`;
+
+  let payloadText = '';
+  try {
+    const resp = await fetch(track.url);
+    if (resp.ok) {
+      payloadText = await resp.text();
+    }
+  } catch {
+    // Fallback to subtitle proxy
+  }
+
+  if (!payloadText) {
+    try {
+      const proxyResp = await fetch(proxyUrl);
+      if (proxyResp.ok) {
+        payloadText = await proxyResp.text();
+      }
+    } catch {
+      return null;
+    }
+  }
+
+  if (!payloadText || !payloadText.trim()) return null;
+  const vttText = srtToVtt(payloadText);
+
+  if (typeof Blob !== 'undefined' && typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function') {
+    const blob = new Blob([vttText], { type: 'text/vtt;charset=utf-8' });
+    const blobUrl = URL.createObjectURL(blob);
+    return { vttText, url: blobUrl, isBlob: true };
+  }
+
+  return {
+    vttText,
+    url: `data:text/vtt;charset=utf-8,${encodeURIComponent(vttText)}`,
+    isBlob: false,
+  };
+}
+
 export async function fetchTvSeasonsData(tmdbId, tmdbApiKey = '', imdbId = '') {
   if (imdbId) {
     try {

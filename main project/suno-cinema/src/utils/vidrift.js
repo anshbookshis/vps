@@ -37,6 +37,98 @@ export const THEME_ACCENT_HEX = {
 };
 
 /**
+ * Normalize a configured HLS Edge Proxy base URL (Cloudflare Worker or local Node server).
+ * Strips trailing slashes and accidental /api/proxy/* suffixes.
+ * @param {string} rawUrl
+ * @returns {string}
+ */
+export function cleanProxyUrl(rawUrl) {
+  const trimmed = String(rawUrl || '').trim();
+  if (!trimmed || !/^https?:\/\//i.test(trimmed)) return '';
+  return trimmed
+    .replace(/\/api\/(?:proxy\/(?:hls|subtitles)|resolve\/stream)\/?$/i, '')
+    .replace(/\/+$/, '');
+}
+
+/**
+ * Normalize a configured Stremio addon URL (strips /manifest.json and trailing slashes).
+ * @param {string} rawUrl
+ * @returns {string}
+ */
+export function cleanAddonUrl(rawUrl) {
+  const trimmed = String(rawUrl || '').trim();
+  if (!trimmed || !/^https?:\/\//i.test(trimmed)) return '';
+  return trimmed.replace(/\/manifest\.json\/?$/i, '').replace(/\/+$/, '');
+}
+
+/**
+ * Build a proxy URL for HLS manifests/segments using either a configured Edge Proxy or relative ./api/proxy/hls.
+ * Avoids double-wrapping already-proxied or blob/data URLs.
+ * @param {string} streamUrl
+ * @param {{ hlsProxyUrl?: string, referer?: string }} [options]
+ * @returns {string}
+ */
+export function buildHlsProxyUrl(streamUrl, { hlsProxyUrl = '', referer = '' } = {}) {
+  const trimmed = String(streamUrl || '').trim();
+  if (!trimmed) return '';
+  if (trimmed.startsWith('blob:') || trimmed.startsWith('data:')) return trimmed;
+
+  const base = cleanProxyUrl(hlsProxyUrl);
+  const endpoint = base ? `${base}/api/proxy/hls` : './api/proxy/hls';
+
+  if (trimmed.startsWith('/api/proxy/hls?') || trimmed.startsWith('./api/proxy/hls?')) {
+    const queryPart = trimmed.slice(trimmed.indexOf('?'));
+    return `${endpoint}${queryPart}`;
+  }
+  if (trimmed.includes('/api/proxy/hls?url=')) {
+    return trimmed;
+  }
+
+  return `${endpoint}?url=${encodeURIComponent(trimmed)}${
+    referer ? `&referer=${encodeURIComponent(referer)}` : ''
+  }`;
+}
+
+/**
+ * Build a proxy URL for external SRT/VTT subtitle conversion using either Edge Proxy or relative ./api/proxy/subtitles.
+ * @param {string} subUrl
+ * @param {{ hlsProxyUrl?: string, referer?: string }} [options]
+ * @returns {string}
+ */
+export function buildSubtitleProxyUrl(subUrl, { hlsProxyUrl = '', referer = '' } = {}) {
+  const trimmed = String(subUrl || '').trim();
+  if (!trimmed) return '';
+  if (trimmed.startsWith('blob:') || trimmed.startsWith('data:')) return trimmed;
+
+  const base = cleanProxyUrl(hlsProxyUrl);
+  const endpoint = base ? `${base}/api/proxy/subtitles` : './api/proxy/subtitles';
+  if (trimmed.includes('/api/proxy/subtitles?url=')) return trimmed;
+
+  return `${endpoint}?url=${encodeURIComponent(trimmed)}${
+    referer ? `&referer=${encodeURIComponent(referer)}` : ''
+  }`;
+}
+
+/**
+ * Normalize relative /api/proxy/* URLs returned by server.js for GitHub Pages / subpath / Edge Proxy compatibility.
+ * @param {string} sourceUrl
+ * @param {string} [hlsProxyUrl='']
+ * @returns {string}
+ */
+export function normalizeResolveApiUrl(sourceUrl, hlsProxyUrl = '') {
+  const raw = String(sourceUrl || '').trim();
+  if (!raw) return '';
+  const base = cleanProxyUrl(hlsProxyUrl);
+  if (raw.startsWith('/api/proxy/')) {
+    return base ? `${base}${raw}` : `.${raw}`;
+  }
+  if (raw.startsWith('./api/proxy/')) {
+    return base ? `${base}${raw.slice(1)}` : raw;
+  }
+  return raw;
+}
+
+/**
  * Checks whether a given URL is a direct media stream (HLS m3u8, MP4, or proxied HLS stream)
  * and not an HTML webpage or iframe embed player.
  * @param {string} url
@@ -54,13 +146,28 @@ export function isDirectStreamUrl(url) {
   ) {
     return false;
   }
-  return (
-    trimmed.includes('.m3u8') ||
-    trimmed.includes('.mp4') ||
-    trimmed.includes('/api/proxy/hls') ||
-    trimmed.startsWith('blob:') ||
-    trimmed.startsWith('data:video/')
-  );
+  const lower = trimmed.toLowerCase();
+  if (
+    lower.includes('.m3u8') ||
+    lower.includes('.mp4') ||
+    lower.includes('.m4s') ||
+    lower.includes('.webm') ||
+    lower.includes('/api/proxy/hls') ||
+    lower.startsWith('blob:') ||
+    lower.startsWith('data:video/')
+  ) {
+    return true;
+  }
+  // Support root-mounted Cloudflare Worker proxies (e.g. https://proxy.workers.dev/?url=...)
+  if (/^https?:\/\/[^?]+\?url=https?/i.test(trimmed)) {
+    try {
+      const inner = new URL(trimmed).searchParams.get('url') || '';
+      if (inner && inner !== trimmed) return isDirectStreamUrl(inner);
+    } catch {
+      return false;
+    }
+  }
+  return false;
 }
 
 /**
@@ -179,9 +286,149 @@ export function parseDirectTarget(rawInput, fallbackType = 'movie') {
   return null;
 }
 
+function buildStremioStreamUrl(addonUrl, item, { season = 1, episode = 1 } = {}) {
+  const base = cleanAddonUrl(addonUrl);
+  if (!base || !item) return '';
+  const mediaType = item.mediaType || 'movie';
+  const stremioType = mediaType === 'tv' || mediaType === 'series' ? 'series' : mediaType === 'anime' && !item.imdbId ? 'anime' : 'movie';
+  const imdbId = item.imdbId || '';
+  const tmdbId = item.tmdbId || (mediaType !== 'anime' ? item.id : '');
+  const anilistId = item.anilistId || (mediaType === 'anime' ? item.id : '');
+
+  let stremioId = '';
+  if (stremioType === 'series') {
+    stremioId = imdbId ? `${imdbId}:${season}:${episode}` : tmdbId ? `tmdb:${tmdbId}:${season}:${episode}` : '';
+  } else if (stremioType === 'anime') {
+    stremioId = anilistId ? `anilist:${anilistId}:${episode}` : '';
+  } else {
+    stremioId = imdbId || (tmdbId ? `tmdb:${tmdbId}` : '');
+  }
+
+  return stremioId ? `${base}/stream/${stremioType}/${encodeURIComponent(stremioId)}.json` : '';
+}
+
 /**
- * Resolves available stream sources for a media item (Method 3 & Method 4 architecture).
- * Queries the local /api/resolve/stream endpoint when available, and provides client-side fallbacks.
+ * Checks if a resolved source entry is a directly playable HLS / MP4 / Debrid media node (non-iframe).
+ * @param {object} source
+ * @returns {boolean}
+ */
+export function isPlayableDirectSource(source) {
+  if (!source || typeof source !== 'object' || !source.url) return false;
+  if (source.type === 'embed') return false;
+  return Boolean(
+    (source.type === 'hls' || source.type === 'direct' || source.type === 'debrid' || source.direct) &&
+      isDirectStreamUrl(source.url)
+  );
+}
+
+/**
+ * Filter an ordered source list to playable direct/HLS/debrid mirror nodes.
+ * @param {Array<object>} sources
+ * @returns {Array<object>}
+ */
+export function getPlayableHlsNodes(sources = []) {
+  return (Array.isArray(sources) ? sources : []).filter(isPlayableDirectSource);
+}
+
+/**
+ * Filter an ordered source list to shielded iframe embed fallbacks.
+ * @param {Array<object>} sources
+ * @returns {Array<object>}
+ */
+export function getEmbedFallbackNodes(sources = []) {
+  return (Array.isArray(sources) ? sources : []).filter((s) => s && s.url && s.type === 'embed');
+}
+
+/**
+ * Select the next untried stream mirror node: prioritizes remaining HLS/direct nodes before falling back to embeds.
+ * @param {Array<object>} sources
+ * @param {number} [currentIndex=-1]
+ * @param {Set<number>|Array<number>} [failedIndices=[]]
+ * @returns {{ source: object, index: number, kind: 'hls'|'embed' } | null}
+ */
+export function selectNextStreamMirror(sources = [], currentIndex = -1, failedIndices = []) {
+  if (!Array.isArray(sources) || sources.length === 0) return null;
+  const failed = failedIndices instanceof Set ? failedIndices : new Set(failedIndices);
+  const n = sources.length;
+  const start = currentIndex >= 0 ? (currentIndex + 1) % n : 0;
+
+  // 1. Scan forward (wrapping) for next untried HLS / direct node
+  for (let offset = 0; offset < n; offset += 1) {
+    const idx = (start + offset) % n;
+    if (failed.has(idx)) continue;
+    if (isPlayableDirectSource(sources[idx])) {
+      return { source: sources[idx], index: idx, kind: 'hls' };
+    }
+  }
+
+  // 2. No HLS nodes remain -> choose first untried embed fallback (preferring VidLink shield)
+  const embedOrder = [];
+  for (let i = 0; i < n; i += 1) {
+    if (!failed.has(i) && sources[i]?.type === 'embed' && sources[i]?.url) {
+      embedOrder.push(i);
+    }
+  }
+  if (embedOrder.length > 0) {
+    embedOrder.sort((a, b) => {
+      const aVidlink = sources[a].id === 'vidlink-shield' ? 0 : 1;
+      const bVidlink = sources[b].id === 'vidlink-shield' ? 0 : 1;
+      return aVidlink - bVidlink;
+    });
+    const idx = embedOrder[0];
+    return { source: sources[idx], index: idx, kind: 'embed' };
+  }
+
+  return null;
+}
+
+/**
+ * Initialize failover tracking state for an ordered mirror list.
+ * @param {Array<object>} sources
+ * @param {number} [initialIndex=0]
+ */
+export function createFailoverState(sources = [], initialIndex = 0) {
+  return {
+    sources: Array.isArray(sources) ? [...sources] : [],
+    activeIndex: initialIndex,
+    failedIndices: new Set(),
+    retriesOnCurrent: 0,
+    maxRetriesPerNode: 2,
+    history: [],
+  };
+}
+
+/**
+ * Mark the active node as failed and advance to the next mirror node (or embed fallback).
+ * @param {object} failoverState
+ * @param {string} [reason='error']
+ * @returns {{ next: { source: object, index: number, kind: 'hls'|'embed' } | null, exhaustedHls: boolean }}
+ */
+export function recordFailoverAttempt(failoverState, reason = 'error') {
+  if (!failoverState) return { next: null, exhaustedHls: true };
+  const idx = failoverState.activeIndex;
+  if (idx >= 0 && idx < failoverState.sources.length) {
+    failoverState.failedIndices.add(idx);
+    failoverState.history.push({
+      index: idx,
+      id: failoverState.sources[idx]?.id || `node-${idx}`,
+      reason,
+      at: Date.now(),
+    });
+  }
+  const next = selectNextStreamMirror(failoverState.sources, idx, failoverState.failedIndices);
+  failoverState.retriesOnCurrent = 0;
+  if (next) {
+    failoverState.activeIndex = next.index;
+  }
+  return {
+    next,
+    exhaustedHls: !next || next.kind === 'embed',
+  };
+}
+
+/**
+ * Resolves available stream sources for a media item into an ordered multi-node mirror list:
+ * Direct HLS / Edge Proxy HLS / Addon HLS / Debrid / VidLink Shield / VidRift Sandboxed.
  *
  * @param {object} item
  * @param {object} [options]
@@ -191,66 +438,219 @@ export async function fetchStreamSources(item, options = {}) {
   if (!item) return [];
   const season = Math.max(1, Number(options.season ?? item.season ?? 1));
   const episode = Math.max(1, Number(options.episode ?? item.episode ?? 1));
-  const tmdbId = item.tmdbId || (item.mediaType !== 'anime' ? item.id : '');
+  const tmdbId = item.tmdbId || (item.mediaType !== 'anime' && item.mediaType !== 'hls' ? item.id : '');
+  const imdbId = item.imdbId || '';
   const anilistId = item.anilistId || (item.mediaType === 'anime' ? item.id : '');
+  const malId = item.malId || '';
+  const apiBase = cleanProxyUrl(options.hlsProxyUrl || '');
+  const addonUrl = cleanAddonUrl(options.stremioAddonUrl || options.addonUrl || '');
+  const debridKey = String(options.debridKey || options.debridApiKey || '').trim();
+  const debridProvider = String(options.debridProvider || 'realdebrid').trim().toLowerCase();
 
-  // 1. If running with Node server, ask the stream resolver
+  // 1. Query Node server or configured Cloudflare Worker Edge Proxy /api/resolve/stream
   try {
     const q = new URLSearchParams();
     if (tmdbId) q.set('tmdbId', String(tmdbId));
+    if (imdbId) q.set('imdbId', String(imdbId));
     if (anilistId) q.set('anilistId', String(anilistId));
+    if (malId) q.set('malId', String(malId));
     if (item.mediaType) q.set('mediaType', item.mediaType);
     q.set('season', String(season));
     q.set('episode', String(episode));
-    if (item.hlsStreamUrl) q.set('directUrl', item.hlsStreamUrl);
 
-    const resp = await fetch(`./api/resolve/stream?${q.toString()}`);
-    if (resp.ok) {
-      const data = await resp.json();
-      if (Array.isArray(data.sources) && data.sources.length) {
-        return data.sources;
+    const primaryDirect =
+      item.hlsStreamUrl || (item.hlsUrl && isDirectStreamUrl(item.hlsUrl) ? item.hlsUrl : '');
+    if (primaryDirect) q.set('directUrl', primaryDirect);
+    if (item.magnetUri) q.set('magnet', item.magnetUri);
+    if (item.infoHash) q.set('hash', item.infoHash);
+
+    const headers = {};
+    if (addonUrl) headers['X-Addon-Url'] = addonUrl;
+    if (debridKey) {
+      headers['X-Debrid-Key'] = debridKey;
+      headers['X-Debrid-Provider'] = debridProvider;
+    }
+
+    const resolveEndpoint = apiBase ? `${apiBase}/api/resolve/stream` : './api/resolve/stream';
+    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const timer = controller ? setTimeout(() => controller.abort(), 4500) : null;
+    try {
+      const resp = await fetch(`${resolveEndpoint}?${q.toString()}`, {
+        headers,
+        signal: controller?.signal,
+      });
+      if (resp.ok) {
+        const data = await resp.json();
+        if (Array.isArray(data?.sources) && data.sources.length) {
+          return data.sources.map((src) => {
+            if (src.id === 'vidlink-shield' && (tmdbId || imdbId || (item.mediaType === 'anime' && malId))) {
+              return { ...src, url: buildVidlinkEmbedUrl(item, { ...options, season, episode }) };
+            }
+            if (src.id === 'vidrift-sandboxed' && (tmdbId || imdbId || anilistId)) {
+              return { ...src, url: buildVidriftEmbedUrl(item, { ...options, season, episode }) };
+            }
+            return {
+              ...src,
+              url: normalizeResolveApiUrl(src.url, apiBase),
+            };
+          });
+        }
       }
+    } finally {
+      if (timer) clearTimeout(timer);
     }
   } catch {
-    // Static hosting fallback (e.g. GitHub Pages)
+    // Static hosting fallback (e.g. GitHub Pages without Node backend)
   }
 
-  // 2. Client-side fallback sources
+  // 2. Client-side multi-node fallback (static GitHub Pages & direct CORS execution)
   const list = [];
-  const directStream = item.hlsStreamUrl || (item.hlsUrl && isDirectStreamUrl(item.hlsUrl) ? item.hlsUrl : '');
-  if (directStream) {
+  const seenUrls = new Set();
+  const candidateUrls = [
+    item.hlsUrl && isDirectStreamUrl(item.hlsUrl) ? item.hlsUrl : '',
+    item.hlsStreamUrl || '',
+    ...(Array.isArray(item.hlsMirrors) ? item.hlsMirrors : []),
+  ].filter((u) => typeof u === 'string' && u.trim() && isDirectStreamUrl(u));
+
+  const uniqueDirectUrls = [];
+  for (const u of candidateUrls) {
+    const clean = u.trim();
+    if (!seenUrls.has(clean)) {
+      seenUrls.add(clean);
+      uniqueDirectUrls.push(clean);
+    }
+  }
+
+  uniqueDirectUrls.forEach((streamUrl, idx) => {
+    const isMp4 = streamUrl.toLowerCase().includes('.mp4') && !streamUrl.toLowerCase().includes('.m3u8');
+    const isPrimary = idx === 0;
     list.push({
-      id: 'catalog-hls',
-      name: 'Direct HLS Stream (Zero Ads)',
-      type: 'hls',
-      url: directStream,
-      quality: '1080p UHD',
+      id: isPrimary ? 'catalog-hls' : `catalog-hls-mirror-${idx}`,
+      name: isPrimary ? 'Direct HLS Stream (Zero Ads)' : `Direct HLS Mirror #${idx}`,
+      type: isMp4 ? 'direct' : 'hls',
+      url: streamUrl,
+      rawUrl: streamUrl,
+      quality: isPrimary ? '1080p UHD' : '1080p',
       shielded: true,
       direct: true,
+      node: isPrimary ? 'catalog-direct' : 'catalog-mirror-direct',
+    });
+
+    if (apiBase && /^https?:\/\//i.test(streamUrl)) {
+      list.push({
+        id: isPrimary ? 'edge-proxy-hls' : `edge-proxy-hls-mirror-${idx}`,
+        name: isPrimary ? 'Edge Proxy HLS (CORS Relay)' : `Edge Proxy Mirror #${idx}`,
+        type: isMp4 ? 'direct' : 'hls',
+        url: buildHlsProxyUrl(streamUrl, { hlsProxyUrl: apiBase }),
+        rawUrl: streamUrl,
+        proxied: true,
+        quality: isPrimary ? '1080p UHD' : '1080p',
+        shielded: true,
+        direct: true,
+        node: 'edge-proxy',
+      });
+    }
+  });
+
+  // 3. Client-side Stremio addon resolution (when configured for static GitHub Pages)
+  const addonEndpoint = buildStremioStreamUrl(addonUrl, item, { season, episode });
+  if (addonEndpoint) {
+    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const timer = controller ? setTimeout(() => controller.abort(), 4500) : null;
+    try {
+      const addonResp = await fetch(addonEndpoint, {
+        headers: { Accept: 'application/json' },
+        signal: controller?.signal,
+      });
+      if (addonResp.ok) {
+        const addonData = await addonResp.json();
+        const streams = Array.isArray(addonData?.streams) ? addonData.streams : [];
+        let added = 0;
+        for (const stream of streams) {
+          if (added >= 6) break;
+          if (!stream?.url || !/^https?:\/\//i.test(stream.url)) continue;
+          const lower = stream.url.toLowerCase();
+          const isMp4 = lower.includes('.mp4') && !lower.includes('.m3u8');
+          if (stream.behaviorHints?.notWebReady === true && !lower.includes('.m3u8') && !isMp4) continue;
+
+          const reqHeaders = stream.behaviorHints?.proxyHeaders?.request || {};
+          const streamReferer = reqHeaders.Referer || reqHeaders.referer || '';
+          const label =
+            [stream.name, stream.title].filter(Boolean).join(' — ').split('\n')[0].slice(0, 80) ||
+            'Addon HLS Stream';
+          const quality = /2160|4k/i.test(label)
+            ? '4K UHD'
+            : /1080/i.test(label)
+            ? '1080p'
+            : /720/i.test(label)
+            ? '720p'
+            : 'HD';
+
+          if (apiBase) {
+            list.push({
+              id: added === 0 ? 'addon-hls' : `addon-hls-${added + 1}`,
+              name: `${label} (Edge Proxy)`,
+              type: isMp4 ? 'direct' : 'hls',
+              url: buildHlsProxyUrl(stream.url, { hlsProxyUrl: apiBase, referer: streamReferer }),
+              rawUrl: stream.url,
+              referer: streamReferer || undefined,
+              proxied: true,
+              quality,
+              shielded: true,
+              direct: true,
+              node: 'addon-edge-proxy',
+            });
+          } else if (isDirectStreamUrl(stream.url)) {
+            list.push({
+              id: added === 0 ? 'addon-hls' : `addon-hls-${added + 1}`,
+              name: label,
+              type: isMp4 ? 'direct' : 'hls',
+              url: stream.url,
+              rawUrl: stream.url,
+              quality,
+              shielded: true,
+              direct: true,
+              node: 'addon-direct',
+            });
+          }
+          added += 1;
+        }
+      }
+    } catch {
+      // Ignore addon fetch failure
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  // 4. Shielded embed fallbacks (skip when item has no TMDB/MAL/AniList IDs, e.g. raw direct stream)
+  if (tmdbId || imdbId || (item.mediaType === 'anime' && malId)) {
+    list.push({
+      id: 'vidlink-shield',
+      name: 'VidLink (No-Redirect Shield)',
+      type: 'embed',
+      url: buildVidlinkEmbedUrl(item, { ...options, season, episode }),
+      quality: '1080p',
+      shielded: true,
+      sandboxed: true,
+      direct: false,
+      node: 'vidlink',
     });
   }
 
-  const vidlinkUrl = buildVidlinkEmbedUrl(item, options);
-  list.push({
-    id: 'vidlink-shield',
-    name: 'VidLink (No-Redirect Shield)',
-    type: 'embed',
-    url: vidlinkUrl,
-    quality: '1080p',
-    shielded: true,
-    sandboxed: true,
-  });
-
-  const vidriftUrl = buildVidriftEmbedUrl(item, options);
-  list.push({
-    id: 'vidrift-sandboxed',
-    name: 'VidRift (Sandboxed)',
-    type: 'embed',
-    url: vidriftUrl,
-    quality: '720p/1080p',
-    shielded: true,
-    sandboxed: true,
-  });
+  if (tmdbId || imdbId || anilistId) {
+    list.push({
+      id: 'vidrift-sandboxed',
+      name: 'VidRift (Sandboxed)',
+      type: 'embed',
+      url: buildVidriftEmbedUrl(item, { ...options, season, episode }),
+      quality: '720p/1080p',
+      shielded: true,
+      sandboxed: true,
+      direct: false,
+      node: 'vidrift',
+    });
+  }
 
   return list;
 }

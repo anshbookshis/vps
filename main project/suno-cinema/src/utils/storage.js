@@ -118,6 +118,10 @@ export function loadPlayerPrefs() {
     customTrackQuery: '',
     phoneFrameOnDesktop: false,
     playerProvider: 'vidlink',
+    hlsProxyUrl: '',
+    debridProvider: 'realdebrid',
+    debridApiKey: '',
+    stremioAddonUrl: '',
   };
   if (typeof localStorage === 'undefined') return defaults;
   return { ...defaults, ...safeParse(localStorage.getItem(PLAYER_PREFS_KEY), {}) };
