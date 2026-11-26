@@ -93,9 +93,11 @@ export function renderSettingsSheet({ appearance, prefs, shield, profile }) {
       </div>
 
       <div style="display:flex;flex-direction:column;gap:10px;padding:12px;border-radius:10px;background:#101013;border:1px solid rgba(255,255,255,0.1);">
-        <div style="display:flex;align-items:center;justify-content:space-between;">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;">
           <span style="font-size:13px;font-weight:700;">Pro HLS Edge Proxy, Addon &amp; Debrid</span>
-          <span class="dim" style="font-size:11px;">Static / Local Node</span>
+          <button type="button" class="outline-chip" data-open-sources="addons" style="height:26px;padding:0 10px;font-size:11px;">
+            ${svgIcon('sparkles', 12)} Sources &amp; Addons Hub
+          </button>
         </div>
         <div style="display:flex;flex-direction:column;gap:5px;">
           <label class="dim" style="font-size:11px;" for="pref-hls-proxy">HLS Edge Proxy URL (Cloudflare Worker or Local Node)</label>
@@ -254,6 +256,416 @@ export function renderQuickLaunchSheet() {
         </div>
         <button type="submit" class="btn-white">${svgIcon('play', 16)} Launch Stream</button>
       </form>
+    </div>
+  </div>`;
+}
+
+function normalizeAddonCardList(addons, prefs) {
+  if (Array.isArray(addons)) return addons;
+  if (Array.isArray(prefs?.stremioAddons) && prefs.stremioAddons.length > 0) {
+    return prefs.stremioAddons;
+  }
+  const legacyUrl = String(prefs?.stremioAddonUrl || '').trim();
+  if (!legacyUrl) return [];
+  return [
+    {
+      url: legacyUrl,
+      name: legacyUrl.replace(/^https?:\/\//i, '').split('/')[0] || 'Stremio Addon',
+      version: '',
+      description: '',
+      types: ['movie', 'series'],
+      idPrefixes: ['tt'],
+      enabled: true,
+    },
+  ];
+}
+
+export function renderStreamSourcesModal({
+  activeTab = 'addons',
+  prefs = {},
+  addons = null,
+  addonInput = '',
+  addonLoading = false,
+  addonError = '',
+  proxyTest = null,
+  magnetInput = '',
+  magnetTitle = '',
+  directInput = '',
+  directTitle = '',
+  directType = 'movie',
+  customResolverInput = null,
+  hlsProxyInput = null,
+  debridKeyInput = null,
+  debridProviderInput = null,
+  playerOpen = false,
+  sourcesDirtyInPlayer = false,
+} = {}) {
+  const safeTab = ['addons', 'debrid', 'proxy', 'direct'].includes(activeTab) ? activeTab : 'addons';
+  const addonList = normalizeAddonCardList(addons, prefs);
+  const enabledAddons = addonList.filter((a) => a && a.enabled !== false);
+  const currentProxyVal = hlsProxyInput !== null ? hlsProxyInput : prefs?.hlsProxyUrl || '';
+  const currentCustomVal = customResolverInput !== null ? customResolverInput : prefs?.customResolverUrl || '';
+  const currentDebridProvider = debridProviderInput || prefs?.debridProvider || 'realdebrid';
+  const currentDebridKey = debridKeyInput !== null ? debridKeyInput : prefs?.debridApiKey || '';
+
+  const tabs = [
+    { id: 'addons', label: 'Stremio Addons', count: enabledAddons.length },
+    { id: 'debrid', label: 'Debrid & Magnet', activeDot: Boolean(currentDebridKey) },
+    { id: 'proxy', label: 'Edge Proxy & Resolver', activeDot: Boolean(currentProxyVal || currentCustomVal) },
+    { id: 'direct', label: 'Direct Stream' },
+  ];
+
+  let panelHtml = '';
+
+  if (safeTab === 'addons') {
+    panelHtml = `<div class="sources-panel" role="tabpanel" aria-label="Stremio Addons">
+      <div class="sources-intro">
+        Paste any Stremio addon manifest URL (<code>https://.../manifest.json</code> or <code>stremio://...</code>). Enabled addons are queried in parallel for 4K/1080p HLS &amp; Debrid streams.
+      </div>
+      <form id="sources-add-addon-form" class="sources-form">
+        <div class="sources-input-row">
+          <input
+            id="sources-addon-url-input"
+            class="field-input"
+            type="text"
+            placeholder="https://your-addon.example.com/manifest.json or stremio://..."
+            value="${escapeHtml(addonInput)}"
+            autocomplete="off"
+          />
+          <button type="submit" class="btn-white sources-submit-sm" id="sources-add-addon-btn" ${
+            addonLoading ? 'disabled' : ''
+          }>
+            ${addonLoading ? 'Inspecting...' : 'Add Addon'}
+          </button>
+        </div>
+      </form>
+      ${addonError ? `<div class="sources-alert is-error" role="alert">${escapeHtml(addonError)}</div>` : ''}
+
+      ${
+        addonList.length > 0
+          ? `<div class="sources-addon-list">
+              ${addonList
+                .map((addon) => {
+                  const enabled = addon.enabled !== false;
+                  const types = Array.isArray(addon.types) ? addon.types : [];
+                  const prefixes = Array.isArray(addon.idPrefixes) ? addon.idPrefixes : [];
+                  return `<article class="sources-addon-card ${enabled ? '' : 'is-disabled'}">
+                    <div class="sources-addon-top">
+                      <div class="sources-addon-title-wrap">
+                        <strong class="sources-addon-name">${escapeHtml(addon.name || 'Stremio Addon')}</strong>
+                        ${
+                          addon.version
+                            ? `<span class="sources-badge is-version">v${escapeHtml(addon.version)}</span>`
+                            : ''
+                        }
+                        <span class="sources-badge ${enabled ? 'is-ok' : 'is-muted'}">${
+                    enabled ? 'Active' : 'Disabled'
+                  }</span>
+                      </div>
+                      <div class="sources-addon-actions">
+                        <button
+                          type="button"
+                          class="outline-chip sources-chip-xs ${enabled ? 'is-active' : ''}"
+                          data-toggle-addon="${escapeHtml(addon.url)}"
+                          aria-pressed="${enabled ? 'true' : 'false'}"
+                        >
+                          ${enabled ? 'Disable' : 'Enable'}
+                        </button>
+                        <button
+                          type="button"
+                          class="outline-chip sources-chip-xs is-danger"
+                          data-remove-addon="${escapeHtml(addon.url)}"
+                          aria-label="Remove ${escapeHtml(addon.name || addon.url)}"
+                        >
+                          Remove
+                        </button>
+                      </div>
+                    </div>
+                    <div class="sources-addon-url">${escapeHtml(addon.url)}</div>
+                    ${
+                      addon.description
+                        ? `<p class="sources-addon-desc">${escapeHtml(addon.description)}</p>`
+                        : ''
+                    }
+                    ${
+                      types.length > 0 || prefixes.length > 0
+                        ? `<div class="sources-addon-badges">
+                            ${types
+                              .slice(0, 6)
+                              .map((t) => `<span class="sources-badge is-type">${escapeHtml(t)}</span>`)
+                              .join('')}
+                            ${prefixes
+                              .slice(0, 4)
+                              .map((p) => `<span class="sources-badge is-subtle">${escapeHtml(p)}</span>`)
+                              .join('')}
+                          </div>`
+                        : ''
+                    }
+                  </article>`;
+                })
+                .join('')}
+            </div>`
+          : `<div class="sources-empty-box">
+              <strong>No Stremio addons connected yet</strong>
+              <p class="dim">Add a Stremio stream addon manifest URL above to unlock direct HTTP/HLS or Debrid-cached streams across movies &amp; series. Public-domain films also auto-resolve via Archive.org when available.</p>
+            </div>`
+      }
+    </div>`;
+  } else if (safeTab === 'debrid') {
+    panelHtml = `<div class="sources-panel" role="tabpanel" aria-label="Debrid and Magnet">
+      <form id="sources-debrid-form" class="sources-card">
+        <div class="sources-card-head">
+          <strong>Instant-Cache Debrid Key</strong>
+          <span class="sources-badge ${currentDebridKey ? 'is-ok' : 'is-muted'}">${
+      currentDebridKey ? 'Configured' : 'Optional'
+    }</span>
+        </div>
+        <p class="dim sources-card-sub">
+          Pair Real-Debrid or TorBox with Stremio torrent addons to convert top 4K/1080p cached torrents into instant direct streams (requires local Node server or Cloudflare Edge Proxy).
+        </p>
+        <div class="sources-grid-2">
+          <div class="sources-field">
+            <label class="dim" for="sources-debrid-provider">Provider</label>
+            <select id="sources-debrid-provider" class="field-select">
+              <option value="realdebrid" ${currentDebridProvider === 'realdebrid' ? 'selected' : ''}>Real-Debrid</option>
+              <option value="torbox" ${currentDebridProvider === 'torbox' ? 'selected' : ''}>TorBox</option>
+            </select>
+          </div>
+          <div class="sources-field">
+            <label class="dim" for="sources-debrid-key">API Token</label>
+            <input
+              id="sources-debrid-key"
+              class="field-input"
+              type="password"
+              placeholder="Paste Real-Debrid or TorBox token"
+              value="${escapeHtml(currentDebridKey)}"
+              autocomplete="off"
+            />
+          </div>
+        </div>
+        <button type="submit" class="btn-white" id="sources-save-debrid-btn">Save Debrid Credentials</button>
+      </form>
+
+      <form id="sources-magnet-form" class="sources-card">
+        <div class="sources-card-head">
+          <strong>Magnet / InfoHash Direct Launcher</strong>
+          <span class="sources-badge is-type">Torrent → Stream</span>
+        </div>
+        ${
+          !currentDebridKey
+            ? `<div class="sources-alert is-warn">Save a Real-Debrid or TorBox API key above (with Node server or Edge Proxy) before launching magnet links.</div>`
+            : ''
+        }
+        <div class="sources-field">
+          <label class="dim" for="sources-magnet-input">Magnet URI or 40-char InfoHash</label>
+          <input
+            id="sources-magnet-input"
+            class="field-input"
+            type="text"
+            placeholder="magnet:?xt=urn:btih:... or 40-char SHA-1 infoHash"
+            value="${escapeHtml(magnetInput)}"
+            autocomplete="off"
+            required
+          />
+        </div>
+        <div class="sources-field">
+          <label class="dim" for="sources-magnet-title">Title (optional)</label>
+          <input
+            id="sources-magnet-title"
+            class="field-input"
+            type="text"
+            placeholder="e.g. Open Cinema Feature"
+            value="${escapeHtml(magnetTitle)}"
+          />
+        </div>
+        <button type="submit" class="btn-dark" id="sources-launch-magnet-btn">
+          ${svgIcon('play', 16)} Resolve &amp; Play Magnet
+        </button>
+      </form>
+    </div>`;
+  } else if (safeTab === 'proxy') {
+    const pTest = proxyTest || { status: 'idle', message: '' };
+    panelHtml = `<div class="sources-panel" role="tabpanel" aria-label="Edge Proxy and Custom Resolver">
+      <form id="sources-proxy-form" class="sources-card">
+        <div class="sources-card-head">
+          <strong>HLS Edge Proxy &amp; Custom Resolver</strong>
+          <span class="sources-badge ${currentProxyVal ? 'is-ok' : 'is-muted'}">${
+      currentProxyVal ? 'Proxy Set' : 'Same-Origin / Direct'
+    }</span>
+        </div>
+        <div class="sources-field">
+          <label class="dim" for="sources-hls-proxy-input">HLS Edge Proxy Base URL (Cloudflare Worker or Node server)</label>
+          <div class="sources-input-row">
+            <input
+              id="sources-hls-proxy-input"
+              class="field-input"
+              type="url"
+              placeholder="https://your-proxy.workers.dev or http://localhost:3000"
+              value="${escapeHtml(currentProxyVal)}"
+              autocomplete="off"
+            />
+            <button type="button" class="btn-dark sources-submit-sm" id="sources-test-proxy-btn" ${
+              pTest.status === 'testing' ? 'disabled' : ''
+            }>
+              ${pTest.status === 'testing' ? 'Testing...' : 'Test Proxy'}
+            </button>
+          </div>
+        </div>
+        ${
+          pTest.status && pTest.status !== 'idle'
+            ? `<div id="sources-proxy-test-result" class="sources-proxy-status is-${escapeHtml(pTest.status)}">
+                ${escapeHtml(pTest.message || '')}
+              </div>`
+            : `<div id="sources-proxy-test-result" class="sources-proxy-status is-idle">
+                Click <strong>Test Proxy</strong> to ping <code>/api/health</code> and verify CORS, Range forwarding &amp; addon resolution.
+              </div>`
+        }
+
+        <div class="sources-field">
+          <label class="dim" for="sources-custom-resolver-input">Custom Resolver / Jellyfin / Emby URL Template (optional)</label>
+          <input
+            id="sources-custom-resolver-input"
+            class="field-input"
+            type="url"
+            placeholder="https://media.example.com/resolve?imdb={imdbId}&amp;tmdb={tmdbId}&amp;type={mediaType}&amp;s={season}&amp;e={episode}"
+            value="${escapeHtml(currentCustomVal)}"
+            autocomplete="off"
+          />
+          <div class="sources-token-row">
+            <span class="sources-badge is-subtle">{imdbId}</span>
+            <span class="sources-badge is-subtle">{tmdbId}</span>
+            <span class="sources-badge is-subtle">{mediaType}</span>
+            <span class="sources-badge is-subtle">{season}</span>
+            <span class="sources-badge is-subtle">{episode}</span>
+          </div>
+        </div>
+
+        <button type="submit" class="btn-white" id="sources-save-proxy-btn">Save Edge Proxy &amp; Resolver</button>
+      </form>
+
+      <div class="sources-tip-box">
+        <strong>Cloudflare Worker Tip (Static GitHub Pages)</strong>
+        <p class="dim">
+          Deploy <code>cloudflare-hls-proxy.js</code> from the Suno Cinema repository to Cloudflare Workers (free tier) and paste its <code>https://*.workers.dev</code> URL above. It unlocks CORS manifest/segment proxying, Referer forwarding, SRT→VTT subtitle conversion, Stremio addon inspection, and batch Debrid resolution from any static site.
+        </p>
+      </div>
+    </div>`;
+  } else {
+    panelHtml = `<div class="sources-panel" role="tabpanel" aria-label="Direct Stream">
+      <form id="sources-direct-form" class="sources-card">
+        <div class="sources-card-head">
+          <strong>Direct HLS (.m3u8) / MP4 / ID Launcher</strong>
+          <span class="sources-badge is-type">Zero Ads</span>
+        </div>
+        <p class="dim sources-card-sub">
+          Launch any authorized <code>https://</code> HLS playlist (<code>.m3u8</code>), <code>.mp4</code> stream, or TMDB / AniList ID directly in Suno Cinema's player.
+        </p>
+        <div class="sources-field">
+          <label class="dim" for="sources-direct-input">Stream URL or TMDB / AniList ID</label>
+          <input
+            id="sources-direct-input"
+            class="field-input"
+            type="text"
+            placeholder="https://.../master.m3u8, https://.../video.mp4, or 27205"
+            value="${escapeHtml(directInput)}"
+            required
+          />
+        </div>
+        <div class="sources-grid-2">
+          <div class="sources-field">
+            <label class="dim" for="sources-direct-type">Media Type (for IDs)</label>
+            <select id="sources-direct-type" class="field-select">
+              <option value="movie" ${directType === 'movie' ? 'selected' : ''}>Movie (TMDB)</option>
+              <option value="tv" ${directType === 'tv' ? 'selected' : ''}>TV Series (TMDB)</option>
+              <option value="anime" ${directType === 'anime' ? 'selected' : ''}>Anime (AniList)</option>
+            </select>
+          </div>
+          <div class="sources-field">
+            <label class="dim" for="sources-direct-title">Title (optional)</label>
+            <input
+              id="sources-direct-title"
+              class="field-input"
+              type="text"
+              placeholder="Custom display title"
+              value="${escapeHtml(directTitle)}"
+            />
+          </div>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+          <button type="button" class="outline-chip sources-chip-xs" data-fill-direct="https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8" data-fill-title="Big Buck Bunny (Mux 1080p)">
+            Test Mux 1080p HLS
+          </button>
+          <button type="button" class="outline-chip sources-chip-xs" data-fill-direct="https://cph-p2p-msl.akamaized.net/hls/live/2000341/test/master.m3u8" data-fill-title="Tears of Steel (Akamai HLS)">
+            Test Akamai HLS
+          </button>
+        </div>
+        <button type="submit" class="btn-white" id="sources-launch-direct-btn">
+          ${svgIcon('play', 16)} Launch Direct Stream
+        </button>
+      </form>
+    </div>`;
+  }
+
+  return `<div class="sheet-backdrop" data-close-modal="true">
+    <div class="sheet-card sources-hub-card" role="dialog" aria-modal="true" aria-label="Stream Sources & Addons" onclick="event.stopPropagation()">
+      <div class="sheet-grab-bar" aria-hidden="true"></div>
+      <div class="sources-hub-header">
+        <div>
+          <h2 class="sources-hub-title">${svgIcon('sparkles', 18)} Stream Sources &amp; Addons</h2>
+          <p class="dim sources-hub-sub">Connect Stremio addons, Debrid instant cache, Edge Proxy, or direct HLS streams for any title.</p>
+        </div>
+        <button type="button" class="icon-btn" data-close-modal="true" aria-label="Close">
+          ${svgIcon('close', 20)}
+        </button>
+      </div>
+
+      <div class="sources-status-strip">
+        <span class="sources-status-pill ${enabledAddons.length > 0 ? 'is-on' : ''}">
+          ${enabledAddons.length} Addon${enabledAddons.length === 1 ? '' : 's'} Active
+        </span>
+        <span class="sources-status-pill ${currentDebridKey ? 'is-on' : ''}">
+          ${currentDebridKey ? (currentDebridProvider === 'torbox' ? 'TorBox Connected' : 'Real-Debrid Connected') : 'Debrid Not Set'}
+        </span>
+        <span class="sources-status-pill ${currentProxyVal ? 'is-on' : ''}">
+          ${currentProxyVal ? 'Edge Proxy Ready' : 'Same-Origin / Direct'}
+        </span>
+      </div>
+
+      <div class="sources-tabs" role="tablist" aria-label="Source Categories">
+        ${tabs
+          .map(
+            (t) => `<button
+              type="button"
+              role="tab"
+              aria-selected="${safeTab === t.id ? 'true' : 'false'}"
+              class="sources-tab-btn ${safeTab === t.id ? 'is-active' : ''}"
+              data-sources-tab="${t.id}"
+            >
+              <span>${escapeHtml(t.label)}</span>
+              ${
+                typeof t.count === 'number' && t.count > 0
+                  ? `<span class="sources-tab-badge">${t.count}</span>`
+                  : t.activeDot
+                  ? `<span class="sources-tab-dot" aria-hidden="true"></span>`
+                  : ''
+              }
+            </button>`
+          )
+          .join('')}
+      </div>
+
+      ${panelHtml}
+
+      ${
+        playerOpen && sourcesDirtyInPlayer
+          ? `<div class="sources-reload-bar">
+              <span class="dim" style="font-size:12px;">Source settings updated — re-resolve active title?</span>
+              <button type="button" class="btn-white sources-submit-sm" id="sources-reload-player-btn">
+                ${svgIcon('refresh', 14)} Reload Active Stream
+              </button>
+            </div>`
+          : ''
+      }
     </div>
   </div>`;
 }
