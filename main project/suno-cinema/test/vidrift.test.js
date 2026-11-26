@@ -11,6 +11,17 @@ import {
   buildVidriftCommand,
   isDirectStreamUrl,
   fetchStreamSources,
+  cleanProxyUrl,
+  cleanAddonUrl,
+  buildHlsProxyUrl,
+  buildSubtitleProxyUrl,
+  normalizeResolveApiUrl,
+  isPlayableDirectSource,
+  getPlayableHlsNodes,
+  getEmbedFallbackNodes,
+  selectNextStreamMirror,
+  createFailoverState,
+  recordFailoverAttempt,
 } from '../src/utils/vidrift.js';
 
 test('parseDirectTarget handles TMDB movie, TMDB TV, AniList URLs, and shorthands', () => {
@@ -182,16 +193,154 @@ test('buildPlayerEmbedUrl safely falls back to VidLink when provider is hls-dire
   assert.equal(url.includes(VIDRIFT_ORIGIN), false);
 });
 
-test('fetchStreamSources provides direct HLS sources with client and proxy fallbacks', async () => {
+test('Edge Proxy URL formatting helpers normalize bases, preserve relative paths, and avoid double-wrapping', () => {
+  assert.equal(cleanProxyUrl('https://edge.workers.dev///'), 'https://edge.workers.dev');
+  assert.equal(cleanProxyUrl('https://edge.workers.dev/api/proxy/hls/'), 'https://edge.workers.dev');
+  assert.equal(cleanProxyUrl('http://localhost:3000/api/resolve/stream'), 'http://localhost:3000');
+  assert.equal(cleanProxyUrl('not-a-url'), '');
+
+  assert.equal(cleanAddonUrl('https://addon.example/manifest.json/'), 'https://addon.example');
+
+  assert.equal(
+    buildHlsProxyUrl('https://cdn.example/master.m3u8', { referer: 'https://site.example' }),
+    './api/proxy/hls?url=https%3A%2F%2Fcdn.example%2Fmaster.m3u8&referer=https%3A%2F%2Fsite.example'
+  );
+  assert.equal(
+    buildHlsProxyUrl('https://cdn.example/master.m3u8', {
+      hlsProxyUrl: 'https://edge.workers.dev/api/proxy/hls',
+      referer: 'https://site.example',
+    }),
+    'https://edge.workers.dev/api/proxy/hls?url=https%3A%2F%2Fcdn.example%2Fmaster.m3u8&referer=https%3A%2F%2Fsite.example'
+  );
+  // Avoid double-wrapping and pass through blob/data URLs
+  assert.equal(
+    buildHlsProxyUrl('/api/proxy/hls?url=https%3A%2F%2Fcdn.example%2Fa.m3u8', {
+      hlsProxyUrl: 'https://edge.workers.dev',
+    }),
+    'https://edge.workers.dev/api/proxy/hls?url=https%3A%2F%2Fcdn.example%2Fa.m3u8'
+  );
+  assert.equal(buildHlsProxyUrl('blob:https://suno.example/123'), 'blob:https://suno.example/123');
+
+  assert.equal(
+    buildSubtitleProxyUrl('https://subs.example/movie.srt', { hlsProxyUrl: 'https://edge.workers.dev/' }),
+    'https://edge.workers.dev/api/proxy/subtitles?url=https%3A%2F%2Fsubs.example%2Fmovie.srt'
+  );
+  assert.equal(
+    buildSubtitleProxyUrl('https://subs.example/movie.srt'),
+    './api/proxy/subtitles?url=https%3A%2F%2Fsubs.example%2Fmovie.srt'
+  );
+
+  // GitHub Pages subpath & Edge Proxy normalization
+  assert.equal(normalizeResolveApiUrl('/api/proxy/hls?url=x'), './api/proxy/hls?url=x');
+  assert.equal(
+    normalizeResolveApiUrl('/api/proxy/hls?url=x', 'https://edge.workers.dev/'),
+    'https://edge.workers.dev/api/proxy/hls?url=x'
+  );
+  assert.equal(
+    normalizeResolveApiUrl('./api/proxy/hls?url=x', 'https://edge.workers.dev'),
+    'https://edge.workers.dev/api/proxy/hls?url=x'
+  );
+});
+
+test('HlsPlayer failover & mirror selection cycles untried HLS mirrors before falling back to VidLink shield', () => {
+  const sources = [
+    { id: 'catalog-hls', type: 'hls', direct: true, url: 'https://a.example/master.m3u8' },
+    { id: 'catalog-hls-mirror-1', type: 'hls', direct: true, url: 'https://b.example/master.m3u8' },
+    { id: 'debrid-instant-cache', type: 'debrid', direct: true, url: 'https://c.example/movie.mp4' },
+    { id: 'vidrift-sandboxed', type: 'embed', direct: false, url: 'https://embed.vidrift.net/embed/movie/1' },
+    { id: 'vidlink-shield', type: 'embed', direct: false, url: 'https://vidlink.pro/movie/1' },
+  ];
+
+  assert.equal(getPlayableHlsNodes(sources).length, 3);
+  assert.equal(getEmbedFallbackNodes(sources).length, 2);
+  assert.equal(isPlayableDirectSource({ type: 'embed', url: 'https://vidlink.pro/movie/1' }), false);
+
+  const fsState = createFailoverState(sources, 0);
+  const step1 = recordFailoverAttempt(fsState, 'Network error');
+  assert.equal(step1.exhaustedHls, false);
+  assert.equal(step1.next.index, 1);
+  assert.equal(step1.next.source.id, 'catalog-hls-mirror-1');
+
+  const step2 = recordFailoverAttempt(fsState, 'Stalled >6s');
+  assert.equal(step2.exhaustedHls, false);
+  assert.equal(step2.next.index, 2);
+  assert.equal(step2.next.source.id, 'debrid-instant-cache');
+
+  // Once all HLS/direct nodes fail, prefers vidlink-shield even if listed after vidrift-sandboxed
+  const step3 = recordFailoverAttempt(fsState, 'Decode error');
+  assert.equal(step3.exhaustedHls, true);
+  assert.equal(step3.next.kind, 'embed');
+  assert.equal(step3.next.source.id, 'vidlink-shield');
+
+  // If user started on index 1 and index 1 failed, wrap-around still catches untried index 0
+  const wrapped = selectNextStreamMirror(sources, 1, new Set([1, 2]));
+  assert.equal(wrapped.index, 0);
+  assert.equal(wrapped.kind, 'hls');
+
+  //Exhausting all nodes returns null
+  const done = selectNextStreamMirror(sources, 4, new Set([0, 1, 2, 3, 4]));
+  assert.equal(done, null);
+});
+
+test('fetchStreamSources provides direct HLS sources and static GitHub Pages Edge Proxy + Stremio addon nodes', async () => {
   const itemWithHls = {
-    id: 'movie:test-bbb',
-    tmdbId: 'test-bbb',
+    id: 'movie:test-tos',
+    tmdbId: 'test-tos',
+    imdbId: 'tt2285752',
     mediaType: 'movie',
-    title: 'Big Buck Bunny',
-    hlsStreamUrl: 'https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8',
+    title: 'Tears of Steel',
+    hlsStreamUrl: 'https://test-streams.mux.dev/tos_ismc/main.m3u8',
+    hlsMirrors: ['https://cph-p2p-msl.akamaized.net/hls/live/2000341/test/master.m3u8'],
   };
-  const sources = await fetchStreamSources(itemWithHls);
-  assert.ok(Array.isArray(sources));
-  assert.ok(sources.some((s) => s.id === 'catalog-hls' && s.type === 'hls' && s.direct === true));
-  assert.ok(sources.some((s) => s.id === 'vidlink-shield' && s.sandboxed === true));
+
+  const origFetch = globalThis.fetch;
+  let capturedResolveUrl = '';
+  globalThis.fetch = async (url) => {
+    const href = String(url);
+    if (href.includes('/api/resolve/stream')) {
+      capturedResolveUrl = href;
+      throw new Error('Static GitHub Pages has no backend');
+    }
+    if (href === 'https://addon.example/stream/movie/tt2285752.json') {
+      return new Response(
+        JSON.stringify({
+          streams: [
+            {
+              name: 'Addon 1080p',
+              url: 'https://cdn.addon.example/tos/master.m3u8',
+              behaviorHints: { proxyHeaders: { request: { Referer: 'https://ref.addon.example' } } },
+            },
+          ],
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+    throw new Error(`Unexpected URL ${href}`);
+  };
+
+  try {
+    const sources = await fetchStreamSources(itemWithHls, {
+      hlsProxyUrl: 'https://edge.workers.dev/',
+      stremioAddonUrl: 'https://addon.example/manifest.json',
+    });
+
+    assert.ok(capturedResolveUrl.startsWith('https://edge.workers.dev/api/resolve/stream?'));
+    assert.ok(capturedResolveUrl.includes('imdbId=tt2285752'));
+
+    assert.ok(sources.some((s) => s.id === 'catalog-hls' && s.type === 'hls' && s.direct === true));
+    assert.ok(
+      sources.some(
+        (s) =>
+          s.id === 'edge-proxy-hls' &&
+          s.url.startsWith('https://edge.workers.dev/api/proxy/hls?url=')
+      )
+    );
+    assert.ok(sources.some((s) => s.id === 'catalog-hls-mirror-1'));
+    const addonSrc = sources.find((s) => s.id === 'addon-hls');
+    assert.ok(addonSrc, 'Must include client-side Stremio addon node on static fallback');
+    assert.ok(addonSrc.url.includes(encodeURIComponent('https://ref.addon.example')));
+    assert.ok(sources.some((s) => s.id === 'vidlink-shield' && s.sandboxed === true));
+  } finally {
+    globalThis.fetch = origFetch;
+  }
 });
