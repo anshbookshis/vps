@@ -28,7 +28,8 @@ const MIME_TYPES = {
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
-  'Access-Control-Allow-Headers': '*',
+  'Access-Control-Allow-Headers':
+    '*, Authorization, Range, Content-Type, X-Addon-Url, X-Addon-Urls, X-Debrid-Key, X-Debrid-Provider, X-Custom-Resolver, X-Tmdb-Key',
   'Access-Control-Expose-Headers': 'Content-Length, Content-Range, Accept-Ranges, Content-Type',
 };
 
@@ -962,9 +963,15 @@ async function handleSubtitleProxyRequest(req, res, reqUrl) {
   }
 }
 
+const MAX_ADDONS = 12;
+const MAX_DIRECT_ADDON_STREAMS = 12;
+const MAX_DEBRID_CANDIDATES = 6;
+
 function extractInfoHash(magnet, rawHash = '') {
   const cleanHash = String(rawHash || '').trim();
-  if (/^[a-fA-F0-9]{40}$/.test(cleanHash)) return cleanHash.toLowerCase();
+  if (/^[a-fA-F0-9]{40}$/.test(cleanHash) || /^[A-Za-z2-7]{32}$/.test(cleanHash)) {
+    return cleanHash.toLowerCase();
+  }
   const match = String(magnet || '').match(/xt=urn:btih:([a-zA-Z0-9]+)/i);
   return match ? match[1].toLowerCase() : '';
 }
@@ -979,7 +986,162 @@ function makeProxyHlsUrl(targetUrl, referer = '') {
   }`;
 }
 
-async function resolveRealDebridStream(apiKey, magnetUri) {
+/**
+ * Normalize a Stremio addon URL (converting stremio:// links to https://) and validate its scheme.
+ * Preserves template braces ({tmdbId}, etc.) when present.
+ *
+ * @param {string} rawUrl
+ * @returns {string}
+ */
+export function normalizeAddonUrl(rawUrl) {
+  let s = String(rawUrl || '').trim();
+  if (!s) return '';
+  if (/^stremio:\/\/https?:\/\//i.test(s)) {
+    s = s.replace(/^stremio:\/\//i, '');
+  } else if (/^stremio:\/\//i.test(s)) {
+    s = s.replace(/^stremio:\/\//i, 'https://');
+  }
+  if (!/^https?:\/\//i.test(s)) return '';
+  try {
+    new URL(s.replace(/\{[^}]+\}/g, 'placeholder'));
+    return s;
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Normalize a Stremio addon URL to its canonical manifest.json URL.
+ *
+ * @param {string} rawUrl
+ * @returns {string}
+ */
+export function normalizeAddonManifestUrl(rawUrl) {
+  const normalized = normalizeAddonUrl(rawUrl);
+  if (!normalized || normalized.includes('{')) return '';
+  try {
+    const u = new URL(normalized);
+    if (!u.pathname.toLowerCase().endsWith('/manifest.json') && !u.pathname.toLowerCase().endsWith('.json')) {
+      u.pathname = `${u.pathname.replace(/\/+$/, '')}/manifest.json`;
+    }
+    return u.href;
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Parse single, comma-separated, or JSON-array Stremio addon inputs (strings or { url, name, enabled } objects),
+ * normalizing stremio:// links, filtering disabled entries, and deduplicating by addon base URL.
+ *
+ * @param {string|string[]} inputs
+ * @returns {Array<{ url: string, name: string }>}
+ */
+export function parseAddonUrls(inputs) {
+  const rawValues = Array.isArray(inputs) ? inputs : [inputs];
+  const entries = [];
+  const seen = new Set();
+
+  const pushEntry = (rawUrl, name = '') => {
+    const normalized = normalizeAddonUrl(rawUrl);
+    if (!normalized) return;
+    const dedupeKey = normalized.replace(/\/manifest\.json\/?$/i, '').replace(/\/+$/, '').toLowerCase();
+    if (seen.has(dedupeKey)) return;
+    seen.add(dedupeKey);
+    entries.push({ url: normalized, name: String(name || '').trim() });
+  };
+
+  for (const raw of rawValues) {
+    if (typeof raw !== 'string') continue;
+    const trimmed = raw.trim();
+    if (!trimmed) continue;
+
+    if (trimmed.startsWith('[')) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        if (Array.isArray(parsed)) {
+          for (const item of parsed) {
+            if (typeof item === 'string') {
+              pushEntry(item);
+            } else if (item && typeof item === 'object') {
+              if (item.enabled === false) continue;
+              pushEntry(item.url || item.manifestUrl || '', item.name || '');
+            }
+          }
+          continue;
+        }
+      } catch {
+        // Fall through to delimiter split
+      }
+    }
+
+    // Split only before URL schemes so commas inside addon config paths (e.g. providers=yts,eztv) stay intact
+    const parts = trimmed.split(/[\r\n]+|,\s*(?=(?:https?|stremio):\/\/)/i);
+    for (const part of parts) {
+      pushEntry(part);
+    }
+  }
+
+  return entries.slice(0, MAX_ADDONS);
+}
+
+function detectStreamQuality(text) {
+  const s = String(text || '');
+  if (/\b(?:cam|hdcam|ts|telesync|hdts)\b/i.test(s)) {
+    return { quality: 'CAM', score: 1 };
+  }
+  if (/(?:2160p?|4k|uhd)/i.test(s)) {
+    return { quality: '4K UHD', score: 40 };
+  }
+  if (/(?:1080p?|fhd)/i.test(s)) {
+    return { quality: '1080p', score: 30 };
+  }
+  if (/(?:720p?|hd)/i.test(s)) {
+    return { quality: /720p?/i.test(s) ? '720p' : 'HD', score: 20 };
+  }
+  if (/(?:480p?|sd)/i.test(s)) {
+    return { quality: '480p', score: 10 };
+  }
+  return { quality: 'HD', score: 15 };
+}
+
+function extractSeederTiebreaker(text) {
+  const match = String(text || '').match(/👤\s*(\d+)/);
+  if (!match) return 0;
+  return Math.min(Number(match[1]) || 0, 900) / 1000;
+}
+
+function extractProxyReferer(stream) {
+  const reqHeaders = stream?.behaviorHints?.proxyHeaders?.request;
+  if (!reqHeaders || typeof reqHeaders !== 'object') return '';
+  for (const [k, v] of Object.entries(reqHeaders)) {
+    if (k.toLowerCase() === 'referer' && typeof v === 'string' && v.trim()) {
+      return v.trim();
+    }
+  }
+  return '';
+}
+
+function substituteTemplateParams(templateUrl, { tmdbId, imdbId, anilistId, malId, mediaType, season, episode }) {
+  return templateUrl
+    .replace(/\{tmdbId\}/g, encodeURIComponent(tmdbId || ''))
+    .replace(/\{imdbId\}/g, encodeURIComponent(imdbId || ''))
+    .replace(/\{anilistId\}/g, encodeURIComponent(anilistId || ''))
+    .replace(/\{malId\}/g, encodeURIComponent(malId || ''))
+    .replace(/\{mediaType\}/g, encodeURIComponent(mediaType || 'movie'))
+    .replace(/\{season\}/g, encodeURIComponent(String(season || 1)))
+    .replace(/\{episode\}/g, encodeURIComponent(String(episode || 1)));
+}
+
+function isDirectMediaUrl(rawUrl) {
+  const lower = String(rawUrl || '').toLowerCase();
+  return (
+    lower.includes('.m3u8') ||
+    /\.(mp4|m4s|webm|m4v|mov)(\?|#|$)/i.test(lower)
+  );
+}
+
+async function resolveRealDebridStream(apiKey, magnetUri, preferredFileIdx) {
   const headers = { Authorization: `Bearer ${apiKey}` };
   const addResp = await fetchWithRetry(
     'https://api.real-debrid.com/rest/1.0/torrents/addMagnet',
@@ -995,6 +1157,12 @@ async function resolveRealDebridStream(apiKey, magnetUri) {
   if (!added?.id) return null;
 
   const torrentId = added.id;
+  const cleanupTorrent = () =>
+    fetch(`https://api.real-debrid.com/rest/1.0/torrents/delete/${encodeURIComponent(torrentId)}`, {
+      method: 'DELETE',
+      headers,
+    }).catch(() => {});
+
   await fetchWithRetry(
     `https://api.real-debrid.com/rest/1.0/torrents/selectFiles/${encodeURIComponent(torrentId)}`,
     {
@@ -1010,14 +1178,39 @@ async function resolveRealDebridStream(apiKey, magnetUri) {
     { headers },
     { timeoutMs: 6000, maxRetries: 1 }
   );
-  if (!infoResp.ok) return null;
+  if (!infoResp.ok) {
+    await cleanupTorrent();
+    return null;
+  }
   const info = await infoResp.json();
   if (info?.status !== 'downloaded' || !Array.isArray(info.links) || !info.links[0]) {
-    await fetch(`https://api.real-debrid.com/rest/1.0/torrents/delete/${encodeURIComponent(torrentId)}`, {
-      method: 'DELETE',
-      headers,
-    }).catch(() => {});
+    await cleanupTorrent();
     return null;
+  }
+
+  let chosenLink = info.links[0];
+  if (info.links.length > 1 && Array.isArray(info.files)) {
+    const selectedFiles = info.files.filter((f) => f.selected === 1);
+    const preferred = Number.isInteger(preferredFileIdx) ? info.files[preferredFileIdx] : null;
+    if (preferred && preferred.selected === 1) {
+      const selIdx = selectedFiles.indexOf(preferred);
+      if (selIdx >= 0 && info.links[selIdx]) {
+        chosenLink = info.links[selIdx];
+      }
+    } else if (selectedFiles.length > 0) {
+      let bestIdx = 0;
+      let bestScore = -1;
+      selectedFiles.forEach((f, idx) => {
+        if (!info.links[idx]) return;
+        const isVideo = /\.(mp4|mkv|webm|m4v|avi|mov)$/i.test(f.path || '');
+        const score = (isVideo ? 1e15 : 0) + (f.bytes || 0);
+        if (score > bestScore) {
+          bestScore = score;
+          bestIdx = idx;
+        }
+      });
+      chosenLink = info.links[bestIdx] || info.links[0];
+    }
   }
 
   const unrestrictResp = await fetchWithRetry(
@@ -1025,18 +1218,25 @@ async function resolveRealDebridStream(apiKey, magnetUri) {
     {
       method: 'POST',
       headers: { ...headers, 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({ link: info.links[0] }).toString(),
+      body: new URLSearchParams({ link: chosenLink }).toString(),
     },
     { timeoutMs: 6000, maxRetries: 1 }
   );
-  if (!unrestrictResp.ok) return null;
+  if (!unrestrictResp.ok) {
+    await cleanupTorrent();
+    return null;
+  }
   const unrestrict = await unrestrictResp.json();
-  return unrestrict?.download && /^https?:\/\//i.test(unrestrict.download) ? unrestrict.download : null;
+  if (unrestrict?.download && /^https?:\/\//i.test(unrestrict.download)) {
+    return unrestrict.download;
+  }
+  await cleanupTorrent();
+  return null;
 }
 
-async function resolveTorBoxStream(apiKey, magnetUri, infoHash, preferredFileIdx) {
+async function resolveTorBoxStream(apiKey, magnetUri, infoHash, preferredFileIdx, { skipCacheCheck = false } = {}) {
   const headers = { Authorization: `Bearer ${apiKey}` };
-  if (infoHash) {
+  if (!skipCacheCheck && infoHash) {
     const checkResp = await fetchWithRetry(
       `https://api.torbox.app/v1/api/torrents/checkcached?hash=${encodeURIComponent(infoHash)}&format=list`,
       { headers },
@@ -1075,8 +1275,14 @@ async function resolveTorBoxStream(apiKey, magnetUri, infoHash, preferredFileIdx
 
   const picked =
     (Number.isInteger(preferredFileIdx) ? files[preferredFileIdx] : null) ||
-    files.reduce((best, f) => (!best || (f.size || 0) > (best.size || 0) ? f : best), null);
-  if (!picked?.id) return null;
+    files.reduce((best, f) => {
+      const isVideo = /\.(mp4|mkv|webm|m4v|avi|mov)$/i.test(f.name || f.short_name || '');
+      const fScore = (isVideo ? 1e15 : 0) + (f.size || 0);
+      const bestIsVideo = best ? /\.(mp4|mkv|webm|m4v|avi|mov)$/i.test(best.name || best.short_name || '') : false;
+      const bestScore = best ? (bestIsVideo ? 1e15 : 0) + (best.size || 0) : -1;
+      return fScore > bestScore ? f : best;
+    }, null);
+  if (picked?.id === undefined || picked?.id === null || picked?.id === '') return null;
 
   const dlResp = await fetchWithRetry(
     `https://api.torbox.app/v1/api/torrents/requestdl?token=${encodeURIComponent(apiKey)}&torrent_id=${encodeURIComponent(
@@ -1101,24 +1307,106 @@ export async function resolveDebridStream({ provider = 'realdebrid', apiKey, mag
     if (normProvider === 'torbox') {
       return await resolveTorBoxStream(apiKey, magnetUri, hash, fileIdx);
     }
-    return await resolveRealDebridStream(apiKey, magnetUri);
+    return await resolveRealDebridStream(apiKey, magnetUri, fileIdx);
   } catch {
     return null;
   }
 }
 
-function buildAddonStreamEndpoint({ addonUrl, tmdbId, imdbId, anilistId, mediaType, season, episode }) {
-  if (!addonUrl || !/^https?:\/\//i.test(addonUrl)) return '';
-  if (addonUrl.includes('{')) {
-    return addonUrl
-      .replace(/\{tmdbId\}/g, encodeURIComponent(tmdbId || ''))
-      .replace(/\{imdbId\}/g, encodeURIComponent(imdbId || ''))
-      .replace(/\{anilistId\}/g, encodeURIComponent(anilistId || ''))
-      .replace(/\{mediaType\}/g, encodeURIComponent(mediaType || 'movie'))
-      .replace(/\{season\}/g, encodeURIComponent(String(season || 1)))
-      .replace(/\{episode\}/g, encodeURIComponent(String(episode || 1)));
+function buildMagnetUri(candidate) {
+  if (candidate?.magnet && candidate.magnet.startsWith('magnet:')) return candidate.magnet;
+  if (candidate?.infoHash) return `magnet:?xt=urn:btih:${candidate.infoHash}`;
+  return '';
+}
+
+/**
+ * Batch-check TorBox candidates via `checkcached?hash=h1,h2,...` or iterate top Real-Debrid candidates
+ * until a cached playable stream resolves.
+ *
+ * @param {{ provider?: string, apiKey: string, candidates: Array<object> }} params
+ * @returns {Promise<{ url: string, candidate: object } | null>}
+ */
+export async function resolveDebridCandidates({ provider = 'realdebrid', apiKey, candidates = [] }) {
+  if (!apiKey || !Array.isArray(candidates) || !candidates.length) return null;
+  const normProvider = String(provider || 'realdebrid').toLowerCase().replace(/[-_\s]/g, '');
+
+  let orderedCandidates = candidates.filter((c) => c && (c.infoHash || c.magnet));
+  if (!orderedCandidates.length) return null;
+
+  if (normProvider === 'torbox') {
+    const headers = { Authorization: `Bearer ${apiKey}` };
+    const hashes = [...new Set(orderedCandidates.map((c) => c.infoHash).filter(Boolean))];
+    if (hashes.length > 0) {
+      const checkResp = await fetchWithRetry(
+        `https://api.torbox.app/v1/api/torrents/checkcached?hash=${hashes.map((h) => encodeURIComponent(h)).join(',')}&format=list`,
+        { headers },
+        { timeoutMs: 5000, maxRetries: 1 }
+      ).catch(() => null);
+
+      if (checkResp?.ok) {
+        const checkJson = await checkResp.json().catch(() => null);
+        const data = checkJson?.data;
+        if (Array.isArray(data)) {
+          if (data.length === 0) return null;
+          const cachedSet = new Set(
+            data.map((row) => String(row?.hash || row?.info_hash || '').toLowerCase()).filter(Boolean)
+          );
+          if (cachedSet.size > 0) {
+            orderedCandidates = orderedCandidates.filter(
+              (c) => c.infoHash && cachedSet.has(c.infoHash.toLowerCase())
+            );
+            if (!orderedCandidates.length) return null;
+          }
+        } else if (data && typeof data === 'object') {
+          const cachedSet = new Set(
+            Object.entries(data)
+              .filter(([, val]) => Boolean(val) && val?.cached !== false)
+              .map(([k]) => k.toLowerCase())
+          );
+          orderedCandidates = orderedCandidates.filter(
+            (c) => c.infoHash && cachedSet.has(c.infoHash.toLowerCase())
+          );
+          if (!orderedCandidates.length) return null;
+        } else if (data === null || data === false) {
+          return null;
+        }
+      }
+    }
+
+    for (const candidate of orderedCandidates) {
+      const magnetUri = buildMagnetUri(candidate);
+      if (!magnetUri) continue;
+      try {
+        const playable = await resolveTorBoxStream(apiKey, magnetUri, candidate.infoHash, candidate.fileIdx, {
+          skipCacheCheck: true,
+        });
+        if (playable) return { url: playable, candidate };
+      } catch {
+        // Try next cached candidate
+      }
+    }
+    return null;
   }
-  const addonBase = addonUrl.replace(/\/manifest\.json\/?$/i, '').replace(/\/+$/, '');
+
+  for (const candidate of orderedCandidates) {
+    const magnetUri = buildMagnetUri(candidate);
+    if (!magnetUri) continue;
+    try {
+      const playable = await resolveRealDebridStream(apiKey, magnetUri, candidate.fileIdx);
+      if (playable) return { url: playable, candidate };
+    } catch {
+      // Try next candidate
+    }
+  }
+  return null;
+}
+
+function buildAddonStreamEndpoint({ addonUrl, tmdbId, imdbId, anilistId, malId, mediaType, season, episode }) {
+  const normalized = normalizeAddonUrl(addonUrl);
+  if (!normalized) return '';
+  if (normalized.includes('{')) {
+    return substituteTemplateParams(normalized, { tmdbId, imdbId, anilistId, malId, mediaType, season, episode });
+  }
   const stremioType =
     mediaType === 'tv' || mediaType === 'series' ? 'series' : mediaType === 'anime' && !imdbId ? 'anime' : 'movie';
   const stremioId =
@@ -1134,7 +1422,414 @@ function buildAddonStreamEndpoint({ addonUrl, tmdbId, imdbId, anilistId, mediaTy
         : ''
       : imdbId || (tmdbId ? `tmdb:${tmdbId}` : '');
 
-  return stremioId ? `${addonBase}/stream/${stremioType}/${encodeURIComponent(stremioId)}.json` : '';
+  if (!stremioId) return '';
+  try {
+    const u = new URL(normalized);
+    const basePath = u.pathname.replace(/\/manifest\.json\/?$/i, '').replace(/\/+$/, '');
+    return `${u.origin}${basePath}/stream/${stremioType}/${encodeURIComponent(stremioId)}.json${u.search}`;
+  } catch {
+    const addonBase = normalized.replace(/\/manifest\.json\/?$/i, '').replace(/\/+$/, '');
+    return `${addonBase}/stream/${stremioType}/${encodeURIComponent(stremioId)}.json`;
+  }
+}
+
+function collectStreamsAndCandidates(streams, { addonName = '', maxDirect = 6, seenUrls, candidateMap }) {
+  const directStreams = [];
+  let added = 0;
+
+  for (const stream of Array.isArray(streams) ? streams : []) {
+    const rawLabel = [stream?.name, stream?.title, stream?.description]
+      .filter(Boolean)
+      .join(' — ')
+      .split('\n')[0]
+      .trim()
+      .slice(0, 80);
+    const qualityMeta = [
+      stream?.name,
+      stream?.title,
+      stream?.description,
+      stream?.behaviorHints?.filename,
+    ]
+      .filter(Boolean)
+      .join(' ');
+    const { quality, score: baseScore } = detectStreamQuality(qualityMeta);
+
+    if (stream?.url && /^https?:\/\//i.test(stream.url)) {
+      if (added >= maxDirect) continue;
+      const lowerUrl = stream.url.toLowerCase();
+      const isDirectVideo = /\.(mp4|webm|m4v|mov)(\?|#|$)/i.test(lowerUrl) || (lowerUrl.includes('.mp4') && !lowerUrl.includes('.m3u8'));
+      if (stream.behaviorHints?.notWebReady === true && !lowerUrl.includes('.m3u8') && !isDirectVideo) {
+        continue;
+      }
+      if (seenUrls.has(stream.url)) continue;
+      seenUrls.add(stream.url);
+
+      const streamReferer = extractProxyReferer(stream);
+      directStreams.push({
+        name: rawLabel || (addonName ? `${addonName} Stream` : 'Addon HLS Stream'),
+        type: isDirectVideo ? 'direct' : 'hls',
+        url: makeProxyHlsUrl(stream.url, streamReferer),
+        rawUrl: stream.url,
+        referer: streamReferer || undefined,
+        quality,
+        addonName: addonName || undefined,
+        shielded: true,
+        direct: true,
+        node: 'addon-proxy',
+      });
+      added += 1;
+      continue;
+    }
+
+    const magnetInStream = /^magnet:\?xt=urn:btih:/i.test(stream?.url || '')
+      ? stream.url
+      : /^magnet:\?xt=urn:btih:/i.test(stream?.magnet || '')
+      ? stream.magnet
+      : '';
+    const infoHash = extractInfoHash(magnetInStream, stream?.infoHash || '');
+    if (infoHash && !candidateMap.has(infoHash)) {
+      const filename = stream?.behaviorHints?.filename || '';
+      const mp4Bonus = /\.mp4$/i.test(filename) ? 0.5 : 0;
+      const seederBonus = extractSeederTiebreaker(`${stream?.title || ''} ${stream?.description || ''}`);
+      candidateMap.set(infoHash, {
+        infoHash,
+        magnet: magnetInStream,
+        fileIdx: Number.isInteger(stream?.fileIdx) ? stream.fileIdx : undefined,
+        title: rawLabel || filename || 'Torrent Stream',
+        quality,
+        qualityScore: baseScore + mp4Bonus + seederBonus,
+        addonName: addonName || undefined,
+        order: candidateMap.size,
+      });
+    }
+  }
+
+  return directStreams;
+}
+
+function buildCustomResolverPair(rawUrl, isHls, { name = '', quality = 'Original Quality', referer = '', includeDirect = true } = {}) {
+  const out = [
+    {
+      id: 'custom-resolver',
+      name: name || (isHls ? 'Custom Resolver HLS (Proxy)' : 'Custom Resolver Stream'),
+      type: isHls ? 'hls' : 'direct',
+      url: makeProxyHlsUrl(rawUrl, referer),
+      rawUrl,
+      ...(referer ? { referer } : {}),
+      quality,
+      shielded: true,
+      direct: true,
+      node: 'custom-resolver',
+    },
+  ];
+  if (isHls && includeDirect && !referer) {
+    out.push({
+      id: 'custom-resolver-direct',
+      name: 'Custom Resolver HLS (Direct)',
+      type: 'hls',
+      url: rawUrl,
+      rawUrl,
+      quality,
+      shielded: true,
+      direct: true,
+      node: 'custom-resolver-direct',
+    });
+  }
+  return out;
+}
+
+function extractCustomResolverJsonSources(data, originBase, seenUrls, candidateMap) {
+  if (Array.isArray(data?.streams)) {
+    return collectStreamsAndCandidates(data.streams, {
+      addonName: 'Custom Resolver',
+      maxDirect: 6,
+      seenUrls,
+      candidateMap,
+    }).map((s, idx) => ({
+      ...s,
+      id: idx === 0 ? 'custom-resolver' : `custom-resolver-${idx + 1}`,
+      node: 'custom-resolver',
+    }));
+  }
+
+  const out = [];
+  if (Array.isArray(data?.sources)) {
+    for (const s of data.sources.slice(0, 6)) {
+      if (!s?.url || !/^https?:\/\//i.test(s.url) || seenUrls.has(s.url)) continue;
+      seenUrls.add(s.url);
+      const isDirectVideo = /\.(mp4|webm|m4v|mov)(\?|#|$)/i.test(s.url);
+      const idx = out.length;
+      out.push({
+        id: idx === 0 ? 'custom-resolver' : `custom-resolver-${idx + 1}`,
+        name: s.name || 'Custom Resolver Stream',
+        type: s.type === 'direct' || isDirectVideo ? 'direct' : 'hls',
+        url: makeProxyHlsUrl(s.url, s.referer || ''),
+        rawUrl: s.url,
+        referer: s.referer || undefined,
+        quality: s.quality || 'HD',
+        shielded: true,
+        direct: true,
+        node: 'custom-resolver',
+      });
+    }
+    return out;
+  }
+
+  if (Array.isArray(data?.MediaSources)) {
+    for (const ms of data.MediaSources.slice(0, 4)) {
+      const rawMediaUrl =
+        ms?.TranscodingUrl || ms?.DirectStreamUrl || (ms?.Path && /^https?:\/\//i.test(ms.Path) ? ms.Path : '');
+      if (!rawMediaUrl) continue;
+      let absUrl = '';
+      try {
+        absUrl = new URL(rawMediaUrl, originBase).href;
+      } catch {
+        continue;
+      }
+      if (seenUrls.has(absUrl)) continue;
+      seenUrls.add(absUrl);
+      const idx = out.length;
+      out.push({
+        id: idx === 0 ? 'custom-resolver' : `custom-resolver-${idx + 1}`,
+        name: ms.Name ? `Media Server — ${ms.Name}` : 'Media Server Stream',
+        type: absUrl.toLowerCase().includes('.m3u8') ? 'hls' : 'direct',
+        url: makeProxyHlsUrl(absUrl),
+        rawUrl: absUrl,
+        quality: detectStreamQuality(ms.Name || '').quality,
+        shielded: true,
+        direct: true,
+        node: 'custom-resolver',
+      });
+    }
+    return out;
+  }
+
+  const singleUrl = data?.url || data?.hlsUrl || data?.streamUrl || data?.playbackUrl || data?.masterUrl || '';
+  if (singleUrl && /^https?:\/\//i.test(singleUrl) && !seenUrls.has(singleUrl)) {
+    seenUrls.add(singleUrl);
+    const isHls = singleUrl.toLowerCase().includes('.m3u8') || !/\.(mp4|webm|m4v|mov)(\?|#|$)/i.test(singleUrl);
+    const ref = typeof data?.referer === 'string' ? data.referer : '';
+    return buildCustomResolverPair(singleUrl, isHls, {
+      name: data?.name || 'Custom Resolver Stream',
+      quality: data?.quality || 'Original Quality',
+      referer: ref,
+      includeDirect: false,
+    });
+  }
+  return out;
+}
+
+async function resolveCustomEndpoint({
+  customResolverUrl,
+  tmdbId,
+  imdbId,
+  anilistId,
+  malId,
+  mediaType,
+  season,
+  episode,
+  seenUrls,
+  candidateMap,
+}) {
+  const normalized = normalizeAddonUrl(customResolverUrl);
+  if (!normalized) return { sources: [], warning: '' };
+
+  const expanded = substituteTemplateParams(normalized, {
+    tmdbId,
+    imdbId,
+    anilistId,
+    malId,
+    mediaType,
+    season,
+    episode,
+  });
+
+  let parsedUrl;
+  try {
+    parsedUrl = new URL(expanded);
+  } catch {
+    return { sources: [], warning: 'Invalid custom resolver URL template' };
+  }
+
+  if (seenUrls.has(expanded)) return { sources: [], warning: '' };
+
+  if (isDirectMediaUrl(expanded)) {
+    seenUrls.add(expanded);
+    const isHls = expanded.toLowerCase().includes('.m3u8');
+    return {
+      sources: buildCustomResolverPair(expanded, isHls, {
+        name: isHls ? 'Custom Resolver HLS (Proxy)' : 'Custom Resolver Video',
+      }),
+      warning: '',
+    };
+  }
+
+  try {
+    const resp = await fetchWithRetry(
+      expanded,
+      {
+        headers: {
+          Accept: 'application/json, application/vnd.apple.mpegurl, */*',
+          'User-Agent': 'SunoCinema/1.0',
+        },
+        redirect: 'follow',
+      },
+      { timeoutMs: 6000, maxRetries: 1, backoffMs: [200] }
+    );
+    if (!resp.ok) {
+      await resp.body?.cancel?.().catch(() => {});
+      return { sources: [], warning: `Custom resolver HTTP ${resp.status}` };
+    }
+
+    const ct = (resp.headers.get('content-type') || '').toLowerCase();
+    if (ct.includes('mpegurl') || ct.startsWith('video/') || ct.startsWith('audio/') || ct === 'application/octet-stream') {
+      await resp.body?.cancel?.().catch(() => {});
+      seenUrls.add(expanded);
+      const isHls = ct.includes('mpegurl') || expanded.toLowerCase().includes('.m3u8');
+      return { sources: buildCustomResolverPair(expanded, isHls), warning: '' };
+    }
+
+    const text = await resp.text();
+    if (text.trimStart().startsWith('#EXTM3U')) {
+      seenUrls.add(expanded);
+      return { sources: buildCustomResolverPair(expanded, true), warning: '' };
+    }
+
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      return { sources: [], warning: 'Custom resolver returned non-JSON response' };
+    }
+
+    return {
+      sources: extractCustomResolverJsonSources(data, parsedUrl.origin, seenUrls, candidateMap),
+      warning: '',
+    };
+  } catch (err) {
+    return { sources: [], warning: `Custom resolver failed: ${err.message}` };
+  }
+}
+
+async function handleAddonManifestRequest(req, res, reqUrl) {
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204, { ...CORS_HEADERS, 'Access-Control-Max-Age': '86400' });
+    return res.end();
+  }
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    return sendJson(res, 405, { ok: false, error: 'Method not allowed' });
+  }
+
+  const rawUrl = reqUrl.searchParams.get('url') || reqUrl.searchParams.get('addonUrl') || '';
+  const manifestUrl = normalizeAddonManifestUrl(rawUrl);
+  if (!manifestUrl) {
+    return sendJson(res, 400, {
+      ok: false,
+      error: 'Valid http/https/stremio addon "url" query parameter required',
+    });
+  }
+
+  const abortController = new AbortController();
+  const onResClose = () => {
+    if (!res.writableFinished) {
+      abortController.abort(new Error('Client disconnected'));
+    }
+  };
+  res.on('close', onResClose);
+
+  try {
+    let resp = await fetchWithRetry(
+      manifestUrl,
+      {
+        method: req.method === 'HEAD' ? 'HEAD' : 'GET',
+        headers: {
+          Accept: 'application/json',
+          'User-Agent': 'SunoCinema/1.0',
+        },
+        redirect: 'follow',
+        signal: abortController.signal,
+      },
+      { timeoutMs: 7000, maxRetries: 1, backoffMs: [200] }
+    );
+
+    if (req.method === 'HEAD' && resp.status === 405) {
+      await resp.body?.cancel?.().catch(() => {});
+      resp = await fetchWithRetry(
+        manifestUrl,
+        {
+          method: 'GET',
+          headers: { Accept: 'application/json', 'User-Agent': 'SunoCinema/1.0' },
+          redirect: 'follow',
+          signal: abortController.signal,
+        },
+        { timeoutMs: 7000, maxRetries: 1, backoffMs: [200] }
+      );
+    }
+
+    if (!resp.ok) {
+      await resp.body?.cancel?.().catch(() => {});
+      return sendJson(res, resp.status, {
+        ok: false,
+        error: `Upstream HTTP ${resp.status} ${resp.statusText}`.trim(),
+        manifestUrl,
+      });
+    }
+
+    if (req.method === 'HEAD') {
+      await resp.body?.cancel?.().catch(() => {});
+      res.writeHead(200, {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Cache-Control': 'no-store',
+        ...CORS_HEADERS,
+      });
+      return res.end();
+    }
+
+    const rawText = await resp.text();
+    let manifest;
+    try {
+      manifest = JSON.parse(rawText);
+    } catch {
+      return sendJson(res, 502, {
+        ok: false,
+        error: 'Addon manifest did not return valid JSON',
+        manifestUrl,
+      });
+    }
+
+    if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest) || (!manifest.id && !manifest.name)) {
+      return sendJson(res, 422, {
+        ok: false,
+        error: 'Invalid Stremio addon manifest (missing id or name)',
+        manifestUrl,
+      });
+    }
+
+    const baseUrl = manifestUrl.replace(/\/manifest\.json\/?$/i, '').replace(/\/+$/, '');
+    return sendJson(res, 200, {
+      ok: true,
+      manifestUrl,
+      baseUrl,
+      manifest,
+      id: manifest.id || '',
+      name: manifest.name || 'Stremio Addon',
+      version: manifest.version || '1.0.0',
+      description: manifest.description || '',
+      logo: manifest.logo || '',
+      types: Array.isArray(manifest.types) ? manifest.types : [],
+      resources: Array.isArray(manifest.resources) ? manifest.resources : [],
+      idPrefixes: Array.isArray(manifest.idPrefixes) ? manifest.idPrefixes : [],
+    });
+  } catch (err) {
+    if (res.destroyed || abortController.signal.aborted) return;
+    return sendJson(res, isTimeoutError(err) ? 504 : 502, {
+      ok: false,
+      error: isTimeoutError(err) ? 'Addon manifest request timed out' : `Addon manifest fetch failed: ${err.message}`,
+      manifestUrl,
+    });
+  } finally {
+    res.off('close', onResClose);
+  }
 }
 
 async function handleResolveStreamRequest(req, res, reqUrl) {
@@ -1145,6 +1840,11 @@ async function handleResolveStreamRequest(req, res, reqUrl) {
   if (req.method !== 'GET' && req.method !== 'HEAD') {
     return sendJson(res, 405, { error: 'Method not allowed' });
   }
+
+  const getHeader = (name) => {
+    const val = req.headers[name];
+    return Array.isArray(val) ? val.join(',') : typeof val === 'string' ? val : '';
+  };
 
   const tmdbId = reqUrl.searchParams.get('tmdbId') || '';
   const imdbIdParam = reqUrl.searchParams.get('imdbId') || '';
@@ -1158,22 +1858,34 @@ async function handleResolveStreamRequest(req, res, reqUrl) {
   const magnet = reqUrl.searchParams.get('magnet') || '';
   const hash = (reqUrl.searchParams.get('hash') || reqUrl.searchParams.get('infoHash') || '').trim();
 
-  const addonUrl = (
-    reqUrl.searchParams.get('addonUrl') ||
-    req.headers['x-addon-url'] ||
-    process.env.STREMIO_ADDON_URL ||
+  const requestAddonInputs = [
+    ...reqUrl.searchParams.getAll('addonUrls'),
+    ...reqUrl.searchParams.getAll('addonUrl'),
+    getHeader('x-addon-urls'),
+    getHeader('x-addon-url'),
+  ].filter((v) => typeof v === 'string' && v.trim() !== '');
+  const addonEntries =
+    requestAddonInputs.length > 0
+      ? parseAddonUrls(requestAddonInputs)
+      : parseAddonUrls([process.env.STREMIO_ADDON_URLS || '', process.env.STREMIO_ADDON_URL || '']);
+
+  const customResolverUrl = (
+    reqUrl.searchParams.get('customResolverUrl') ||
+    getHeader('x-custom-resolver') ||
+    process.env.CUSTOM_RESOLVER_URL ||
     ''
   ).trim();
+
   const debridKey = (
     reqUrl.searchParams.get('debridKey') ||
     reqUrl.searchParams.get('debridToken') ||
-    req.headers['x-debrid-key'] ||
+    getHeader('x-debrid-key') ||
     process.env.DEBRID_API_KEY ||
     ''
   ).trim();
   const debridProvider = (
     reqUrl.searchParams.get('debridProvider') ||
-    req.headers['x-debrid-provider'] ||
+    getHeader('x-debrid-provider') ||
     process.env.DEBRID_PROVIDER ||
     'realdebrid'
   )
@@ -1191,10 +1903,13 @@ async function handleResolveStreamRequest(req, res, reqUrl) {
 
   const sources = [];
   const warnings = [];
+  const seenUrls = new Set();
+  const candidateMap = new Map();
 
   // 1. Custom Direct stream URL (skip duplicate if identical to localItem primary catalog URL)
   if (directUrl && /^https?:\/\//i.test(directUrl) && directUrl !== localItem?.hlsStreamUrl) {
     const isHls = directUrl.toLowerCase().includes('.m3u8');
+    seenUrls.add(directUrl);
     sources.push({
       id: 'custom-stream',
       name: isHls ? 'Direct HLS Stream (Proxy)' : 'Direct MP4 Video',
@@ -1234,6 +1949,7 @@ async function handleResolveStreamRequest(req, res, reqUrl) {
     const isPrimary = idx === 0;
     const baseId = isPrimary ? 'catalog-hls' : `catalog-hls-mirror-${idx}`;
     const labelPrefix = isPrimary ? 'Direct HLS Stream' : `Catalog Mirror ${idx}`;
+    seenUrls.add(streamUrl);
     sources.push({
       id: baseId,
       name: `${labelPrefix} (Proxy Node)`,
@@ -1258,81 +1974,135 @@ async function handleResolveStreamRequest(req, res, reqUrl) {
     });
   });
 
-  // 3. Configurable Stremio addon / external HLS extractor
-  let pendingDebridCandidate = null;
-  const addonEndpoint = buildAddonStreamEndpoint({
-    addonUrl,
-    tmdbId,
-    imdbId,
-    anilistId,
-    mediaType,
-    season,
-    episode,
-  });
-  if (addonEndpoint) {
-    try {
-      const addonData = await fetchJsonWithTimeout(
-        addonEndpoint,
-        { headers: { Accept: 'application/json' } },
-        6000
-      );
-      const streams = Array.isArray(addonData?.streams) ? addonData.streams : [];
-      let addedCount = 0;
-      for (const stream of streams) {
-        if (addedCount >= 6) break;
-        if (stream?.url && /^https?:\/\//i.test(stream.url)) {
-          const reqProxyHeaders = stream.behaviorHints?.proxyHeaders?.request || {};
-          const streamReferer = reqProxyHeaders.Referer || reqProxyHeaders.referer || '';
-          const lowerUrl = stream.url.toLowerCase();
-          const isMp4 = lowerUrl.includes('.mp4') && !lowerUrl.includes('.m3u8');
-          if (stream.behaviorHints?.notWebReady === true && !lowerUrl.includes('.m3u8') && !isMp4) {
-            continue;
-          }
-          const label =
-            [stream.name, stream.title].filter(Boolean).join(' — ').split('\n')[0].slice(0, 80) ||
-            'Addon HLS Stream';
-          sources.push({
-            id: addedCount === 0 ? 'addon-hls' : `addon-hls-${addedCount + 1}`,
-            name: label,
-            type: isMp4 ? 'direct' : 'hls',
-            url: makeProxyHlsUrl(stream.url, streamReferer),
-            rawUrl: stream.url,
-            referer: streamReferer || undefined,
-            quality: /2160|4k/i.test(label) ? '4K UHD' : /1080/i.test(label) ? '1080p' : /720/i.test(label) ? '720p' : 'HD',
-            shielded: true,
-            direct: true,
-            node: 'addon-proxy',
-          });
-          addedCount += 1;
-        } else if (stream?.infoHash && !pendingDebridCandidate) {
-          pendingDebridCandidate = { infoHash: stream.infoHash, fileIdx: stream.fileIdx };
-        }
+  // 3. Query all enabled Stremio addons & optional custom resolver template in parallel
+  const addonTasks = addonEntries.map(async (entry) => {
+    const endpoint = buildAddonStreamEndpoint({
+      addonUrl: entry.url,
+      tmdbId,
+      imdbId,
+      anilistId,
+      malId,
+      mediaType,
+      season,
+      episode,
+    });
+    if (!endpoint) return { directStreams: [] };
+
+    let addonHost = entry.name;
+    if (!addonHost) {
+      try {
+        addonHost = new URL(endpoint).hostname;
+      } catch {
+        addonHost = 'Addon';
       }
-    } catch (err) {
-      warnings.push(`Addon lookup failed: ${err.message}`);
     }
+
+    const addonData = await fetchJsonWithTimeout(endpoint, { headers: { Accept: 'application/json' } }, 6000);
+    const streams = Array.isArray(addonData?.streams) ? addonData.streams : [];
+    return {
+      addonHost,
+      directStreams: collectStreamsAndCandidates(streams, {
+        addonName: addonHost,
+        maxDirect: 6,
+        seenUrls,
+        candidateMap,
+      }),
+    };
+  });
+
+  const customTask = customResolverUrl
+    ? resolveCustomEndpoint({
+        customResolverUrl,
+        tmdbId,
+        imdbId,
+        anilistId,
+        malId,
+        mediaType,
+        season,
+        episode,
+        seenUrls,
+        candidateMap,
+      })
+    : Promise.resolve({ sources: [], warning: '' });
+
+  const [customOutcome, addonOutcomes] = await Promise.all([
+    customTask,
+    Promise.allSettled(addonTasks),
+  ]);
+
+  if (customOutcome.warning) {
+    warnings.push(customOutcome.warning);
+  }
+  for (const s of customOutcome.sources) {
+    sources.push(s);
   }
 
-  // 4. Configurable Debrid instant-cache resolution (only emit when an actual playable URL resolves)
-  const resolvedHash = extractInfoHash(magnet, hash || pendingDebridCandidate?.infoHash || '');
-  if (debridKey && (magnet || resolvedHash)) {
-    const playable = await resolveDebridStream({
+  let addonDirectCount = 0;
+  addonOutcomes.forEach((outcome, idx) => {
+    if (outcome.status === 'rejected') {
+      const label = addonEntries[idx]?.name || addonEntries[idx]?.url || `Addon ${idx + 1}`;
+      warnings.push(`Addon lookup failed (${label}): ${outcome.reason?.message || 'Error'}`);
+      return;
+    }
+    for (const s of outcome.value?.directStreams || []) {
+      if (addonDirectCount >= MAX_DIRECT_ADDON_STREAMS) break;
+      sources.push({
+        ...s,
+        id: addonDirectCount === 0 ? 'addon-hls' : `addon-hls-${addonDirectCount + 1}`,
+      });
+      addonDirectCount += 1;
+    }
+  });
+
+  // 4. Configurable Debrid instant-cache resolution (batch TorBox checkcached or multi-candidate RD iteration)
+  const explicitHash = extractInfoHash(magnet, hash);
+  const debridCandidates = [];
+  if (explicitHash || (magnet && magnet.startsWith('magnet:'))) {
+    const matchedAddonCandidate = explicitHash ? candidateMap.get(explicitHash) : null;
+    debridCandidates.push({
+      infoHash: explicitHash,
+      magnet,
+      fileIdx: matchedAddonCandidate?.fileIdx,
+      title: matchedAddonCandidate?.title || 'Magnet / InfoHash',
+      quality: matchedAddonCandidate?.quality || 'Original',
+      qualityScore: 100,
+      isExplicit: true,
+    });
+  }
+
+  const rankedAddonCandidates = Array.from(candidateMap.values())
+    .filter((c) => !explicitHash || c.infoHash !== explicitHash)
+    .sort((a, b) => b.qualityScore - a.qualityScore || a.order - b.order);
+
+  for (const c of rankedAddonCandidates) {
+    if (debridCandidates.length >= MAX_DEBRID_CANDIDATES) break;
+    debridCandidates.push(c);
+  }
+
+  if (debridKey && debridCandidates.length > 0) {
+    const debridResult = await resolveDebridCandidates({
       provider: debridProvider,
       apiKey: debridKey,
-      magnet,
-      infoHash: resolvedHash,
-      fileIdx: pendingDebridCandidate?.fileIdx,
+      candidates: debridCandidates,
     });
-    if (playable) {
+    if (debridResult?.url) {
+      const playable = debridResult.url;
+      const winning = debridResult.candidate;
       const isHls = playable.toLowerCase().includes('.m3u8');
+      const resolvedQuality =
+        winning?.quality && winning.quality !== 'Original' ? winning.quality : '1080p Remux';
       sources.push({
         id: 'debrid-instant-cache',
-        name: `Instant Cached Stream (${debridProvider.toUpperCase()})`,
+        name:
+          winning?.title && !winning?.isExplicit
+            ? `Instant Cached (${debridProvider.toUpperCase()}) — ${winning.title.slice(0, 48)}`
+            : `Instant Cached Stream (${debridProvider.toUpperCase()})`,
         type: isHls ? 'hls' : 'direct',
         url: makeProxyHlsUrl(playable),
         rawUrl: playable,
         provider: debridProvider,
-        quality: '1080p Remux',
+        quality: resolvedQuality,
+        infoHash: winning?.infoHash || undefined,
         shielded: true,
         direct: true,
         node: 'debrid',
@@ -1397,6 +2167,7 @@ async function handleResolveStreamRequest(req, res, reqUrl) {
     mediaType,
     season,
     episode,
+    addonCount: addonEntries.length,
     sources,
     ...(warnings.length ? { warnings } : {}),
   });
@@ -1429,11 +2200,14 @@ export function createSunoCinemaServer(rootDir = ROOT_DIR) {
         embedOrigin: 'https://embed.vidrift.net',
         tmdbConfigured: Boolean(process.env.TMDB_API_KEY),
         debridConfigured: Boolean(process.env.DEBRID_API_KEY),
-        addonConfigured: Boolean(process.env.STREMIO_ADDON_URL),
+        addonConfigured: Boolean(process.env.STREMIO_ADDON_URLS || process.env.STREMIO_ADDON_URL),
+        customResolverConfigured: Boolean(process.env.CUSTOM_RESOLVER_URL),
         hlsProxyEnabled: true,
         subtitleProxyEnabled: true,
         rangeForwardingEnabled: true,
         streamResolverEnabled: true,
+        addonManifestResolverEnabled: true,
+        multiAddonEnabled: true,
         catalogCount: CATALOG_ITEMS.length,
       });
     }
@@ -1444,6 +2218,10 @@ export function createSunoCinemaServer(rootDir = ROOT_DIR) {
 
     if (pathname === '/api/proxy/subtitles') {
       return handleSubtitleProxyRequest(req, res, reqUrl);
+    }
+
+    if (pathname === '/api/resolve/addon-manifest') {
+      return handleAddonManifestRequest(req, res, reqUrl);
     }
 
     if (pathname === '/api/resolve/stream') {
