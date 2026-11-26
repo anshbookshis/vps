@@ -337,3 +337,43 @@ test('buildHlsProxyUrl passes token parameter into proxy URL', () => {
   assert.ok(proxied.includes('token=my-test-token-sig'));
   assert.ok(proxied.startsWith('https://proxy.example.com/api/proxy/hls?url='));
 });
+
+test('Cloudflare Worker /api/search handles TMDB env key cleanly', async () => {
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const href = String(url);
+    if (href.includes('api.themoviedb.org/3/search/')) {
+      return new Response(
+        JSON.stringify({
+          results: [
+            {
+              id: 27205,
+              media_type: 'movie',
+              title: 'Inception',
+              release_date: '2010-07-16',
+              vote_average: 8.4,
+              overview: 'Dream heist.',
+              poster_path: '/p.jpg',
+              backdrop_path: '/b.jpg',
+            },
+          ],
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+    return origFetch(url);
+  };
+
+  try {
+    const req = new Request('https://worker.local/api/search?q=Inception&type=movie');
+    const resp = await worker.fetch(req, { TMDB_API_KEY: 'dummy-tmdb-key' });
+    assert.strictEqual(resp.status, 200);
+    const data = await resp.json();
+    assert.strictEqual(data.items.length, 1);
+    assert.strictEqual(data.items[0].tmdbId, '27205');
+    assert.strictEqual(data.items[0].title, 'Inception');
+    assert.strictEqual(data.items[0].source, 'tmdb-edge');
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});

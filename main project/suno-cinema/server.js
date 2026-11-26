@@ -2302,12 +2302,17 @@ async function handleResolveStreamRequest(req, res, reqUrl) {
     reqUrl.searchParams.get('debridToken') ||
     getHeader('x-debrid-key') ||
     process.env.DEBRID_API_KEY ||
+    process.env.REALDEBRID_API_KEY ||
+    process.env.TORBOX_API_KEY ||
     ''
   ).trim();
+  const inferredEnvProvider =
+    process.env.DEBRID_PROVIDER ||
+    (process.env.TORBOX_API_KEY && !process.env.REALDEBRID_API_KEY ? 'torbox' : 'realdebrid');
   const debridProvider = (
     reqUrl.searchParams.get('debridProvider') ||
     getHeader('x-debrid-provider') ||
-    process.env.DEBRID_PROVIDER ||
+    inferredEnvProvider ||
     'realdebrid'
   )
     .trim()

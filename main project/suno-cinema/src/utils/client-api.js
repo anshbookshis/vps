@@ -630,7 +630,7 @@ async function searchTmdbBrowser(query, apiKey) {
  * Search across ALL movies, TV shows, and anime using free keyless APIs
  * (Cinemeta + AniList + curated local + optional TMDB key).
  */
-export async function searchAllMedia(query, tmdbApiKey = '', type = 'all') {
+export async function searchAllMedia(query, tmdbApiKey = '', type = 'all', hlsProxyUrl = '') {
   const clean = String(query || '').trim();
   if (!clean) return [];
 
@@ -641,10 +641,17 @@ export async function searchAllMedia(query, tmdbApiKey = '', type = 'all') {
     tmdbApiKey ? searchTmdbBrowser(clean, tmdbApiKey).catch(() => []) : Promise.resolve([]),
   ];
 
-  // Also check local server /api/search if running under Node server.js
-  if (typeof window !== 'undefined' && window.location.protocol.startsWith('http')) {
+  // Query configured Edge Proxy or same-origin Node /api/search so server-side TMDB key can enrich results
+  const cleanProxy = String(hlsProxyUrl || '').trim().replace(/\/+$/, '');
+  const searchEndpoints = [];
+  if (cleanProxy && /^https?:\/\//i.test(cleanProxy)) {
+    searchEndpoints.push(`${cleanProxy}/api/search?q=${encodeURIComponent(clean)}&type=${encodeURIComponent(type)}`);
+  } else if (typeof window !== 'undefined' && window.location.protocol.startsWith('http')) {
+    searchEndpoints.push(`./api/search?q=${encodeURIComponent(clean)}&type=${encodeURIComponent(type)}`);
+  }
+  for (const endpoint of searchEndpoints) {
     parallel.push(
-      fetchJsonSafe(`./api/search?q=${encodeURIComponent(clean)}&type=${encodeURIComponent(type)}`, {
+      fetchJsonSafe(endpoint, {
         headers: tmdbApiKey ? { 'x-tmdb-key': tmdbApiKey } : {},
       })
         .then((d) => d?.items || [])

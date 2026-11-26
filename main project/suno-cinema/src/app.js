@@ -3425,7 +3425,7 @@ async function runSearch(query) {
   render();
 
   try {
-    const items = await searchAllMedia(clean, state.prefs.tmdbApiKey);
+    const items = await searchAllMedia(clean, state.prefs.tmdbApiKey, 'all', state.prefs.hlsProxyUrl);
     registerItems(items);
     state.searchResults = items;
   } catch {
@@ -4849,6 +4849,8 @@ async function loadHomeDynamicFeeds() {
   }
 }
 
+const DEFAULT_PUBLIC_EDGE_PROXY = 'https://suno-cinema-edge-proxy.contactanshyadav.workers.dev';
+
 async function init() {
   if (typeof window !== 'undefined' && window.location?.search) {
     try {
@@ -4873,6 +4875,18 @@ async function init() {
         state.prefs = savePlayerPrefs(patch);
       }
     } catch {}
+  }
+
+  // Auto-connect the default Edge Proxy on static remote deployments (e.g. GitHub Pages) when unconfigured
+  if (
+    typeof window !== 'undefined' &&
+    window.location?.hostname &&
+    window.location.hostname !== 'localhost' &&
+    window.location.hostname !== '127.0.0.1' &&
+    !state.prefs.hlsProxyUrl &&
+    (!Array.isArray(state.prefs.bootstrapMirrors) || state.prefs.bootstrapMirrors.length === 0)
+  ) {
+    state.prefs = savePlayerPrefs({ hlsProxyUrl: DEFAULT_PUBLIC_EDGE_PROXY });
   }
 
   if (
