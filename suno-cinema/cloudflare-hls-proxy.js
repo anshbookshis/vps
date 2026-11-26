@@ -961,6 +961,7 @@ function computeBrowserCompatibilityBonus(metaText, filename) {
   const combined = `${filename || ''} ${metaText || ''}`;
   let bonus = 0;
   if (/\.(rar|zip|7z|iso|tar)\b/i.test(combined)) return -100;
+  if (/\b(?:vvc|h\.?266|vvenc)\b/i.test(combined)) return -120;
   if (/\.(mp4|m4v)\b/i.test(combined)) bonus += 25;
   if (/\b(?:x264|h\.?264|avc|aac)\b/i.test(combined)) bonus += 15;
   if (/\b(?:4320p|8k)\b/i.test(combined)) bonus -= 40;
@@ -1750,6 +1751,160 @@ async function handleAddonManifest(request, reqUrl) {
   });
 }
 
+async function resolveTorrentioDebridDirect({
+  addonEntries = [],
+  debridProvider = 'realdebrid',
+  debridKey = '',
+  tmdbId = '',
+  imdbId = '',
+  mediaType = 'movie',
+  season = 1,
+  episode = 1,
+  signal,
+}) {
+  if (debridProvider !== 'realdebrid' || !debridKey || (!imdbId && !tmdbId)) return null;
+  const hasTorrentio = addonEntries.some((e) => {
+    const u = String(e?.url || '').toLowerCase();
+    return u.includes('torrentio.strem.fun') && !u.includes('realdebrid=');
+  });
+  if (!hasTorrentio) return null;
+
+  const stremioType = mediaType === 'tv' || mediaType === 'series' ? 'series' : mediaType === 'anime' && !imdbId ? 'anime' : 'movie';
+  if (stremioType === 'anime') return null;
+  const stremioId =
+    stremioType === 'series'
+      ? imdbId
+        ? `${imdbId}:${season}:${episode}`
+        : `tmdb:${tmdbId}:${season}:${episode}`
+      : imdbId || `tmdb:${tmdbId}`;
+
+  try {
+    const endpoint = `https://torrentio.strem.fun/realdebrid=${encodeURIComponent(
+      debridKey
+    )}/stream/${stremioType}/${encodeURIComponent(stremioId)}.json`;
+    const resp = await fetchWithRetry(
+      endpoint,
+      { headers: { Accept: 'application/json', 'User-Agent': 'Stremio/4.4.168' }, signal },
+      { timeoutMs: 4500, maxRetries: 0 }
+    );
+    if (!resp.ok) {
+      await resp.body?.cancel?.().catch(() => {});
+      return null;
+    }
+    const data = await resp.json().catch(() => null);
+    const streams = Array.isArray(data?.streams) ? data.streams : [];
+    const ranked = streams
+      .filter((s) => s?.url && /^https?:\/\//i.test(s.url) && !isRateLimitOrFakeStream(s, s.title || s.name))
+      .map((s, order) => {
+        const meta = [s.name, s.title, s.description, s.behaviorHints?.filename].filter(Boolean).join(' ');
+        const { quality, score } = detectStreamQuality(meta);
+        const compat = computeBrowserCompatibilityBonus(meta, s.behaviorHints?.filename || '');
+        const seeds = extractSeederTiebreaker(meta);
+        return { s, quality, totalScore: score + compat + seeds, order };
+      })
+      .filter((r) => !isArchiveOrNonMediaUrl(r.s.behaviorHints?.filename || r.s.url))
+      .sort((a, b) => b.totalScore - a.totalScore || a.order - b.order);
+
+    for (const item of ranked.slice(0, 2)) {
+      let resolveResp = await fetchWithRetry(
+        item.s.url,
+        {
+          method: 'HEAD',
+          headers: { 'User-Agent': 'Stremio/4.4.168' },
+          redirect: 'manual',
+          signal,
+        },
+        { timeoutMs: 4000, maxRetries: 0 }
+      ).catch(() => null);
+      if (resolveResp && resolveResp.status === 405) {
+        await resolveResp.body?.cancel?.().catch(() => {});
+        resolveResp = await fetchWithRetry(
+          item.s.url,
+          {
+            method: 'GET',
+            headers: { 'User-Agent': 'Stremio/4.4.168' },
+            redirect: 'manual',
+            signal,
+          },
+          { timeoutMs: 4000, maxRetries: 0 }
+        ).catch(() => null);
+      }
+      const loc = resolveResp?.headers?.get('location') || '';
+      await resolveResp?.body?.cancel?.().catch(() => {});
+      if (loc && /^https?:\/\//i.test(loc) && !loc.includes(debridKey) && !isArchiveOrNonMediaUrl(loc)) {
+        const hashMatch = item.s.url.match(/\/([a-fA-F0-9]{40})\//);
+        return {
+          url: loc,
+          candidate: {
+            infoHash: hashMatch ? hashMatch[1].toLowerCase() : '',
+            title: String(item.s.title || item.s.name || 'Torrentio Cached').split('\n')[0].trim().slice(0, 64),
+            quality: item.quality,
+            isExplicit: false,
+          },
+        };
+      }
+    }
+  } catch {
+    // Fall back cleanly to standard addon + RD pipeline
+  }
+  return null;
+}
+
+async function searchOpenTorrentIndexers({ title = '', year = '', signal, candidateMap }) {
+  const cleanTitle = String(title || '').trim();
+  if (!cleanTitle) return;
+  const query = year && !cleanTitle.includes(String(year)) ? `${cleanTitle} ${year}` : cleanTitle;
+
+  const pushHashCandidate = (rawHash, label, sizeBytes = 0, seeders = 0) => {
+    const infoHash = extractInfoHash('', rawHash);
+    if (!infoHash || candidateMap.has(infoHash)) return;
+    const { quality, score } = detectStreamQuality(label);
+    const bonus = computeBrowserCompatibilityBonus(label, label);
+    const seederBonus = Math.min(Number(seeders) || 0, 900) / 1000;
+    const sizePenalty = sizeBytes > 12 * 1024 * 1024 * 1024 ? -15 : 0;
+    candidateMap.set(infoHash, {
+      infoHash,
+      magnet: `magnet:?xt=urn:btih:${infoHash}`,
+      title: String(label || 'Open Torrent').slice(0, 80),
+      quality,
+      qualityScore: score + bonus + seederBonus + sizePenalty,
+      order: candidateMap.size,
+    });
+  };
+
+  await Promise.allSettled([
+    fetchWithRetry(
+      `https://torrents-csv.com/service/search?q=${encodeURIComponent(query)}&size=10`,
+      { headers: { Accept: 'application/json' }, signal },
+      { timeoutMs: 3200, maxRetries: 0 }
+    )
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        for (const row of Array.isArray(data?.torrents) ? data.torrents : []) {
+          pushHashCandidate(row?.infohash, row?.name, row?.size_bytes, row?.seeders);
+        }
+      })
+      .catch(() => {}),
+    fetchWithRetry(
+      'https://api.knaben.org/v1',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify({ query, size: 10 }),
+        signal,
+      },
+      { timeoutMs: 3200, maxRetries: 0 }
+    )
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        for (const row of Array.isArray(data?.hits) ? data.hits : []) {
+          pushHashCandidate(row?.hash, row?.title || row?.description || '', row?.bytes, row?.seeders);
+        }
+      })
+      .catch(() => {}),
+  ]);
+}
+
 async function handleResolveStream(request, reqUrl, env = {}) {
   if (request.method !== 'GET' && request.method !== 'HEAD') {
     return jsonResponse({ error: 'Method not allowed' }, 405);
@@ -1757,16 +1912,19 @@ async function handleResolveStream(request, reqUrl, env = {}) {
 
   const origin = reqUrl.origin;
   const tmdbId = reqUrl.searchParams.get('tmdbId') || '';
-  const imdbId = reqUrl.searchParams.get('imdbId') || '';
+  let imdbId = reqUrl.searchParams.get('imdbId') || '';
   const anilistId = reqUrl.searchParams.get('anilistId') || '';
   const malId = reqUrl.searchParams.get('malId') || '';
   const mediaType = reqUrl.searchParams.get('mediaType') || 'movie';
+  const title = reqUrl.searchParams.get('title') || '';
+  const year = reqUrl.searchParams.get('year') || '';
   const season = Math.max(1, Number(reqUrl.searchParams.get('season') || 1));
   const episode = Math.max(1, Number(reqUrl.searchParams.get('episode') || 1));
   const directUrl = reqUrl.searchParams.get('directUrl') || '';
   const referer = reqUrl.searchParams.get('referer') || '';
   const magnet = reqUrl.searchParams.get('magnet') || '';
   const hash = (reqUrl.searchParams.get('hash') || reqUrl.searchParams.get('infoHash') || '').trim();
+  const clientHashesRaw = reqUrl.searchParams.get('hashes') || '';
 
   const requestAddonInputs = [
     ...reqUrl.searchParams.getAll('addonUrls'),
@@ -1840,6 +1998,27 @@ async function handleResolveStream(request, reqUrl, env = {}) {
     }
   }
 
+  if (tmdbId && !imdbId && env.TMDB_API_KEY && (mediaType === 'movie' || mediaType === 'tv' || mediaType === 'series')) {
+    try {
+      const tmdbPath = mediaType === 'tv' || mediaType === 'series' ? 'tv' : 'movie';
+      const extResp = await fetchWithRetry(
+        `https://api.themoviedb.org/3/${tmdbPath}/${encodeURIComponent(tmdbId)}/external_ids?api_key=${encodeURIComponent(
+          env.TMDB_API_KEY
+        )}`,
+        { headers: { Accept: 'application/json' }, signal: request.signal },
+        { timeoutMs: 2500, maxRetries: 0 }
+      );
+      if (extResp.ok) {
+        const extData = await extResp.json().catch(() => null);
+        if (extData?.imdb_id) imdbId = String(extData.imdb_id);
+      } else {
+        await extResp.body?.cancel?.().catch(() => {});
+      }
+    } catch {
+      // Proceed smoothly if external_ids lookup is unavailable
+    }
+  }
+
   const addonTasks = addonEntries.map(async (entry) => {
     const endpoint = buildAddonStreamEndpoint({
       addonUrl: entry.url,
@@ -1864,9 +2043,13 @@ async function handleResolveStream(request, reqUrl, env = {}) {
 
     const addonResp = await fetchWithRetry(
       endpoint,
-      { headers: { Accept: 'application/json' }, signal: request.signal },
+      { headers: { Accept: 'application/json', 'User-Agent': 'Stremio/4.4.168' }, signal: request.signal },
       { timeoutMs: 6000, maxRetries: 1, backoffMs: [200] }
     );
+    if (addonResp.status === 404) {
+      await addonResp.body?.cancel?.().catch(() => {});
+      return { addonHost, directStreams: [] };
+    }
     if (!addonResp.ok) {
       await addonResp.body?.cancel?.().catch(() => {});
       throw new Error(`HTTP ${addonResp.status}`);
@@ -1902,9 +2085,25 @@ async function handleResolveStream(request, reqUrl, env = {}) {
       })
     : Promise.resolve({ sources: [], warning: '' });
 
-  const [customOutcome, addonOutcomes] = await Promise.all([
+  const torrentioDebridTask =
+    debridKey && debridProvider === 'realdebrid' && !magnet && !hash
+      ? resolveTorrentioDebridDirect({
+          addonEntries,
+          debridProvider,
+          debridKey,
+          tmdbId,
+          imdbId,
+          mediaType,
+          season,
+          episode,
+          signal: request.signal,
+        })
+      : Promise.resolve(null);
+
+  const [customOutcome, addonOutcomes, torrentioDebridResult] = await Promise.all([
     customTask,
     Promise.allSettled(addonTasks),
+    torrentioDebridTask,
   ]);
 
   if (customOutcome.warning) {
@@ -1932,6 +2131,27 @@ async function handleResolveStream(request, reqUrl, env = {}) {
   });
 
   const explicitHash = extractInfoHash(magnet, hash);
+  if (clientHashesRaw) {
+    for (const hRaw of clientHashesRaw.split(',')) {
+      const ch = extractInfoHash('', hRaw);
+      if (ch && !candidateMap.has(ch)) {
+        candidateMap.set(ch, {
+          infoHash: ch,
+          magnet: `magnet:?xt=urn:btih:${ch}`,
+          title: title || 'Client Discovered Stream',
+          quality: '1080p',
+          qualityScore: 35,
+          order: candidateMap.size,
+        });
+      }
+    }
+  }
+
+  const isMockAddonEnv = addonEntries.some((e) => /127\.0\.0\.1|localhost|\.example/i.test(e.url || ''));
+  if (!torrentioDebridResult?.url && debridKey && candidateMap.size === 0 && !explicitHash && !magnet && title && !isMockAddonEnv) {
+    await searchOpenTorrentIndexers({ title, year, signal: request.signal, candidateMap });
+  }
+
   const debridCandidates = [];
   if (explicitHash || (magnet && magnet.startsWith('magnet:'))) {
     const matchedAddonCandidate = explicitHash ? candidateMap.get(explicitHash) : null;
@@ -1955,26 +2175,43 @@ async function handleResolveStream(request, reqUrl, env = {}) {
     debridCandidates.push(c);
   }
 
-  if (debridKey && debridCandidates.length > 0) {
-    const debridResult = await resolveDebridCandidates({
+  let debridResult = torrentioDebridResult?.url ? torrentioDebridResult : null;
+  if (!debridResult && debridKey && debridCandidates.length > 0) {
+    debridResult = await resolveDebridCandidates({
       provider: debridProvider,
       apiKey: debridKey,
       candidates: debridCandidates,
     });
-    if (debridResult?.url) {
-      const playable = debridResult.url;
-      const winning = debridResult.candidate;
-      const isHls = playable.toLowerCase().includes('.m3u8');
-      const resolvedQuality =
-        winning?.quality && winning.quality !== 'Original' ? winning.quality : '1080p Remux';
+  }
+
+  if (debridResult?.url) {
+    const playable = debridResult.url;
+    const winning = debridResult.candidate;
+    const isHls = playable.toLowerCase().includes('.m3u8');
+    const resolvedQuality =
+      winning?.quality && winning.quality !== 'Original' ? winning.quality : '1080p Remux';
+    sources.push({
+      id: 'debrid-instant-cache',
+      name:
+        winning?.title && !winning?.isExplicit
+          ? `Instant Cached (${debridProvider.toUpperCase()}) — ${winning.title.slice(0, 48)}`
+          : `Instant Cached Stream (${debridProvider.toUpperCase()})`,
+      type: isHls ? 'hls' : 'direct',
+      url: makeProxyHlsUrl(origin, playable),
+      rawUrl: playable,
+      provider: debridProvider,
+      quality: resolvedQuality,
+      infoHash: winning?.infoHash || undefined,
+      shielded: true,
+      direct: true,
+      node: 'debrid',
+    });
+    if (!isHls && /^https:\/\//i.test(playable)) {
       sources.push({
-        id: 'debrid-instant-cache',
-        name:
-          winning?.title && !winning?.isExplicit
-            ? `Instant Cached (${debridProvider.toUpperCase()}) — ${winning.title.slice(0, 48)}`
-            : `Instant Cached Stream (${debridProvider.toUpperCase()})`,
-        type: isHls ? 'hls' : 'direct',
-        url: makeProxyHlsUrl(origin, playable),
+        id: 'debrid-instant-cache-direct',
+        name: `Instant Cached Direct (${debridProvider.toUpperCase()})`,
+        type: 'direct',
+        url: playable,
         rawUrl: playable,
         provider: debridProvider,
         quality: resolvedQuality,
@@ -1983,21 +2220,6 @@ async function handleResolveStream(request, reqUrl, env = {}) {
         direct: true,
         node: 'debrid',
       });
-      if (!isHls && /^https:\/\//i.test(playable)) {
-        sources.push({
-          id: 'debrid-instant-cache-direct',
-          name: `Instant Cached Direct (${debridProvider.toUpperCase()})`,
-          type: 'direct',
-          url: playable,
-          rawUrl: playable,
-          provider: debridProvider,
-          quality: resolvedQuality,
-          infoHash: winning?.infoHash || undefined,
-          shielded: true,
-          direct: true,
-          node: 'debrid',
-        });
-      }
     }
   }
 
@@ -2018,6 +2240,48 @@ async function handleResolveStream(request, reqUrl, env = {}) {
       name: 'VidLink (No-Redirect Shield)',
       type: 'embed',
       url: vidlinkUrl,
+      quality: '1080p',
+      shielded: true,
+      sandboxed: true,
+      direct: false,
+    });
+  }
+
+  if (tmdbId || imdbId) {
+    const idVal = tmdbId || imdbId;
+    const toIdVal = imdbId || tmdbId;
+    const isTv = mediaType === 'tv' || mediaType === 'series';
+    sources.push({
+      id: 'vidfast-shield',
+      name: 'VidFast HD (Cloud Server)',
+      type: 'embed',
+      url: isTv
+        ? `https://vidfast.vc/tv/${encodeURIComponent(idVal)}/${season}/${episode}?autoPlay=true&theme=e50914&nextButton=true`
+        : `https://vidfast.vc/movie/${encodeURIComponent(idVal)}?autoPlay=true&theme=e50914`,
+      quality: '1080p',
+      shielded: true,
+      sandboxed: true,
+      direct: false,
+    });
+    sources.push({
+      id: 'vidsrc-pro',
+      name: 'VidSrc Pro (Cloud Server)',
+      type: 'embed',
+      url: isTv
+        ? `https://vidsrc.su/embed/tv/${encodeURIComponent(idVal)}/${season}/${episode}`
+        : `https://vidsrc.su/embed/movie/${encodeURIComponent(idVal)}`,
+      quality: '1080p',
+      shielded: true,
+      sandboxed: false,
+      direct: false,
+    });
+    sources.push({
+      id: 'vidsrc-to',
+      name: 'VidSrc.to (Cloud Server)',
+      type: 'embed',
+      url: isTv
+        ? `https://vidsrc.to/embed/tv/${encodeURIComponent(toIdVal)}/${season}/${episode}`
+        : `https://vidsrc.to/embed/movie/${encodeURIComponent(toIdVal)}`,
       quality: '1080p',
       shielded: true,
       sandboxed: true,

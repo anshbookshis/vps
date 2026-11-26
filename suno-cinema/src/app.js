@@ -936,7 +936,7 @@ function fallbackToEmbedPlayer(item, message = 'Switched to VidLink shield playe
   const strip = document.getElementById('player-bottom-strip');
   if (strip) {
     strip.innerHTML = `<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
-      ${PLAYER_PROVIDERS.map(
+      ${PLAYER_PROVIDERS.filter((p) => p.id !== 'vidrift' && p.id !== 'vidrift-direct').map(
         (p) => `<button type="button" class="outline-chip ${
           state.prefs.playerProvider === p.id ? 'is-active' : ''
         }" data-switch-provider="${p.id}" style="height:30px;padding:0 10px;font-size:11px;">${escapeHtml(
@@ -951,7 +951,7 @@ function fallbackToEmbedPlayer(item, message = 'Switched to VidLink shield playe
         12
       )} Reload</button>
     </div>
-    <span class="dim" style="font-size:11px;">Popups Blocked</span>`;
+    <span class="dim" style="font-size:11px;">Not loading? Try VidFast HD or VidSrc Pro</span>`;
   }
 }
 
@@ -1490,14 +1490,25 @@ async function launchStream(rawItem, { season, episode, resumeSeconds } = {}) {
 
       const prov = state.prefs.playerProvider || 'vidlink';
       const firstHlsIdx = state.resolvedSources.findIndex(isPlayableDirectSource);
+      const embedIdMap = {
+        vidlink: 'vidlink-shield',
+        vidfast: 'vidfast-shield',
+        'vidsrc-pro': 'vidsrc-pro',
+        'vidsrc-to': 'vidsrc-to',
+        vidrift: 'vidrift-sandboxed',
+        'vidrift-direct': 'vidrift-sandboxed',
+      };
       const vidlinkIdx = state.resolvedSources.findIndex((s) => s.id === 'vidlink-shield');
-      const vidriftIdx = state.resolvedSources.findIndex((s) => s.id === 'vidrift-sandboxed');
+      const vidfastIdx = state.resolvedSources.findIndex((s) => s.id === 'vidfast-shield');
+      const preferredEmbedIdx = embedIdMap[prov]
+        ? state.resolvedSources.findIndex((s) => s.id === embedIdMap[prov])
+        : -1;
       const isShowcaseOrRaw =
         state.activeItem.mediaType === 'hls' || String(state.activeItem.tmdbId || '').startsWith('test-');
 
       let pickedIndex = 0;
-      if ((prov === 'vidrift' || prov === 'vidrift-direct') && !isShowcaseOrRaw) {
-        pickedIndex = vidriftIdx >= 0 ? vidriftIdx : 0;
+      if (prov !== 'hls-direct' && prov !== 'vidlink' && preferredEmbedIdx >= 0 && !isShowcaseOrRaw) {
+        pickedIndex = preferredEmbedIdx;
       } else if (firstHlsIdx >= 0) {
         pickedIndex = firstHlsIdx;
       } else {
@@ -1505,14 +1516,14 @@ async function launchStream(rawItem, { season, episode, resumeSeconds } = {}) {
           const hasDebrid = Boolean(state.prefs?.debridApiKey || state.sourcesBackendStatus?.debrid?.configured);
           showToast(
             hasDebrid
-              ? 'No cached Real-Debrid stream found for this magnet yet; switched to fallback player.'
+              ? 'No cached Real-Debrid stream found for this magnet yet; using Cloud Stream Server.'
               : 'Magnet/InfoHash requires a Debrid API key with Node server or Edge Proxy.'
           );
         } else if (prov === 'hls-direct') {
           state._hlsFallbackNotifiedItem = getMediaKey(state.activeItem);
-          showToast('Direct HLS stream unavailable for this title. Switched to VidLink shield player.');
+          showToast('Loaded Cloud Stream Server (no cached direct file for this title).');
         }
-        pickedIndex = vidlinkIdx >= 0 ? vidlinkIdx : 0;
+        pickedIndex = vidlinkIdx >= 0 ? vidlinkIdx : vidfastIdx >= 0 ? vidfastIdx : 0;
       }
 
       state.activeSourceIndex = Math.max(0, pickedIndex);
@@ -2897,8 +2908,14 @@ function renderFloatingBottomNav() {
 
 function applySandboxAttr(iframe) {
   if (!iframe) return;
-  const provider = state.prefs.playerProvider || 'vidlink';
-  const useSandbox = provider === 'vidrift-direct' ? false : state.shield.strictFrameMode;
+  const activeSrc = getActiveResolvedSource();
+  const provider =
+    state.activeSourceOverride ||
+    (activeSrc?.type === 'embed' ? activeSrc.id : '') ||
+    state.prefs.playerProvider ||
+    'vidlink';
+  const useSandbox =
+    provider === 'vidrift-direct' || provider === 'vidsrc-pro' ? false : state.shield.strictFrameMode;
   if (useSandbox) {
     iframe.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms allow-presentation');
   } else {
@@ -3064,7 +3081,16 @@ function syncPlayerMount({ forceReload = false } = {}) {
   let streamUrl = '';
   let effectiveProvider = provider;
 
-  if (state.activeSourceOverride === 'vidlink' || state.activeSourceOverride === 'vidrift' || state.activeSourceOverride === 'vidrift-direct') {
+  const EMBED_OVERRIDE_PROVIDERS = new Set(['vidlink', 'vidfast', 'vidsrc-pro', 'vidsrc-to', 'vidrift', 'vidrift-direct']);
+  const EMBED_ID_TO_PROVIDER = {
+    'vidlink-shield': 'vidlink',
+    'vidfast-shield': 'vidfast',
+    'vidsrc-pro': 'vidsrc-pro',
+    'vidsrc-to': 'vidsrc-to',
+    'vidrift-sandboxed': provider === 'vidrift-direct' ? 'vidrift-direct' : 'vidrift',
+  };
+
+  if (EMBED_OVERRIDE_PROVIDERS.has(state.activeSourceOverride)) {
     isHls = false;
     effectiveProvider = state.activeSourceOverride;
     streamUrl = buildPlayerEmbedUrl(item, {
@@ -3084,7 +3110,7 @@ function syncPlayerMount({ forceReload = false } = {}) {
   } else if (activeSrc && activeSrc.type === 'embed') {
     isHls = false;
     streamUrl = activeSrc.url;
-    effectiveProvider = activeSrc.id === 'vidrift-sandboxed' ? (provider === 'vidrift-direct' ? 'vidrift-direct' : 'vidrift') : 'vidlink';
+    effectiveProvider = EMBED_ID_TO_PROVIDER[activeSrc.id] || 'vidlink';
   } else {
     const directStreamUrl =
       (item.mediaType === 'hls' && item.hlsUrl) ||
@@ -3098,7 +3124,7 @@ function syncPlayerMount({ forceReload = false } = {}) {
       const itemKey = getMediaKey(item);
       if (state._hlsFallbackNotifiedItem !== itemKey) {
         state._hlsFallbackNotifiedItem = itemKey;
-        showToast('Direct HLS stream unavailable for this title. Switched to VidLink shield player.');
+        showToast('Loaded Cloud Stream Server (no cached direct file for this title).');
       }
     }
 
@@ -3107,7 +3133,7 @@ function syncPlayerMount({ forceReload = false } = {}) {
   }
 
   const stillResolving = Boolean(state.resolvingStream && !isHls && hlsNodes.length === 0 && !item.hlsStreamUrl && item.mediaType !== 'hls');
-  const isSandboxed = effectiveProvider !== 'vidrift-direct' && state.shield.strictFrameMode;
+  const isSandboxed = effectiveProvider !== 'vidrift-direct' && effectiveProvider !== 'vidsrc-pro' && state.shield.strictFrameMode;
   const existingFrame = document.getElementById('vidrift-player');
   const existingVideo = document.getElementById('hls-video-player');
   const existingResolving = document.getElementById('n77-resolving-box');
@@ -3257,7 +3283,7 @@ function syncPlayerMount({ forceReload = false } = {}) {
           ? `<span class="dim" style="font-size:11.5px;">Node ${state.activeSourceIndex + 1}/${state.resolvedSources.length}</span>`
           : ''
       }
-      ${PLAYER_PROVIDERS.map(
+      ${PLAYER_PROVIDERS.filter((p) => p.id !== 'vidrift' && p.id !== 'vidrift-direct').map(
         (p) => `<button type="button" class="outline-chip ${
           effectiveProvider === p.id ? 'is-active' : ''
         }" data-switch-provider="${p.id}" style="height:30px;padding:0 10px;font-size:11px;">${escapeHtml(
@@ -3295,7 +3321,11 @@ function syncPlayerMount({ forceReload = false } = {}) {
       }
     </div>
     <span class="dim" style="font-size:11px;">${
-      state.livePlayback.currentTime > 0 ? `Synced ${formatTime(state.livePlayback.currentTime)}` : 'Popups Blocked'
+      state.livePlayback.currentTime > 0
+        ? `Synced ${formatTime(state.livePlayback.currentTime)}`
+        : isHls
+        ? 'Native HLS Active'
+        : 'Video missing? Try VidFast HD or VidSrc Pro'
     }</span>`;
   }
 }
@@ -4308,11 +4338,11 @@ function bindEvents() {
           (item?.hlsUrl && isDirectStreamUrl(item.hlsUrl) ? item.hlsUrl : null);
         const hasDirect = Boolean(directUrl && isDirectStreamUrl(directUrl));
         if (!hasDirect) {
-          state.prefs = savePlayerPrefs({ playerProvider: 'vidlink' });
-          state.activeSourceOverride = 'vidlink';
+          state.prefs = savePlayerPrefs({ playerProvider: 'vidfast' });
+          state.activeSourceOverride = 'vidfast';
           antiRedirectGuard.setStrictFrameMode(true);
           state.shield = antiRedirectGuard.getSnapshot();
-          showToast('Direct HLS stream unavailable for this title. Switched to VidLink shield player.');
+          showToast('No cached direct file for this title yet — switched to VidFast HD server.');
           render({ forceReload: true });
           return;
         }
@@ -4323,13 +4353,20 @@ function bindEvents() {
         }
       } else {
         state.activeSourceOverride = prov;
-        const matchIdx = state.resolvedSources.findIndex((s) =>
-          prov === 'vidlink' ? s.id === 'vidlink-shield' : s.id === 'vidrift-sandboxed'
-        );
+        const embedMap = {
+          vidlink: 'vidlink-shield',
+          vidfast: 'vidfast-shield',
+          'vidsrc-pro': 'vidsrc-pro',
+          'vidsrc-to': 'vidsrc-to',
+          vidrift: 'vidrift-sandboxed',
+          'vidrift-direct': 'vidrift-sandboxed',
+        };
+        const targetId = embedMap[prov] || 'vidlink-shield';
+        const matchIdx = state.resolvedSources.findIndex((s) => s.id === targetId);
         if (matchIdx >= 0) state.activeSourceIndex = matchIdx;
       }
       state.prefs = savePlayerPrefs({ playerProvider: prov });
-      if (prov === 'vidrift-direct') {
+      if (prov === 'vidrift-direct' || prov === 'vidsrc-pro') {
         antiRedirectGuard.setStrictFrameMode(false);
       } else {
         antiRedirectGuard.setStrictFrameMode(true);
