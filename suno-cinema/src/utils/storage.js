@@ -197,6 +197,9 @@ export function loadPlayerPrefs() {
     stremioAddonUrl: '',
     stremioAddons: [],
     customResolverUrl: '',
+    bootstrapMirrors: [],
+    jellyfinUrl: '',
+    jellyfinApiKey: '',
   };
   if (typeof localStorage === 'undefined') {
     return { ...defaults, stremioAddons: [] };
@@ -222,11 +225,26 @@ export function loadPlayerPrefs() {
     migrated = true;
   }
 
+  let bootstrapMirrors = [];
+  if (Array.isArray(merged.bootstrapMirrors)) {
+    bootstrapMirrors = merged.bootstrapMirrors
+      .map((m) => String(m || '').trim())
+      .filter((m) => /^https?:\/\//i.test(m));
+  } else if (typeof merged.bootstrapMirrors === 'string' && merged.bootstrapMirrors.trim()) {
+    bootstrapMirrors = merged.bootstrapMirrors
+      .split(/[\r\n,]+/)
+      .map((m) => m.trim())
+      .filter((m) => /^https?:\/\//i.test(m));
+  }
+
   const result = {
     ...merged,
     stremioAddonUrl: legacyUrl,
     stremioAddons: addons,
     customResolverUrl: String(merged.customResolverUrl || '').trim(),
+    bootstrapMirrors,
+    jellyfinUrl: String(merged.jellyfinUrl || '').trim().replace(/\/+$/, ''),
+    jellyfinApiKey: String(merged.jellyfinApiKey || '').trim(),
   };
 
   if (migrated) {
@@ -272,6 +290,28 @@ export function savePlayerPrefs(next) {
   }
 
   merged.customResolverUrl = String(merged.customResolverUrl || '').trim();
+
+  if (patch.bootstrapMirrors !== undefined) {
+    if (Array.isArray(patch.bootstrapMirrors)) {
+      merged.bootstrapMirrors = patch.bootstrapMirrors
+        .map((m) => String(m || '').trim())
+        .filter((m) => /^https?:\/\//i.test(m));
+    } else if (typeof patch.bootstrapMirrors === 'string') {
+      merged.bootstrapMirrors = patch.bootstrapMirrors
+        .split(/[\r\n,]+/)
+        .map((m) => m.trim())
+        .filter((m) => /^https?:\/\//i.test(m));
+    } else {
+      merged.bootstrapMirrors = [];
+    }
+  }
+
+  if (patch.jellyfinUrl !== undefined) {
+    merged.jellyfinUrl = String(patch.jellyfinUrl || '').trim().replace(/\/+$/, '');
+  }
+  if (patch.jellyfinApiKey !== undefined) {
+    merged.jellyfinApiKey = String(patch.jellyfinApiKey || '').trim();
+  }
 
   if (typeof localStorage !== 'undefined') {
     try {

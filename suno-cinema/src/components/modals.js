@@ -295,6 +295,10 @@ export function renderStreamSourcesModal({
   directType = 'movie',
   customResolverInput = null,
   hlsProxyInput = null,
+  bootstrapMirrorsInput = null,
+  jellyfinUrlInput = null,
+  jellyfinKeyInput = null,
+  backendStatus = null,
   debridKeyInput = null,
   debridProviderInput = null,
   playerOpen = false,
@@ -305,13 +309,25 @@ export function renderStreamSourcesModal({
   const enabledAddons = addonList.filter((a) => a && a.enabled !== false);
   const currentProxyVal = hlsProxyInput !== null ? hlsProxyInput : prefs?.hlsProxyUrl || '';
   const currentCustomVal = customResolverInput !== null ? customResolverInput : prefs?.customResolverUrl || '';
+  const currentMirrorsVal =
+    bootstrapMirrorsInput !== null
+      ? bootstrapMirrorsInput
+      : Array.isArray(prefs?.bootstrapMirrors)
+      ? prefs.bootstrapMirrors.join('\n')
+      : String(prefs?.bootstrapMirrors || '');
+  const currentJellyfinUrl = jellyfinUrlInput !== null ? jellyfinUrlInput : prefs?.jellyfinUrl || '';
+  const currentJellyfinKey = jellyfinKeyInput !== null ? jellyfinKeyInput : prefs?.jellyfinApiKey || '';
   const currentDebridProvider = debridProviderInput || prefs?.debridProvider || 'realdebrid';
   const currentDebridKey = debridKeyInput !== null ? debridKeyInput : prefs?.debridApiKey || '';
 
   const tabs = [
     { id: 'addons', label: 'Stremio Addons', count: enabledAddons.length },
     { id: 'debrid', label: 'Debrid & Magnet', activeDot: Boolean(currentDebridKey) },
-    { id: 'proxy', label: 'Edge Proxy & Resolver', activeDot: Boolean(currentProxyVal || currentCustomVal) },
+    {
+      id: 'proxy',
+      label: 'Edge Proxy & Resolver',
+      activeDot: Boolean(currentProxyVal || currentCustomVal || currentMirrorsVal || currentJellyfinUrl),
+    },
     { id: 'direct', label: 'Direct Stream' },
   ];
 
@@ -522,7 +538,7 @@ export function renderStreamSourcesModal({
         }
 
         <div class="sources-field">
-          <label class="dim" for="sources-custom-resolver-input">Custom Resolver / Jellyfin / Emby URL Template (optional)</label>
+          <label class="dim" for="sources-custom-resolver-input">Custom Resolver / URL Template (optional)</label>
           <input
             id="sources-custom-resolver-input"
             class="field-input"
@@ -539,6 +555,76 @@ export function renderStreamSourcesModal({
             <span class="sources-badge is-subtle">{episode}</span>
           </div>
         </div>
+
+        <div class="sources-field">
+          <label class="dim" for="sources-bootstrap-mirrors-input">Bootstrap Mirror Candidates (one per line or comma-separated)</label>
+          <textarea
+            id="sources-bootstrap-mirrors-input"
+            class="field-input sources-textarea-sm"
+            rows="2"
+            placeholder="https://mirror1.example.com&#10;https://mirror2.example.com"
+          >${escapeHtml(currentMirrorsVal)}</textarea>
+          <p class="sources-help-sub dim">Rotating fallback mirrors for high availability. Suno Cinema probes /api/bootstrap and fails over automatically if a mirror drops.</p>
+        </div>
+
+        <div class="sources-grid-2">
+          <div class="sources-field">
+            <label class="dim" for="sources-jellyfin-url-input">Jellyfin / Emby Server URL (optional)</label>
+            <input
+              id="sources-jellyfin-url-input"
+              class="field-input"
+              type="url"
+              placeholder="https://jellyfin.example.com"
+              value="${escapeHtml(currentJellyfinUrl)}"
+              autocomplete="off"
+            />
+          </div>
+          <div class="sources-field">
+            <label class="dim" for="sources-jellyfin-key-input">Jellyfin API Token</label>
+            <input
+              id="sources-jellyfin-key-input"
+              class="field-input"
+              type="password"
+              placeholder="Paste Jellyfin API Key"
+              value="${escapeHtml(currentJellyfinKey)}"
+              autocomplete="off"
+            />
+          </div>
+        </div>
+
+        ${
+          backendStatus
+            ? `<div class="sources-card sources-backend-status-card">
+                <div class="sources-card-head">
+                  <strong>Backend Readiness Matrix</strong>
+                  <span class="sources-badge is-ok">Live Verified</span>
+                </div>
+                <div class="sources-status-grid">
+                  <span class="sources-badge ${backendStatus.tmdb?.configured ? 'is-ok' : 'is-muted'}">TMDB: ${
+                backendStatus.tmdb?.configured ? 'Configured' : 'Missing'
+              }</span>
+                  <span class="sources-badge ${backendStatus.debrid?.configured ? 'is-ok' : 'is-muted'}">Debrid: ${
+                backendStatus.debrid?.provider || 'None'
+              }</span>
+                  <span class="sources-badge is-ok">Stremio Addons: Active</span>
+                  <span class="sources-badge ${backendStatus.jellyfin?.configured ? 'is-ok' : 'is-muted'}">Jellyfin: ${
+                backendStatus.jellyfin?.configured ? 'Connected' : 'Unconfigured'
+              }</span>
+                  <span class="sources-badge ${
+                    backendStatus.tokenVerification?.enabled ? 'is-ok' : 'is-subtle'
+                  }">HMAC Tokens: ${backendStatus.tokenVerification?.enabled ? 'Strict' : 'Permissive'}</span>
+                  ${
+                    backendStatus.cache
+                      ? `<span class="sources-badge is-type">LRU Segments: ${backendStatus.cache.entries} (${(
+                          backendStatus.cache.bytes /
+                          (1024 * 1024)
+                        ).toFixed(1)}MB)</span>`
+                      : ''
+                  }
+                </div>
+              </div>`
+            : ''
+        }
 
         <button type="submit" class="btn-white" id="sources-save-proxy-btn">Save Edge Proxy &amp; Resolver</button>
       </form>
