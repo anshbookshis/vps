@@ -3322,6 +3322,14 @@ function syncPlayerMount({ forceReload = false } = {}) {
           </div>
         </div>
         <div class="nf-top-right">
+          ${
+            !isHls && !stillResolving
+              ? `<button type="button" class="shield-pill ${isSandboxed ? '' : 'is-warn'}" id="toggle-strict-shield-btn" title="Popup &amp; Redirect Shield">
+                  ${svgIcon('shield', 13)}
+                  <span>${isSandboxed ? 'Shield ON' : 'Shield OFF'}</span>
+                </button>`
+              : ''
+          }
           ${!stillResolving && !isHls ? buildEmbedServerButtonsHtml(effectiveProvider, item) : ''}
           ${
             !isHls && (item.mediaType === 'tv' || item.mediaType === 'anime')
@@ -3334,14 +3342,6 @@ function syncPlayerMount({ forceReload = false } = {}) {
             ${svgIcon('sparkles', 13)}
             <span>Sources</span>
           </button>
-          ${
-            !isHls
-              ? `<button type="button" class="shield-pill ${isSandboxed ? '' : 'is-warn'}" id="toggle-strict-shield-btn" title="Popup &amp; Redirect Shield">
-                  ${svgIcon('shield', 13)}
-                  <span>${isSandboxed ? 'Shield ON' : 'Shield OFF'}</span>
-                </button>`
-              : ''
-          }
         </div>
       </div>
 
@@ -3425,6 +3425,19 @@ function syncPlayerMount({ forceReload = false } = {}) {
     const subLabelEl = document.getElementById('player-stream-subtitle');
     if (subLabelEl && item.mediaType !== 'tv' && item.mediaType !== 'anime') {
       subLabelEl.textContent = isHls ? '' : PLAYER_PROVIDERS.find((p) => p.id === effectiveProvider)?.label || 'Cloud Stream';
+    }
+  }
+
+  const bottomStrip = document.getElementById('player-bottom-strip');
+  if (bottomStrip) {
+    if (!stillResolving && !isHls && streamUrl) {
+      bottomStrip.hidden = false;
+      bottomStrip.innerHTML = isSandboxed
+        ? `<span class="dim" style="font-size:12px;">🛡 <strong>Popup Shield ON</strong> — external ad tabs &amp; redirects blocked. If an embed detects sandbox, try another server or connect Direct HLS / Addons.</span>`
+        : `<span style="font-size:12px;color:#fbbf24;">⚠ <strong>Shield OFF</strong> — unrestricted external frame (ad popups possible). Click <strong>Shield OFF</strong> above to re-lock.</span>`;
+    } else {
+      bottomStrip.hidden = true;
+      bottomStrip.innerHTML = '';
     }
   }
 }
