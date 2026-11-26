@@ -64,6 +64,79 @@ function safeParse(raw, fallback) {
   }
 }
 
+function normalizeAddonBaseUrl(rawUrl) {
+  let trimmed = String(rawUrl || '').trim();
+  if (!trimmed) return '';
+  if (/^stremio:\/\//i.test(trimmed)) {
+    trimmed = `https://${trimmed.slice('stremio://'.length)}`;
+  }
+  if (!/^https?:\/\//i.test(trimmed)) return '';
+  try {
+    const parsed = new URL(trimmed);
+    parsed.pathname = parsed.pathname.replace(/\/manifest\.json\/?$/i, '').replace(/\/+$/, '') || '/';
+    parsed.hash = '';
+    return parsed.toString().replace(/\/+$/, '');
+  } catch {
+    return '';
+  }
+}
+
+function deriveAddonName(baseUrl) {
+  try {
+    return new URL(baseUrl).hostname.replace(/^www\./i, '') || 'Stremio Addon';
+  } catch {
+    return 'Stremio Addon';
+  }
+}
+
+/**
+ * Normalize a Stremio addon descriptor object or URL into canonical storage format.
+ * @param {string|object} entry
+ * @returns {{ url: string, name: string, version: string, description: string, types: string[], idPrefixes: string[], enabled: boolean } | null}
+ */
+export function normalizeStremioAddon(entry) {
+  if (!entry) return null;
+  if (typeof entry === 'string') {
+    const url = normalizeAddonBaseUrl(entry);
+    if (!url) return null;
+    return {
+      url,
+      name: deriveAddonName(url),
+      version: '',
+      description: '',
+      types: ['movie', 'series'],
+      idPrefixes: ['tt'],
+      enabled: true,
+    };
+  }
+  if (typeof entry !== 'object') return null;
+  const url = normalizeAddonBaseUrl(entry.url || entry.transportUrl || '');
+  if (!url) return null;
+  const fallbackName = deriveAddonName(url);
+  return {
+    url,
+    name: String(entry.name || fallbackName).trim() || fallbackName,
+    version: String(entry.version || '').trim(),
+    description: String(entry.description || '').trim(),
+    types: Array.isArray(entry.types) ? entry.types.map((t) => String(t).trim()).filter(Boolean) : [],
+    idPrefixes: Array.isArray(entry.idPrefixes) ? entry.idPrefixes.map((p) => String(p).trim()).filter(Boolean) : [],
+    enabled: entry.enabled !== false,
+  };
+}
+
+function dedupeStremioAddons(list) {
+  if (!Array.isArray(list)) return [];
+  const seen = new Set();
+  const out = [];
+  for (const item of list) {
+    const norm = normalizeStremioAddon(item);
+    if (!norm || seen.has(norm.url)) continue;
+    seen.add(norm.url);
+    out.push(norm);
+  }
+  return out;
+}
+
 export function loadAppearanceSettings() {
   if (typeof localStorage === 'undefined') {
     return { theme: 'default', amoled: true, fluidVisualizer: false };
@@ -122,19 +195,107 @@ export function loadPlayerPrefs() {
     debridProvider: 'realdebrid',
     debridApiKey: '',
     stremioAddonUrl: '',
+    stremioAddons: [],
+    customResolverUrl: '',
   };
-  if (typeof localStorage === 'undefined') return defaults;
-  return { ...defaults, ...safeParse(localStorage.getItem(PLAYER_PREFS_KEY), {}) };
+  if (typeof localStorage === 'undefined') {
+    return { ...defaults, stremioAddons: [] };
+  }
+  const saved = safeParse(localStorage.getItem(PLAYER_PREFS_KEY), {});
+  const merged = { ...defaults, ...(saved && typeof saved === 'object' ? saved : {}) };
+  const legacyUrl = normalizeAddonBaseUrl(merged.stremioAddonUrl || '');
+  let addons = dedupeStremioAddons(merged.stremioAddons);
+  let migrated = false;
+
+  if (addons.length === 0 && legacyUrl) {
+    addons = [
+      {
+        url: legacyUrl,
+        name: deriveAddonName(legacyUrl),
+        version: '',
+        description: 'Migrated from legacy Stremio Addon URL',
+        types: ['movie', 'series'],
+        idPrefixes: ['tt'],
+        enabled: true,
+      },
+    ];
+    migrated = true;
+  }
+
+  const result = {
+    ...merged,
+    stremioAddonUrl: legacyUrl,
+    stremioAddons: addons,
+    customResolverUrl: String(merged.customResolverUrl || '').trim(),
+  };
+
+  if (migrated) {
+    try {
+      localStorage.setItem(PLAYER_PREFS_KEY, JSON.stringify(result));
+    } catch {}
+  }
+  return result;
 }
 
 export function savePlayerPrefs(next) {
-  const merged = { ...loadPlayerPrefs(), ...next };
+  const prev = loadPlayerPrefs();
+  const patch = next && typeof next === 'object' ? next : {};
+  const merged = { ...prev, ...patch };
+
+  if (Array.isArray(patch.stremioAddons)) {
+    merged.stremioAddons = dedupeStremioAddons(patch.stremioAddons);
+    if (patch.stremioAddonUrl === undefined) {
+      merged.stremioAddonUrl =
+        merged.stremioAddons.find((a) => a.enabled !== false)?.url || merged.stremioAddons[0]?.url || '';
+    } else {
+      merged.stremioAddonUrl = normalizeAddonBaseUrl(patch.stremioAddonUrl);
+    }
+  } else if (patch.stremioAddonUrl !== undefined) {
+    const normLegacy = normalizeAddonBaseUrl(patch.stremioAddonUrl);
+    merged.stremioAddonUrl = normLegacy;
+    let addons = dedupeStremioAddons(prev.stremioAddons);
+    if (normLegacy) {
+      const existingIdx = addons.findIndex((a) => a.url === normLegacy);
+      if (existingIdx >= 0) {
+        addons[existingIdx] = { ...addons[existingIdx], enabled: true };
+      } else {
+        const entry = normalizeStremioAddon(normLegacy);
+        if (entry) addons = [entry, ...addons];
+      }
+    } else if (prev.stremioAddonUrl && addons.length === 1 && addons[0].url === normalizeAddonBaseUrl(prev.stremioAddonUrl)) {
+      addons = [];
+    }
+    merged.stremioAddons = addons;
+  } else {
+    merged.stremioAddons = dedupeStremioAddons(merged.stremioAddons);
+    merged.stremioAddonUrl = normalizeAddonBaseUrl(merged.stremioAddonUrl);
+  }
+
+  merged.customResolverUrl = String(merged.customResolverUrl || '').trim();
+
   if (typeof localStorage !== 'undefined') {
     try {
       localStorage.setItem(PLAYER_PREFS_KEY, JSON.stringify(merged));
     } catch {}
   }
   return merged;
+}
+
+/**
+ * Load persisted Stremio addon descriptors (auto-migrating any legacy stremioAddonUrl).
+ * @returns {Array<{ url: string, name: string, version: string, description: string, types: string[], idPrefixes: string[], enabled: boolean }>}
+ */
+export function loadStremioAddons() {
+  return loadPlayerPrefs().stremioAddons;
+}
+
+/**
+ * Persist the Stremio addons list (deduplicated & normalized) into player prefs.
+ * @param {Array<object|string>} addons
+ * @returns {Array<{ url: string, name: string, version: string, description: string, types: string[], idPrefixes: string[], enabled: boolean }>}
+ */
+export function saveStremioAddons(addons) {
+  return savePlayerPrefs({ stremioAddons: Array.isArray(addons) ? addons : [] }).stremioAddons;
 }
 
 export function loadProfile() {

@@ -38,12 +38,18 @@ export const BROWSE_GENRES = [
 const metaCache = new Map();
 const catalogCache = new Map();
 
-async function fetchJsonSafe(url, options = {}) {
-  const resp = await fetch(url, options);
-  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-  const ct = resp.headers.get('content-type') || '';
-  if (!ct.includes('application/json')) throw new Error('Expected JSON');
-  return resp.json();
+async function fetchJsonSafe(url, options = {}, timeoutMs = 8000) {
+  const controller = !options.signal && typeof AbortController !== 'undefined' ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
+  try {
+    const resp = await fetch(url, controller ? { ...options, signal: controller.signal } : options);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const ct = (resp.headers.get('content-type') || '').toLowerCase();
+    if (ct.includes('text/html')) throw new Error('Expected JSON');
+    return await resp.json();
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 function inferSonicFromGenres(genres = [], type = 'movie', seed = 0) {
@@ -335,14 +341,30 @@ export async function loadTrendingAnime({ genre = '', page = 1 } = {}) {
   return CATALOG_ITEMS.filter((x) => x.mediaType === 'anime');
 }
 
+function normalizeLookupTitle(value) {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+function getWikidataHeaders() {
+  const headers = { Accept: 'application/sparql-results+json' };
+  if (typeof window === 'undefined') {
+    headers['User-Agent'] = 'SunoCinema/1.0';
+  }
+  return headers;
+}
+
 async function resolveTmdbFromWikidataImdb(imdbId, mediaType) {
   if (!imdbId) return '';
-  const prop = mediaType === 'tv' ? 'wdt:P4983' : 'wdt:P4947';
+  const prop = mediaType === 'tv' || mediaType === 'series' ? 'wdt:P4983' : 'wdt:P4947';
   const query = `SELECT ?tmdb WHERE { ?item wdt:P345 "${imdbId}" ; ${prop} ?tmdb . } LIMIT 1`;
   try {
     const res = await fetchJsonSafe(
       `https://query.wikidata.org/sparql?origin=*&format=json&query=${encodeURIComponent(query)}`,
-      { headers: { Accept: 'application/sparql-results+json' } }
+      { headers: getWikidataHeaders() },
+      4500
     );
     return res?.results?.bindings?.[0]?.tmdb?.value || '';
   } catch {
@@ -350,56 +372,172 @@ async function resolveTmdbFromWikidataImdb(imdbId, mediaType) {
   }
 }
 
+async function resolveImdbFromWikidataTmdb(tmdbId, mediaType) {
+  const cleanId = String(tmdbId || '').trim();
+  if (!/^\d+$/.test(cleanId)) return '';
+  const prop = mediaType === 'tv' || mediaType === 'series' ? 'wdt:P4983' : 'wdt:P4947';
+  const query = `SELECT ?imdb WHERE { ?item ${prop} "${cleanId}" ; wdt:P345 ?imdb . } LIMIT 1`;
+  try {
+    const res = await fetchJsonSafe(
+      `https://query.wikidata.org/sparql?origin=*&format=json&query=${encodeURIComponent(query)}`,
+      { headers: getWikidataHeaders() },
+      4500
+    );
+    const imdb = String(res?.results?.bindings?.[0]?.imdb?.value || '').trim();
+    return /^tt\d+$/i.test(imdb) ? imdb : '';
+  } catch {
+    return '';
+  }
+}
+
+async function resolveImdbFromCinemetaSearch(item) {
+  const rawTitle = String(item?.title || '').trim();
+  if (!rawTitle || /^(movie|tv)\s*#\d+$/i.test(rawTitle)) return '';
+  const cmType = item.mediaType === 'tv' || item.mediaType === 'series' ? 'series' : 'movie';
+  const targetTitle = normalizeLookupTitle(rawTitle);
+  const targetYear = String(item.year || '').match(/\d{4}/)?.[0] || '';
+  const targetTmdb = String(item.tmdbId || '').trim();
+
+  const extractImdb = (m) => {
+    const candidate = m?.imdb_id || (String(m?.id || '').startsWith('tt') ? m.id : '');
+    return /^tt\d+$/i.test(String(candidate || '')) ? String(candidate) : '';
+  };
+
+  try {
+    const data = await fetchJsonSafe(
+      `${CINEMETA_BASE}/catalog/${cmType}/top/search=${encodeURIComponent(rawTitle)}.json`,
+      {},
+      4500
+    );
+    const metas = Array.isArray(data?.metas) ? data.metas : [];
+    if (!metas.length) return '';
+
+    if (targetTmdb) {
+      const byTmdb = metas.find((m) => String(m?.moviedb_id || '') === targetTmdb && extractImdb(m));
+      if (byTmdb) return extractImdb(byTmdb);
+    }
+
+    if (targetYear) {
+      const exactYear = metas.find((m) => {
+        const mYear = String(m?.year || m?.releaseInfo || '').match(/\d{4}/)?.[0] || '';
+        return normalizeLookupTitle(m?.name) === targetTitle && mYear === targetYear && extractImdb(m);
+      });
+      if (exactYear) return extractImdb(exactYear);
+
+      const nearYear = metas.find((m) => {
+        const mYear = String(m?.year || m?.releaseInfo || '').match(/\d{4}/)?.[0] || '';
+        return (
+          normalizeLookupTitle(m?.name) === targetTitle &&
+          mYear &&
+          Math.abs(Number(mYear) - Number(targetYear)) <= 1 &&
+          extractImdb(m)
+        );
+      });
+      if (nearYear) return extractImdb(nearYear);
+    }
+
+    const exactTitle = metas.find((m) => normalizeLookupTitle(m?.name) === targetTitle && extractImdb(m));
+    if (exactTitle) return extractImdb(exactTitle);
+
+    return '';
+  } catch {
+    return '';
+  }
+}
+
 /**
- * Hydrate any item (e.g. a Cinemeta search hit lacking moviedb_id or full episodes)
- * into a VidRift-ready playable object with TMDB ID, HD backdrop, logo, cast, and episodes.
+ * Hydrate any item (e.g. a Cinemeta search hit lacking moviedb_id, or a TMDB-only / Quick Launch item lacking imdbId)
+ * into a stream-ready object with IMDb ID, TMDB ID, HD backdrop, logo, cast, and episodes.
  */
 export async function resolveFullMetadata(item) {
-  if (!item || item.mediaType === 'anime') return item;
-  const cacheKey = item.imdbId ? `${item.mediaType}:${item.imdbId}` : item.id;
-  if (metaCache.has(cacheKey)) return { ...item, ...metaCache.get(cacheKey) };
+  if (!item || item.mediaType === 'anime' || item.mediaType === 'hls') return item;
 
-  // Already has both tmdbId and (if movie, logo/backdrop; if tv, seasonsList with episodes)
+  const cacheKey = item.imdbId
+    ? `${item.mediaType || 'movie'}:${item.imdbId}`
+    : item.tmdbId
+    ? `${item.mediaType || 'movie'}:tmdb:${item.tmdbId}`
+    : item.id;
+  if (cacheKey && metaCache.has(cacheKey)) {
+    const cached = metaCache.get(cacheKey);
+    return {
+      ...item,
+      ...cached,
+      tmdbId: cached.tmdbId || item.tmdbId || '',
+      imdbId: cached.imdbId || item.imdbId || '',
+    };
+  }
+
+  let working = { ...item };
+
+  // Resolve missing imdbId even when tmdbId is already present (needed by Stremio addons & OpenSubtitles v3)
+  if (!working.imdbId) {
+    const [wikidataImdb, cinemetaImdb] = await Promise.all([
+      working.tmdbId ? resolveImdbFromWikidataTmdb(working.tmdbId, working.mediaType) : Promise.resolve(''),
+      resolveImdbFromCinemetaSearch(working),
+    ]);
+    const resolvedImdbId = wikidataImdb || cinemetaImdb;
+    if (resolvedImdbId) {
+      working.imdbId = resolvedImdbId;
+    }
+  }
+
+  const isPlaceholderTitle = !working.title || /^(movie|tv)\s*#\d+$/i.test(String(working.title).trim());
   const needsCinemetaMeta =
-    Boolean(item.imdbId) &&
-    (!item.tmdbId ||
-      !item.backdrop ||
-      (item.mediaType === 'tv' && (!item.seasonsList || !item.seasonsList[0]?.episodes)));
+    Boolean(working.imdbId) &&
+    (!working.tmdbId ||
+      !working.backdrop ||
+      isPlaceholderTitle ||
+      (working.mediaType === 'tv' && (!working.seasonsList || !working.seasonsList[0]?.episodes)));
 
   if (needsCinemetaMeta) {
     try {
-      const cmType = item.mediaType === 'tv' ? 'series' : 'movie';
-      const data = await fetchJsonSafe(`${CINEMETA_BASE}/meta/${cmType}/${encodeURIComponent(item.imdbId)}.json`);
+      const cmType = working.mediaType === 'tv' || working.mediaType === 'series' ? 'series' : 'movie';
+      const data = await fetchJsonSafe(
+        `${CINEMETA_BASE}/meta/${cmType}/${encodeURIComponent(working.imdbId)}.json`,
+        {},
+        5000
+      );
       if (data?.meta) {
         const hydrated = normalizeCinemetaItem(data.meta, cmType);
-        // Preserve handcrafted sonic DNA if item came from curated catalog
+        const preservedTmdb = hydrated.tmdbId || working.tmdbId || '';
         const merged = {
+          ...working,
           ...hydrated,
-          sonic: item.source === 'cinemeta' ? hydrated.sonic : item.sonic || hydrated.sonic,
-          palette: item.source === 'cinemeta' ? hydrated.palette : item.palette || hydrated.palette,
+          id: preservedTmdb ? `${hydrated.mediaType}:${preservedTmdb}` : hydrated.id,
+          tmdbId: preservedTmdb,
+          imdbId: hydrated.imdbId || working.imdbId,
+          title: isPlaceholderTitle ? hydrated.title : working.title || hydrated.title,
+          poster: working.poster || hydrated.poster,
+          backdrop: hydrated.backdrop || working.backdrop,
+          sonic: working.source === 'cinemeta' ? hydrated.sonic : working.sonic || hydrated.sonic,
+          palette: working.source === 'cinemeta' ? hydrated.palette : working.palette || hydrated.palette,
         };
-        if (!merged.tmdbId && item.imdbId) {
-          merged.tmdbId = await resolveTmdbFromWikidataImdb(item.imdbId, item.mediaType);
+        if (!merged.tmdbId && merged.imdbId) {
+          merged.tmdbId = await resolveTmdbFromWikidataImdb(merged.imdbId, merged.mediaType);
           if (merged.tmdbId) merged.id = `${merged.mediaType}:${merged.tmdbId}`;
         }
-        metaCache.set(cacheKey, merged);
-        return merged;
+        working = merged;
       }
     } catch {
-      // Fall through to Wikidata IMDb->TMDB fallback
+      // Keep resolved imdbId and fall through to Wikidata IMDb->TMDB fallback if needed
     }
   }
 
-  if (!item.tmdbId && item.imdbId) {
-    const tmdbId = await resolveTmdbFromWikidataImdb(item.imdbId, item.mediaType);
+  if (!working.tmdbId && working.imdbId) {
+    const tmdbId = await resolveTmdbFromWikidataImdb(working.imdbId, working.mediaType);
     if (tmdbId) {
-      const resolved = { ...item, tmdbId, id: `${item.mediaType}:${tmdbId}` };
-      metaCache.set(cacheKey, resolved);
-      return resolved;
+      working = { ...working, tmdbId, id: `${working.mediaType || 'movie'}:${tmdbId}` };
     }
   }
 
-  return item;
+  if (working.imdbId || (item.imdbId && working.tmdbId)) {
+    const mediaType = working.mediaType || 'movie';
+    if (cacheKey) metaCache.set(cacheKey, working);
+    if (working.imdbId) metaCache.set(`${mediaType}:${working.imdbId}`, working);
+    if (working.tmdbId) metaCache.set(`${mediaType}:tmdb:${working.tmdbId}`, working);
+  }
+
+  return working;
 }
 
 async function searchAniListBrowser(query) {
@@ -786,4 +924,242 @@ export async function fetchTvSeasonsData(tmdbId, tmdbApiKey = '', imdbId = '') {
   }
 
   return null;
+}
+
+function normalizeManifestUrls(rawUrl) {
+  let trimmed = String(rawUrl || '').trim();
+  if (!trimmed) return { baseUrl: '', manifestUrl: '' };
+  if (/^stremio:\/\//i.test(trimmed)) {
+    trimmed = `https://${trimmed.slice('stremio://'.length)}`;
+  }
+  if (!/^https?:\/\//i.test(trimmed)) return { baseUrl: '', manifestUrl: '' };
+  try {
+    const parsed = new URL(trimmed);
+    const cleanPath = parsed.pathname.replace(/\/+$/, '').replace(/\/manifest\.json$/i, '');
+    parsed.hash = '';
+    parsed.pathname = cleanPath || '/';
+    const baseUrl = parsed.toString().replace(/\/+$/, '');
+    parsed.pathname = `${cleanPath}/manifest.json`;
+    const manifestUrl = parsed.toString();
+    return { baseUrl, manifestUrl };
+  } catch {
+    return { baseUrl: '', manifestUrl: '' };
+  }
+}
+
+/**
+ * Fetch and validate a Stremio addon manifest.json.
+ * Normalizes `stremio://` links to `https://`, fetches `manifest.json` directly first,
+ * and falls back to Edge Proxy `/api/resolve/addon-manifest` if CORS or upstream blocks browser fetch.
+ *
+ * @param {string} rawUrl
+ * @param {{ hlsProxyUrl?: string }} [options]
+ * @returns {Promise<{ id: string, url: string, manifestUrl: string, name: string, version: string, description: string, logo: string, types: string[], idPrefixes: string[], resources: Array, enabled: boolean }>}
+ */
+export async function fetchAddonManifest(rawUrl, { hlsProxyUrl = '' } = {}) {
+  const { baseUrl, manifestUrl } = normalizeManifestUrls(rawUrl);
+  if (!baseUrl || !manifestUrl) {
+    throw new Error('Enter a valid Stremio addon URL (https://... or stremio://...)');
+  }
+
+  let payload = null;
+  let directError = null;
+
+  try {
+    payload = await fetchJsonSafe(manifestUrl, { headers: { Accept: 'application/json' } }, 6000);
+  } catch (err) {
+    directError = err;
+  }
+
+  if (!payload) {
+    const cleanProxy = String(hlsProxyUrl || '')
+      .trim()
+      .replace(/\/api\/(?:proxy\/(?:hls|subtitles)|resolve\/(?:stream|addon-manifest))\/?$/i, '')
+      .replace(/\/+$/, '');
+    const proxyEndpoint =
+      cleanProxy && /^https?:\/\//i.test(cleanProxy)
+        ? `${cleanProxy}/api/resolve/addon-manifest?url=${encodeURIComponent(manifestUrl)}`
+        : `./api/resolve/addon-manifest?url=${encodeURIComponent(manifestUrl)}`;
+
+    try {
+      payload = await fetchJsonSafe(proxyEndpoint, { headers: { Accept: 'application/json' } }, 6000);
+    } catch (proxyErr) {
+      throw new Error(
+        `Failed to load addon manifest (${directError?.message || proxyErr?.message || 'CORS or network error'})`
+      );
+    }
+  }
+
+  const manifest = payload?.manifest && typeof payload.manifest === 'object' ? payload.manifest : payload;
+  if (!manifest || typeof manifest !== 'object' || (!manifest.name && !manifest.id && !Array.isArray(manifest.resources))) {
+    throw new Error('Response is not a valid Stremio addon manifest.json');
+  }
+
+  let fallbackName = 'Stremio Addon';
+  try {
+    fallbackName = new URL(baseUrl).hostname.replace(/^www\./i, '') || fallbackName;
+  } catch {}
+
+  return {
+    id: String(manifest.id || baseUrl),
+    url: baseUrl,
+    manifestUrl,
+    name: String(manifest.name || fallbackName).trim() || fallbackName,
+    version: String(manifest.version || '1.0.0').trim(),
+    description: String(manifest.description || '').trim(),
+    logo: typeof manifest.logo === 'string' ? manifest.logo : '',
+    types: Array.isArray(manifest.types) ? manifest.types.map(String) : ['movie', 'series'],
+    idPrefixes: Array.isArray(manifest.idPrefixes) ? manifest.idPrefixes.map(String) : ['tt'],
+    resources: Array.isArray(manifest.resources) ? manifest.resources : ['stream'],
+    enabled: true,
+  };
+}
+
+function isArchiveTitleMatch(queryTitle, docTitle) {
+  const q = normalizeLookupTitle(queryTitle);
+  const d = normalizeLookupTitle(docTitle);
+  if (!q || !d) return false;
+  if (d === q) return true;
+  const stripped = d
+    .replace(
+      /\b(?:19\d{2}|20\d{2}|full movie|full film|hd|uhd|4k|1080p|720p|480p|remastered|restored|colorized|uncut)\b/g,
+      ' '
+    )
+    .replace(/\s+/g, ' ')
+    .trim();
+  return stripped === q;
+}
+
+function isOpenArchiveDoc(doc, queryTitle, targetYear) {
+  if (!doc?.identifier) return false;
+  const docTitle = String(doc.title || '');
+  const wantsJunk = /\b(trailer|teaser|featurette|soundtrack|ost|extrait|clip|promo|reaction|review)\b/i.test(queryTitle);
+  if (!wantsJunk && /\b(trailer|teaser|featurette|soundtrack|ost|extrait|clip|promo|behind the scenes|reaction|review)\b/i.test(docTitle)) {
+    return false;
+  }
+  if (!isArchiveTitleMatch(queryTitle, docTitle)) return false;
+
+  if (targetYear && doc.year) {
+    const docYear = String(doc.year).match(/\d{4}/)?.[0] || '';
+    if (docYear && Math.abs(Number(docYear) - Number(targetYear)) > 2) return false;
+  }
+
+  const collections = Array.isArray(doc.collection) ? doc.collection.map((c) => String(c).toLowerCase()) : null;
+  if (collections && collections.some((c) => /movie_trailers|social-media-video|mirrortube/i.test(c))) {
+    return false;
+  }
+
+  const lic = String(doc.licenseurl || '').toLowerCase();
+  if (lic) {
+    return /publicdomain|creativecommons|cc0|zero/i.test(lic);
+  }
+  // On live Archive.org (where collection metadata exists), require an explicit open/PD licenseurl
+  // unless from a trusted public-domain government/prelinger archive, avoiding unverified community uploads.
+  if (collections) {
+    return collections.some((c) => /^(?:prelinger|usgovfilms|nasa)$/i.test(c));
+  }
+  return true;
+}
+
+function pickBestArchiveMediaFile(files = []) {
+  if (!Array.isArray(files) || files.length === 0) return null;
+  const hlsFile = files.find(
+    (f) => typeof f?.name === 'string' && /\.m3u8$/i.test(f.name) && !/trailer|sample|preview/i.test(f.name)
+  );
+  if (hlsFile) return hlsFile;
+
+  const mp4Files = files.filter(
+    (f) =>
+      typeof f?.name === 'string' &&
+      /\.mp4$/i.test(f.name) &&
+      !/trailer|sample|preview/i.test(f.name)
+  );
+  if (!mp4Files.length) return null;
+
+  mp4Files.sort((a, b) => {
+    const a512 = /512kb/i.test(`${a.format || ''} ${a.name || ''}`) ? 1 : 0;
+    const b512 = /512kb/i.test(`${b.format || ''} ${b.name || ''}`) ? 1 : 0;
+    if (a512 !== b512) return a512 - b512;
+    const aHeight = Number(a.height || 0);
+    const bHeight = Number(b.height || 0);
+    if (aHeight !== bHeight) return bHeight - aHeight;
+    return Number(b.size || 0) - Number(a.size || 0);
+  });
+
+  return mp4Files[0];
+}
+
+/**
+ * Keyless Archive.org public-domain / open-license film lookup.
+ * Searches `archive.org/advancedsearch.php` and verifies `/metadata/{id}` files,
+ * returning a direct `.mp4` or `.m3u8` URL when a verified open-license match exists.
+ *
+ * @param {string} title
+ * @param {string|number} [year='']
+ * @returns {Promise<{ identifier: string, title: string, year: string, url: string, format: 'hls'|'mp4', type: 'hls'|'direct', quality: string, licenseUrl: string, source: 'archive.org' } | null>}
+ */
+export async function fetchArchiveOrgDirectStream(title, year = '') {
+  const cleanTitle = String(title || '').trim();
+  if (!cleanTitle || cleanTitle.length < 2 || /^(movie|tv)\s*#\d+$/i.test(cleanTitle)) return null;
+  const cleanYear = String(year || '').match(/\d{4}/)?.[0] || '';
+
+  try {
+    const safeTitle = cleanTitle.replace(/["\\]/g, ' ').trim();
+    const searchQuery = `title:("${safeTitle}") AND mediatype:(movies)`;
+    const searchUrl =
+      `https://archive.org/advancedsearch.php?q=${encodeURIComponent(searchQuery)}` +
+      `&fl[]=identifier&fl[]=title&fl[]=year&fl[]=licenseurl&fl[]=collection&fl[]=downloads` +
+      `&sort[]=downloads+desc&rows=12&output=json`;
+
+    const searchData = await fetchJsonSafe(searchUrl, {}, 4000);
+    const docs = Array.isArray(searchData?.response?.docs) ? searchData.response.docs : [];
+    const candidates = docs.filter((d) => isOpenArchiveDoc(d, cleanTitle, cleanYear)).slice(0, 2);
+    if (!candidates.length) return null;
+
+    for (const doc of candidates) {
+      try {
+        const meta = await fetchJsonSafe(
+          `https://archive.org/metadata/${encodeURIComponent(doc.identifier)}`,
+          {},
+          4500
+        );
+        const metaLic = String(meta?.metadata?.licenseurl || doc.licenseurl || '').toLowerCase();
+        if (metaLic && !/publicdomain|creativecommons|cc0|zero/i.test(metaLic)) {
+          continue;
+        }
+        const chosen = pickBestArchiveMediaFile(meta?.files || []);
+        if (!chosen?.name) continue;
+
+        const encodedPath = chosen.name
+          .split('/')
+          .map((seg) => encodeURIComponent(seg))
+          .join('/');
+        const host = meta?.d1 || meta?.server || '';
+        const dir = meta?.dir || '';
+        const directUrl =
+          host && dir
+            ? `https://${host}${dir.startsWith('/') ? '' : '/'}${dir.replace(/\/+$/, '')}/${encodedPath}`
+            : `https://archive.org/download/${encodeURIComponent(doc.identifier)}/${encodedPath}`;
+
+        const isHls = /\.m3u8$/i.test(chosen.name);
+        const height = Number(chosen.height || 0);
+        return {
+          identifier: String(doc.identifier),
+          title: String(meta?.metadata?.title || doc.title || cleanTitle),
+          year: String(meta?.metadata?.year || doc.year || cleanYear),
+          url: directUrl,
+          format: isHls ? 'hls' : 'mp4',
+          type: isHls ? 'hls' : 'direct',
+          quality: height >= 2160 ? '4K UHD' : height >= 1080 ? '1080p' : height >= 720 ? '720p' : 'HD',
+          licenseUrl: String(meta?.metadata?.licenseurl || doc.licenseurl || ''),
+          source: 'archive.org',
+        };
+      } catch {
+        // Try next candidate
+      }
+    }
+    return null;
+  } catch {
+    return null;
+  }
 }

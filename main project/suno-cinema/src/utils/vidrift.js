@@ -1,3 +1,5 @@
+import { fetchArchiveOrgDirectStream } from './client-api.js';
+
 export const VIDRIFT_ORIGIN = 'https://embed.vidrift.net';
 export const VIDLINK_ORIGIN = 'https://vidlink.pro';
 
@@ -51,14 +53,104 @@ export function cleanProxyUrl(rawUrl) {
 }
 
 /**
- * Normalize a configured Stremio addon URL (strips /manifest.json and trailing slashes).
+ * Normalize a configured Stremio addon URL (converts stremio:// -> https://, strips /manifest.json and trailing slashes).
  * @param {string} rawUrl
  * @returns {string}
  */
 export function cleanAddonUrl(rawUrl) {
-  const trimmed = String(rawUrl || '').trim();
-  if (!trimmed || !/^https?:\/\//i.test(trimmed)) return '';
+  let trimmed = String(rawUrl || '').trim();
+  if (!trimmed) return '';
+  if (/^stremio:\/\//i.test(trimmed)) {
+    trimmed = `https://${trimmed.slice('stremio://'.length)}`;
+  }
+  if (!/^https?:\/\//i.test(trimmed)) return '';
   return trimmed.replace(/\/manifest\.json\/?$/i, '').replace(/\/+$/, '');
+}
+
+/**
+ * Normalize a Stremio addon URL into its full https://.../manifest.json URL (converts stremio:// -> https://).
+ * @param {string} rawUrl
+ * @returns {string}
+ */
+export function normalizeAddonManifestUrl(rawUrl) {
+  let trimmed = String(rawUrl || '').trim();
+  if (!trimmed) return '';
+  if (/^stremio:\/\//i.test(trimmed)) {
+    trimmed = `https://${trimmed.slice('stremio://'.length)}`;
+  }
+  if (!/^https?:\/\//i.test(trimmed)) return '';
+  try {
+    const parsed = new URL(trimmed);
+    const cleanPath = parsed.pathname.replace(/\/+$/, '').replace(/\/manifest\.json$/i, '');
+    parsed.hash = '';
+    parsed.pathname = `${cleanPath}/manifest.json`;
+    return parsed.toString();
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Collect, normalize, and deduplicate enabled Stremio addon base URLs from `stremioAddons` + legacy options.
+ * Respects `enabled === false` entries in `stremioAddons`.
+ * @param {object|Array} [input]
+ * @returns {string[]}
+ */
+export function collectStremioAddonUrls(input = {}) {
+  const opts = Array.isArray(input) ? { stremioAddons: input } : input && typeof input === 'object' ? input : {};
+  const disabledUrls = new Set();
+  const seen = new Set();
+  const urls = [];
+
+  if (Array.isArray(opts.stremioAddons)) {
+    for (const entry of opts.stremioAddons) {
+      if (entry && typeof entry === 'object' && entry.enabled === false) {
+        const disabled = cleanAddonUrl(entry.url || entry.transportUrl || '');
+        if (disabled) disabledUrls.add(disabled);
+      }
+    }
+  }
+
+  const pushAddon = (raw) => {
+    const clean = cleanAddonUrl(raw);
+    if (clean && !disabledUrls.has(clean) && !seen.has(clean)) {
+      seen.add(clean);
+      urls.push(clean);
+    }
+  };
+
+  if (Array.isArray(opts.stremioAddons)) {
+    for (const entry of opts.stremioAddons) {
+      if (typeof entry === 'string') {
+        pushAddon(entry);
+      } else if (entry && typeof entry === 'object' && entry.enabled !== false) {
+        pushAddon(entry.url || entry.transportUrl || '');
+      }
+    }
+  }
+
+  if (Array.isArray(opts.addonUrls)) {
+    for (const u of opts.addonUrls) pushAddon(u);
+  } else if (typeof opts.addonUrls === 'string' && opts.addonUrls.trim()) {
+    const raw = opts.addonUrls.trim();
+    if (raw.startsWith('[')) {
+      try {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          for (const u of parsed) pushAddon(u);
+        }
+      } catch {
+        for (const u of raw.split(',')) pushAddon(u);
+      }
+    } else {
+      for (const u of raw.split(',')) pushAddon(u);
+    }
+  }
+
+  if (opts.stremioAddonUrl) pushAddon(opts.stremioAddonUrl);
+  if (opts.addonUrl) pushAddon(opts.addonUrl);
+
+  return urls;
 }
 
 /**
@@ -426,9 +518,126 @@ export function recordFailoverAttempt(failoverState, reason = 'error') {
   };
 }
 
+function deriveAddonDisplayName(addonUrl, stremioAddons = []) {
+  const clean = cleanAddonUrl(addonUrl);
+  const match = (Array.isArray(stremioAddons) ? stremioAddons : []).find(
+    (a) => a && typeof a === 'object' && cleanAddonUrl(a.url || a.transportUrl || '') === clean
+  );
+  if (match?.name) return String(match.name);
+  try {
+    return new URL(clean).hostname.replace(/^www\./i, '') || 'Addon';
+  } catch {
+    return 'Addon';
+  }
+}
+
+function expandCustomResolverTemplate(template, item, { season = 1, episode = 1 } = {}) {
+  const raw = String(template || '').trim();
+  if (!raw || !/^https?:\/\//i.test(raw)) return '';
+  const tmdbId = String(item?.tmdbId || (item?.mediaType !== 'anime' && item?.mediaType !== 'hls' ? item?.id : '') || '');
+  const imdbId = String(item?.imdbId || '');
+  const anilistId = String(item?.anilistId || (item?.mediaType === 'anime' ? item?.id : '') || '');
+  const malId = String(item?.malId || '');
+  const mediaType = String(item?.mediaType || 'movie');
+  const title = String(item?.title || '');
+  const year = String(item?.year || '');
+
+  const pathPart = raw.split('?')[0];
+  if (pathPart.includes('{imdbId}') && !imdbId) return '';
+  if (pathPart.includes('{tmdbId}') && !tmdbId) return '';
+  if (pathPart.includes('{anilistId}') && !anilistId) return '';
+  if (raw.includes('{') && !imdbId && !tmdbId && !anilistId && !malId && !title) return '';
+
+  return raw
+    .replace(/\{tmdbId\}/g, encodeURIComponent(tmdbId))
+    .replace(/\{imdbId\}/g, encodeURIComponent(imdbId))
+    .replace(/\{anilistId\}/g, encodeURIComponent(anilistId))
+    .replace(/\{malId\}/g, encodeURIComponent(malId))
+    .replace(/\{mediaType\}/g, encodeURIComponent(mediaType))
+    .replace(/\{season\}/g, encodeURIComponent(String(season)))
+    .replace(/\{episode\}/g, encodeURIComponent(String(episode)))
+    .replace(/\{title\}/g, encodeURIComponent(title))
+    .replace(/\{year\}/g, encodeURIComponent(year));
+}
+
+function inferStreamQuality(label = '') {
+  if (/2160|4k/i.test(label)) return '4K UHD';
+  if (/1080/i.test(label)) return '1080p';
+  if (/720/i.test(label)) return '720p';
+  return 'HD';
+}
+
+function mapStremioStreamEntry(stream, { apiBase = '', addonLabel = '', nextIndex = 0 }) {
+  if (!stream?.url || !/^https?:\/\//i.test(stream.url)) return null;
+  const lower = stream.url.toLowerCase();
+  const isMp4 = lower.includes('.mp4') && !lower.includes('.m3u8');
+  if (stream.behaviorHints?.notWebReady === true && !lower.includes('.m3u8') && !isMp4) return null;
+
+  const reqHeaders = stream.behaviorHints?.proxyHeaders?.request || {};
+  const streamReferer = reqHeaders.Referer || reqHeaders.referer || stream.referer || '';
+  const baseLabel =
+    [stream.name, stream.title].filter(Boolean).join(' — ').split('\n')[0].slice(0, 80) ||
+    (addonLabel ? `${addonLabel} Stream` : 'Addon HLS Stream');
+  const quality = stream.quality || inferStreamQuality(baseLabel);
+  const id = nextIndex === 0 ? 'addon-hls' : `addon-hls-${nextIndex + 1}`;
+
+  if (apiBase) {
+    return {
+      id,
+      name: `${baseLabel} (Edge Proxy)`,
+      type: isMp4 ? 'direct' : 'hls',
+      url: buildHlsProxyUrl(stream.url, { hlsProxyUrl: apiBase, referer: streamReferer }),
+      rawUrl: stream.url,
+      referer: streamReferer || undefined,
+      addonName: addonLabel || undefined,
+      proxied: true,
+      quality,
+      shielded: true,
+      direct: true,
+      node: 'addon-edge-proxy',
+    };
+  }
+
+  if (isDirectStreamUrl(stream.url)) {
+    return {
+      id,
+      name: baseLabel,
+      type: isMp4 ? 'direct' : 'hls',
+      url: stream.url,
+      rawUrl: stream.url,
+      addonName: addonLabel || undefined,
+      quality,
+      shielded: true,
+      direct: true,
+      node: 'addon-direct',
+    };
+  }
+
+  return null;
+}
+
+function buildArchiveOrgSourceNode(ao, { apiBase = '', backendActive = false } = {}) {
+  if (!ao?.url) return null;
+  const shouldProxy = Boolean(apiBase || backendActive);
+  const url = shouldProxy ? buildHlsProxyUrl(ao.url, { hlsProxyUrl: apiBase }) : ao.url;
+  return {
+    id: shouldProxy ? 'archive-org-proxy' : 'archive-org-direct',
+    name: shouldProxy ? 'Archive.org (Edge Proxy)' : 'Archive.org (Public Domain)',
+    type: ao.type || (ao.url.toLowerCase().includes('.m3u8') ? 'hls' : 'direct'),
+    url,
+    rawUrl: ao.url,
+    proxied: shouldProxy,
+    quality: ao.quality || 'HD',
+    shielded: true,
+    direct: true,
+    node: 'archive-org',
+    source: 'archive.org',
+  };
+}
+
 /**
  * Resolves available stream sources for a media item into an ordered multi-node mirror list:
- * Direct HLS / Edge Proxy HLS / Addon HLS / Debrid / VidLink Shield / VidRift Sandboxed.
+ * Direct HLS / Edge Proxy HLS / Multi-Addon HLS / Custom Resolver / Debrid / Archive.org / VidLink Shield / VidRift Sandboxed.
  *
  * @param {object} item
  * @param {object} [options]
@@ -443,7 +652,8 @@ export async function fetchStreamSources(item, options = {}) {
   const anilistId = item.anilistId || (item.mediaType === 'anime' ? item.id : '');
   const malId = item.malId || '';
   const apiBase = cleanProxyUrl(options.hlsProxyUrl || '');
-  const addonUrl = cleanAddonUrl(options.stremioAddonUrl || options.addonUrl || '');
+  const addonUrls = collectStremioAddonUrls(options);
+  const customResolverUrl = String(options.customResolverUrl || '').trim();
   const debridKey = String(options.debridKey || options.debridApiKey || '').trim();
   const debridProvider = String(options.debridProvider || 'realdebrid').trim().toLowerCase();
 
@@ -455,6 +665,8 @@ export async function fetchStreamSources(item, options = {}) {
     if (anilistId) q.set('anilistId', String(anilistId));
     if (malId) q.set('malId', String(malId));
     if (item.mediaType) q.set('mediaType', item.mediaType);
+    if (item.title) q.set('title', item.title);
+    if (item.year) q.set('year', String(item.year));
     q.set('season', String(season));
     q.set('episode', String(episode));
 
@@ -463,9 +675,19 @@ export async function fetchStreamSources(item, options = {}) {
     if (primaryDirect) q.set('directUrl', primaryDirect);
     if (item.magnetUri) q.set('magnet', item.magnetUri);
     if (item.infoHash) q.set('hash', item.infoHash);
+    if (addonUrls.length > 0) q.set('addonUrls', JSON.stringify(addonUrls));
+    if (customResolverUrl && /^https?:\/\//i.test(customResolverUrl)) {
+      q.set('customResolverUrl', customResolverUrl);
+    }
 
     const headers = {};
-    if (addonUrl) headers['X-Addon-Url'] = addonUrl;
+    if (addonUrls.length > 0) {
+      headers['X-Addon-Url'] = addonUrls[0];
+      headers['X-Addon-Urls'] = JSON.stringify(addonUrls);
+    }
+    if (customResolverUrl && /^https?:\/\//i.test(customResolverUrl)) {
+      headers['X-Custom-Resolver'] = customResolverUrl;
+    }
     if (debridKey) {
       headers['X-Debrid-Key'] = debridKey;
       headers['X-Debrid-Provider'] = debridProvider;
@@ -473,7 +695,7 @@ export async function fetchStreamSources(item, options = {}) {
 
     const resolveEndpoint = apiBase ? `${apiBase}/api/resolve/stream` : './api/resolve/stream';
     const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
-    const timer = controller ? setTimeout(() => controller.abort(), 4500) : null;
+    const timer = controller ? setTimeout(() => controller.abort(), 5000) : null;
     try {
       const resp = await fetch(`${resolveEndpoint}?${q.toString()}`, {
         headers,
@@ -482,7 +704,7 @@ export async function fetchStreamSources(item, options = {}) {
       if (resp.ok) {
         const data = await resp.json();
         if (Array.isArray(data?.sources) && data.sources.length) {
-          return data.sources.map((src) => {
+          const mapped = data.sources.map((src) => {
             if (src.id === 'vidlink-shield' && (tmdbId || imdbId || (item.mediaType === 'anime' && malId))) {
               return { ...src, url: buildVidlinkEmbedUrl(item, { ...options, season, episode }) };
             }
@@ -494,6 +716,23 @@ export async function fetchStreamSources(item, options = {}) {
               url: normalizeResolveApiUrl(src.url, apiBase),
             };
           });
+
+          const hasDirect = mapped.some(isPlayableDirectSource);
+          if (
+            !hasDirect &&
+            options.includeArchiveFallback !== false &&
+            (!item.mediaType || item.mediaType === 'movie') &&
+            item.title
+          ) {
+            const ao = await fetchArchiveOrgDirectStream(item.title, item.year).catch(() => null);
+            const aoNode = buildArchiveOrgSourceNode(ao, { apiBase, backendActive: true });
+            if (aoNode) {
+              const firstEmbedIdx = mapped.findIndex((s) => s.type === 'embed');
+              if (firstEmbedIdx >= 0) mapped.splice(firstEmbedIdx, 0, aoNode);
+              else mapped.push(aoNode);
+            }
+          }
+          return mapped;
         }
       }
     } finally {
@@ -552,78 +791,172 @@ export async function fetchStreamSources(item, options = {}) {
     }
   });
 
-  // 3. Client-side Stremio addon resolution (when configured for static GitHub Pages)
-  const addonEndpoint = buildStremioStreamUrl(addonUrl, item, { season, episode });
-  if (addonEndpoint) {
+  // 3. Client-side parallel Stremio addons + custom resolver template resolution
+  const addonTasks = addonUrls.map(async (baseAddonUrl) => {
+    const endpoint = buildStremioStreamUrl(baseAddonUrl, item, { season, episode });
+    if (!endpoint) return [];
+    const addonLabel = deriveAddonDisplayName(baseAddonUrl, options.stremioAddons);
     const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
-    const timer = controller ? setTimeout(() => controller.abort(), 4500) : null;
+    const timer = controller ? setTimeout(() => controller.abort(), 5000) : null;
     try {
-      const addonResp = await fetch(addonEndpoint, {
+      const resp = await fetch(endpoint, {
         headers: { Accept: 'application/json' },
         signal: controller?.signal,
       });
-      if (addonResp.ok) {
-        const addonData = await addonResp.json();
-        const streams = Array.isArray(addonData?.streams) ? addonData.streams : [];
-        let added = 0;
-        for (const stream of streams) {
-          if (added >= 6) break;
-          if (!stream?.url || !/^https?:\/\//i.test(stream.url)) continue;
-          const lower = stream.url.toLowerCase();
-          const isMp4 = lower.includes('.mp4') && !lower.includes('.m3u8');
-          if (stream.behaviorHints?.notWebReady === true && !lower.includes('.m3u8') && !isMp4) continue;
-
-          const reqHeaders = stream.behaviorHints?.proxyHeaders?.request || {};
-          const streamReferer = reqHeaders.Referer || reqHeaders.referer || '';
-          const label =
-            [stream.name, stream.title].filter(Boolean).join(' — ').split('\n')[0].slice(0, 80) ||
-            'Addon HLS Stream';
-          const quality = /2160|4k/i.test(label)
-            ? '4K UHD'
-            : /1080/i.test(label)
-            ? '1080p'
-            : /720/i.test(label)
-            ? '720p'
-            : 'HD';
-
-          if (apiBase) {
-            list.push({
-              id: added === 0 ? 'addon-hls' : `addon-hls-${added + 1}`,
-              name: `${label} (Edge Proxy)`,
-              type: isMp4 ? 'direct' : 'hls',
-              url: buildHlsProxyUrl(stream.url, { hlsProxyUrl: apiBase, referer: streamReferer }),
-              rawUrl: stream.url,
-              referer: streamReferer || undefined,
-              proxied: true,
-              quality,
-              shielded: true,
-              direct: true,
-              node: 'addon-edge-proxy',
-            });
-          } else if (isDirectStreamUrl(stream.url)) {
-            list.push({
-              id: added === 0 ? 'addon-hls' : `addon-hls-${added + 1}`,
-              name: label,
-              type: isMp4 ? 'direct' : 'hls',
-              url: stream.url,
-              rawUrl: stream.url,
-              quality,
-              shielded: true,
-              direct: true,
-              node: 'addon-direct',
-            });
-          }
-          added += 1;
-        }
-      }
+      if (!resp.ok) return [];
+      const data = await resp.json();
+      const streams = Array.isArray(data?.streams) ? data.streams : [];
+      return streams.map((stream) => ({ stream, addonLabel }));
     } catch {
-      // Ignore addon fetch failure
+      return [];
     } finally {
       if (timer) clearTimeout(timer);
     }
+  });
+
+  const expandedResolverUrl = expandCustomResolverTemplate(customResolverUrl, item, { season, episode });
+  const customResolverTask = (async () => {
+    if (!expandedResolverUrl) return [];
+    if (isDirectStreamUrl(expandedResolverUrl)) {
+      return [{ directResolverUrl: expandedResolverUrl }];
+    }
+    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const timer = controller ? setTimeout(() => controller.abort(), 4500) : null;
+    try {
+      const resp = await fetch(expandedResolverUrl, {
+        headers: { Accept: 'application/json' },
+        signal: controller?.signal,
+      });
+      if (!resp.ok) return [];
+      const data = await resp.json();
+      if (Array.isArray(data?.streams)) {
+        return data.streams.map((stream) => ({ stream, addonLabel: 'Custom Resolver' }));
+      }
+      if (Array.isArray(data?.sources)) {
+        return data.sources.map((src) => ({ resolverSource: src }));
+      }
+      if (data?.url && /^https?:\/\//i.test(data.url)) {
+        return [{ stream: data, addonLabel: 'Custom Resolver' }];
+      }
+      return [];
+    } catch {
+      return [];
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  })();
+
+  const [addonResults, customResults] = await Promise.all([
+    Promise.allSettled(addonTasks),
+    customResolverTask.catch(() => []),
+  ]);
+
+  let addonNodeCounter = 0;
+  for (const res of addonResults) {
+    if (res.status !== 'fulfilled' || !Array.isArray(res.value)) continue;
+    let perAddonCount = 0;
+    for (const entry of res.value) {
+      if (perAddonCount >= 6) break;
+      const streamUrl = String(entry?.stream?.url || '').trim();
+      if (!streamUrl || seenUrls.has(streamUrl)) continue;
+      const mapped = mapStremioStreamEntry(entry.stream, {
+        apiBase,
+        addonLabel: entry.addonLabel,
+        nextIndex: addonNodeCounter,
+      });
+      if (!mapped) continue;
+      seenUrls.add(streamUrl);
+      list.push(mapped);
+      addonNodeCounter += 1;
+      perAddonCount += 1;
+    }
   }
 
-  // 4. Shielded embed fallbacks (skip when item has no TMDB/MAL/AniList IDs, e.g. raw direct stream)
+  let customCounter = 0;
+  for (const entry of customResults) {
+    if (entry.directResolverUrl) {
+      const u = entry.directResolverUrl;
+      if (!seenUrls.has(u)) {
+        seenUrls.add(u);
+        const isMp4 = u.toLowerCase().includes('.mp4') && !u.toLowerCase().includes('.m3u8');
+        list.push({
+          id: customCounter === 0 ? 'custom-resolver' : `custom-resolver-${customCounter + 1}`,
+          name: apiBase ? 'Custom Resolver (Edge Proxy)' : 'Custom Resolver Stream',
+          type: isMp4 ? 'direct' : 'hls',
+          url: apiBase ? buildHlsProxyUrl(u, { hlsProxyUrl: apiBase }) : u,
+          rawUrl: u,
+          proxied: Boolean(apiBase),
+          quality: 'Original',
+          shielded: true,
+          direct: true,
+          node: 'custom-resolver',
+        });
+        customCounter += 1;
+      }
+    } else if (entry.resolverSource?.url) {
+      const s = entry.resolverSource;
+      if (s.type !== 'embed' && /^https?:\/\//i.test(s.url) && !seenUrls.has(s.url)) {
+        const lower = s.url.toLowerCase();
+        const isMp4 = lower.includes('.mp4') && !lower.includes('.m3u8');
+        const resolvedUrl = apiBase
+          ? buildHlsProxyUrl(s.url, { hlsProxyUrl: apiBase, referer: s.referer || '' })
+          : s.url;
+        if (apiBase || isDirectStreamUrl(s.url)) {
+          seenUrls.add(s.url);
+          list.push({
+            ...s,
+            id: s.id || (customCounter === 0 ? 'custom-resolver' : `custom-resolver-${customCounter + 1}`),
+            name: s.name || (apiBase ? 'Custom Resolver (Edge Proxy)' : 'Custom Resolver Stream'),
+            type: s.type || (isMp4 ? 'direct' : 'hls'),
+            url: resolvedUrl,
+            rawUrl: s.rawUrl || s.url,
+            proxied: Boolean(apiBase || s.proxied),
+            quality: s.quality || inferStreamQuality(s.name || ''),
+            shielded: true,
+            direct: true,
+            node: s.node || 'custom-resolver',
+          });
+          customCounter += 1;
+        }
+      }
+    } else if (entry.stream?.url) {
+      const u = String(entry.stream.url).trim();
+      if (!seenUrls.has(u)) {
+        const mapped = mapStremioStreamEntry(entry.stream, {
+          apiBase,
+          addonLabel: entry.addonLabel,
+          nextIndex: addonNodeCounter,
+        });
+        if (mapped) {
+          seenUrls.add(u);
+          list.push({
+            ...mapped,
+            id: customCounter === 0 ? 'custom-resolver' : `custom-resolver-${customCounter + 1}`,
+            node: 'custom-resolver',
+          });
+          customCounter += 1;
+        }
+      }
+    }
+  }
+
+  // 4. Archive.org direct public-domain fallback when directUrl & addons yield no playable stream
+  const hasPlayableDirect = list.some(isPlayableDirectSource);
+  if (
+    !hasPlayableDirect &&
+    options.includeArchiveFallback !== false &&
+    (!item.mediaType || item.mediaType === 'movie') &&
+    item.title
+  ) {
+    const ao = await fetchArchiveOrgDirectStream(item.title, item.year).catch(() => null);
+    const aoNode = buildArchiveOrgSourceNode(ao, { apiBase, backendActive: false });
+    if (aoNode && !seenUrls.has(aoNode.rawUrl)) {
+      seenUrls.add(aoNode.rawUrl);
+      list.push(aoNode);
+    }
+  }
+
+  // 5. Shielded embed fallbacks (skip when item has no TMDB/MAL/AniList IDs, e.g. raw direct stream)
   if (tmdbId || imdbId || (item.mediaType === 'anime' && malId)) {
     list.push({
       id: 'vidlink-shield',
