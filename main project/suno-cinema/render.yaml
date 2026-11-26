@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: suno-cinema
+    env: node
+    plan: free
+    buildCommand: npm install
+    startCommand: node server.js
+    healthCheckPath: /api/health
+    envVars:
+      - key: PORT
+        value: 10000
+      - key: REQUIRE_PLAY_TOKEN
+        value: "false"
+      - key: SUNO_PLAY_SECRET
+        generateValue: true
+      - key: TMDB_API_KEY
+        sync: false
+      - key: REALDEBRID_API_KEY
+        sync: false
+      - key: TORBOX_API_KEY
+        sync: false
+      - key: SUNO_BOOTSTRAP_MIRRORS
+        sync: false

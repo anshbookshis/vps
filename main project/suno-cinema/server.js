@@ -1,6 +1,7 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
@@ -8,6 +9,40 @@ import { CATALOG_ITEMS } from './src/data/catalog.js';
 import { SONIC_PROFILES, SCORE_MOODS } from './src/utils/sonic-engine.js';
 
 const ROOT_DIR = path.dirname(fileURLToPath(import.meta.url));
+
+/**
+ * Lightweight .env parser to populate process.env without external npm dependencies.
+ *
+ * @param {string} [envFilePath]
+ * @returns {Record<string, string>}
+ */
+export function loadDotEnv(envFilePath = path.join(ROOT_DIR, '.env')) {
+  try {
+    if (!fs.existsSync(envFilePath)) return {};
+    const content = fs.readFileSync(envFilePath, 'utf8');
+    const parsed = {};
+    for (const line of content.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) continue;
+      const eqIdx = trimmed.indexOf('=');
+      if (eqIdx <= 0) continue;
+      const key = trimmed.slice(0, eqIdx).trim();
+      let val = trimmed.slice(eqIdx + 1).trim();
+      if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+        val = val.slice(1, -1);
+      }
+      parsed[key] = val;
+      if (process.env[key] === undefined) {
+        process.env[key] = val;
+      }
+    }
+    return parsed;
+  } catch {
+    return {};
+  }
+}
+
+loadDotEnv();
 const DEFAULT_PORT = Number(process.env.PORT || 3000);
 const DEFAULT_FETCH_TIMEOUT_MS = 8000;
 const DEFAULT_RETRY_BACKOFF_MS = [250, 600];
@@ -54,6 +89,316 @@ function delay(ms) {
 
 function isTimeoutError(err) {
   return Boolean(err && (err.name === 'AbortError' || err.name === 'TimeoutError' || /timeout/i.test(err.message || '')));
+}
+
+/**
+ * Sign a playback token using HMAC-SHA256.
+ *
+ * @param {string} streamUrl
+ * @param {object} [options]
+ * @returns {string}
+ */
+export function signPlayToken(streamUrl, options = {}) {
+  const secret = options.secret || process.env.SUNO_PLAY_SECRET || 'suno-cinema-secret-token-key-2026';
+  const expiresInSeconds = Number.isFinite(options.expiresInSeconds) ? options.expiresInSeconds : 7200;
+  const nowSec = Math.floor(Date.now() / 1000);
+  const exp = options.exp || nowSec + expiresInSeconds;
+  const payload = {
+    url: String(streamUrl || ''),
+    exp,
+    iat: nowSec,
+    ...(options.id ? { id: options.id } : {}),
+  };
+  const payloadJson = JSON.stringify(payload);
+  const payloadB64 = Buffer.from(payloadJson, 'utf8').toString('base64url');
+  const signature = crypto.createHmac('sha256', secret).update(payloadB64).digest('base64url');
+  return `${payloadB64}.${signature}`;
+}
+
+/**
+ * Verify an HMAC-SHA256 playback token against the target URL and current time.
+ *
+ * @param {string} tokenString
+ * @param {string} [targetUrl]
+ * @param {object} [options]
+ * @returns {{ valid: boolean, error?: string, payload?: object }}
+ */
+export function verifyPlayToken(tokenString, targetUrl, options = {}) {
+  if (!tokenString || typeof tokenString !== 'string') {
+    return { valid: false, error: 'Token missing' };
+  }
+  const parts = tokenString.split('.');
+  if (parts.length !== 2) {
+    return { valid: false, error: 'Malformed token format' };
+  }
+  const [payloadB64, signature] = parts;
+  const secret = options.secret || process.env.SUNO_PLAY_SECRET || 'suno-cinema-secret-token-key-2026';
+  const expectedSig = crypto.createHmac('sha256', secret).update(payloadB64).digest('base64url');
+
+  const sigBuf = Buffer.from(signature);
+  const expBuf = Buffer.from(expectedSig);
+  if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {
+    return { valid: false, error: 'Invalid token signature' };
+  }
+
+  let payload;
+  try {
+    payload = JSON.parse(Buffer.from(payloadB64, 'base64url').toString('utf8'));
+  } catch {
+    return { valid: false, error: 'Invalid token payload' };
+  }
+
+  const nowSec = Math.floor(Date.now() / 1000);
+  if (payload.exp && payload.exp < nowSec) {
+    return { valid: false, error: 'Token expired', payload };
+  }
+
+  if (targetUrl && payload.url) {
+    const normTarget = String(targetUrl).trim();
+    const normTokenUrl = String(payload.url).trim();
+    if (normTarget !== normTokenUrl) {
+      try {
+        const tObj = new URL(normTarget);
+        const pObj = new URL(normTokenUrl);
+        const pBasePath = pObj.pathname.substring(0, pObj.pathname.lastIndexOf('/') + 1);
+        if (tObj.origin !== pObj.origin || !tObj.pathname.startsWith(pBasePath)) {
+          return { valid: false, error: 'Token scope mismatch', payload };
+        }
+      } catch {
+        return { valid: false, error: 'Token scope mismatch', payload };
+      }
+    }
+  }
+
+  return { valid: true, payload };
+}
+
+/**
+ * Parse an HTTP Range header into numeric start and end byte offsets.
+ *
+ * @param {string} rangeHeader
+ * @param {number} totalSize
+ * @returns {{ start: number, end: number } | null}
+ */
+export function parseByteRange(rangeHeader, totalSize) {
+  if (!rangeHeader || typeof rangeHeader !== 'string' || !Number.isFinite(totalSize) || totalSize <= 0) return null;
+  const match = rangeHeader.trim().match(/^bytes=(\d*)-(\d*)$/);
+  if (!match) return null;
+  let start = match[1] ? parseInt(match[1], 10) : null;
+  let end = match[2] ? parseInt(match[2], 10) : null;
+
+  if (start === null && end !== null) {
+    start = Math.max(0, totalSize - end);
+    end = totalSize - 1;
+  } else if (start !== null && end === null) {
+    end = totalSize - 1;
+  }
+
+  if (start === null || end === null || isNaN(start) || isNaN(end) || start > end || start >= totalSize) {
+    return null;
+  }
+  end = Math.min(end, totalSize - 1);
+  return { start, end };
+}
+
+/**
+ * Create an in-memory bounded LRU cache for HLS video/audio segments.
+ *
+ * @param {{ maxBytes?: number, maxEntries?: number }} [config]
+ */
+export function createHlsSegmentCache({ maxBytes = 48 * 1024 * 1024, maxEntries = 120 } = {}) {
+  const cache = new Map();
+  let currentBytes = 0;
+  let hits = 0;
+  let misses = 0;
+  let accessSeq = 0;
+
+  function evict(neededBytes = 0) {
+    while ((currentBytes + neededBytes > maxBytes || cache.size >= maxEntries) && cache.size > 0) {
+      let oldestKey = null;
+      let oldestSeq = Infinity;
+      for (const [k, v] of cache.entries()) {
+        if (v.accessedSeq < oldestSeq) {
+          oldestSeq = v.accessedSeq;
+          oldestKey = k;
+        }
+      }
+      if (oldestKey) {
+        const item = cache.get(oldestKey);
+        currentBytes -= item.size;
+        cache.delete(oldestKey);
+      } else {
+        break;
+      }
+    }
+  }
+
+  return {
+    get(url) {
+      const entry = cache.get(url);
+      if (entry) {
+        entry.accessedSeq = ++accessSeq;
+        hits++;
+        return entry;
+      }
+      misses++;
+      return null;
+    },
+    set(url, buffer, headers = {}) {
+      if (!buffer || !Buffer.isBuffer(buffer)) return;
+      const size = buffer.length;
+      if (size > 12 * 1024 * 1024) return;
+      if (cache.has(url)) {
+        currentBytes -= cache.get(url).size;
+        cache.delete(url);
+      }
+      evict(size);
+      cache.set(url, {
+        buffer,
+        contentType: headers['content-type'] || 'video/MP2T',
+        contentLength: size,
+        etag: headers['etag'] || `"${size}-${Date.now().toString(36)}"`,
+        size,
+        accessedSeq: ++accessSeq,
+      });
+      currentBytes += size;
+    },
+    has(url) {
+      return cache.has(url);
+    },
+    delete(url) {
+      if (cache.has(url)) {
+        currentBytes -= cache.get(url).size;
+        return cache.delete(url);
+      }
+      return false;
+    },
+    clear() {
+      cache.clear();
+      currentBytes = 0;
+      hits = 0;
+      misses = 0;
+    },
+    getStats() {
+      return {
+        entries: cache.size,
+        bytes: currentBytes,
+        maxBytes,
+        hits,
+        misses,
+        hitRate: hits + misses > 0 ? Number((hits / (hits + misses)).toFixed(3)) : 0,
+      };
+    },
+  };
+}
+
+export const defaultSegmentCache = createHlsSegmentCache();
+
+const inFlightPrefetches = new Set();
+
+/**
+ * Asynchronously pre-warm the next 1-2 video segments into memory from an active HLS playlist.
+ *
+ * @param {string} manifestText
+ * @param {string} baseUrl
+ * @param {string} [referer]
+ * @param {object} [cache]
+ * @param {string} [token]
+ */
+export function triggerLookaheadPrefetch(
+  manifestText,
+  baseUrl,
+  referer = '',
+  cache = defaultSegmentCache,
+  token = ''
+) {
+  if (!manifestText || typeof manifestText !== 'string' || !cache) return;
+  const lines = manifestText.split(/\r?\n/);
+  const segmentUris = [];
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const lower = trimmed.toLowerCase();
+    if (
+      lower.endsWith('.ts') ||
+      lower.endsWith('.m4s') ||
+      lower.endsWith('.mp4') ||
+      lower.includes('/segment') ||
+      lower.includes('/chunk')
+    ) {
+      segmentUris.push(trimmed);
+      if (segmentUris.length >= 2) break;
+    }
+  }
+
+  for (const uri of segmentUris) {
+    try {
+      const absUrl = new URL(uri, baseUrl).href;
+      if (cache.has(absUrl) || inFlightPrefetches.has(absUrl)) continue;
+      inFlightPrefetches.add(absUrl);
+
+      const upstreamHeaders = buildProxyUpstreamHeaders(referer || absUrl, '', true);
+      fetchWithRetry(
+        absUrl,
+        { method: 'GET', headers: upstreamHeaders, redirect: 'follow' },
+        { timeoutMs: 6000, maxRetries: 1 }
+      )
+        .then(async (resp) => {
+          if (!resp.ok) return;
+          const arrayBuf = await resp.arrayBuffer();
+          let buf = Buffer.from(arrayBuf);
+          if (hasDisguisedHeader(buf)) {
+            buf = unmaskDisguisedSegment(buf);
+          }
+          const ct = resolveSegmentMimeType(absUrl, resp.headers.get('content-type') || '');
+          cache.set(absUrl, buf, { 'content-type': ct });
+        })
+        .catch(() => {})
+        .finally(() => {
+          inFlightPrefetches.delete(absUrl);
+        });
+    } catch {
+      // Ignore prefetch parsing errors
+    }
+  }
+}
+
+/**
+ * Stream prefetched peek chunks and incoming reader chunks while accumulating full buffer for caching.
+ *
+ * @param {Buffer} headBuf
+ * @param {ReadableStreamDefaultReader} reader
+ * @param {(fullBuffer: Buffer) => void} [onComplete]
+ */
+async function* streamPrefetchedAndCacheChunks(headBuf, reader, onComplete) {
+  const chunks = [];
+  let totalBytes = 0;
+  let canCache = true;
+  if (headBuf && headBuf.length > 0) {
+    chunks.push(headBuf);
+    totalBytes += headBuf.length;
+    yield headBuf;
+  }
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    if (value && value.length > 0) {
+      const b = Buffer.from(value);
+      if (canCache) {
+        chunks.push(b);
+        totalBytes += b.length;
+        if (totalBytes > 12 * 1024 * 1024) {
+          canCache = false;
+          chunks.length = 0;
+        }
+      }
+      yield b;
+    }
+  }
+  if (canCache && chunks.length > 0 && typeof onComplete === 'function') {
+    const full = chunks.length === 1 ? chunks[0] : Buffer.concat(chunks);
+    onComplete(full);
+  }
 }
 
 /**
@@ -166,23 +511,31 @@ function isAlreadyProxiedUri(rawUri, absHref, proxyEndpoint) {
   return false;
 }
 
-function buildProxyUrl(absHref, proxyEndpoint, referer = '') {
-  return `${proxyEndpoint}?url=${encodeURIComponent(absHref)}${
-    referer ? `&referer=${encodeURIComponent(referer)}` : ''
-  }`;
+function buildProxyUrl(absHref, proxyEndpoint, referer = '', token = '') {
+  let url = `${proxyEndpoint}?url=${encodeURIComponent(absHref)}`;
+  if (referer) url += `&referer=${encodeURIComponent(referer)}`;
+  if (token) url += `&token=${encodeURIComponent(token)}`;
+  return url;
 }
 
 /**
  * Rewrite HLS M3U8 manifest content to route all child playlists, chunks, audio/subtitle media tracks, and keys
- * through the HLS proxy while avoiding double-wrapping already proxied URIs.
+ * through the HLS proxy while avoiding double-wrapping already proxied URIs, forwarding signed play tokens.
  *
  * @param {string} manifestText
  * @param {string} baseUrl
  * @param {string} [proxyEndpoint='/api/proxy/hls']
  * @param {string} [referer='']
+ * @param {string} [token='']
  * @returns {string}
  */
-export function rewriteHlsManifest(manifestText, baseUrl, proxyEndpoint = '/api/proxy/hls', referer = '') {
+export function rewriteHlsManifest(
+  manifestText,
+  baseUrl,
+  proxyEndpoint = '/api/proxy/hls',
+  referer = '',
+  token = ''
+) {
   if (typeof manifestText !== 'string') return '';
   const lines = manifestText.split(/\r?\n/);
   const rewritten = lines.map((line) => {
@@ -195,9 +548,13 @@ export function rewriteHlsManifest(manifestText, baseUrl, proxyEndpoint = '/api/
         try {
           const abs = new URL(uri, baseUrl).href;
           if (isAlreadyProxiedUri(uri, abs, proxyEndpoint)) {
+            if (token && !uri.includes('token=')) {
+              const delim = uri.includes('?') ? '&' : '?';
+              return `URI="${uri}${delim}token=${encodeURIComponent(token)}"`;
+            }
             return match;
           }
-          return `URI="${buildProxyUrl(abs, proxyEndpoint, referer)}"`;
+          return `URI="${buildProxyUrl(abs, proxyEndpoint, referer, token)}"`;
         } catch {
           return match;
         }
@@ -209,9 +566,13 @@ export function rewriteHlsManifest(manifestText, baseUrl, proxyEndpoint = '/api/
       try {
         const abs = new URL(trimmed, baseUrl).href;
         if (isAlreadyProxiedUri(trimmed, abs, proxyEndpoint)) {
+          if (token && !trimmed.includes('token=')) {
+            const delim = trimmed.includes('?') ? '&' : '?';
+            return `${trimmed}${delim}token=${encodeURIComponent(token)}`;
+          }
           return line;
         }
-        return buildProxyUrl(abs, proxyEndpoint, referer);
+        return buildProxyUrl(abs, proxyEndpoint, referer, token);
       } catch {
         return line;
       }
@@ -673,6 +1034,7 @@ async function handleHlsProxyRequest(req, res, reqUrl) {
 
   const targetUrl = reqUrl.searchParams.get('url') || '';
   const referer = reqUrl.searchParams.get('referer') || '';
+  const token = reqUrl.searchParams.get('token') || '';
   if (!targetUrl || !/^https?:\/\//i.test(targetUrl)) {
     return sendJson(res, 400, { error: 'Valid http/https "url" query parameter required' });
   }
@@ -680,6 +1042,52 @@ async function handleHlsProxyRequest(req, res, reqUrl) {
     new URL(targetUrl);
   } catch {
     return sendJson(res, 400, { error: 'Malformed target "url" query parameter' });
+  }
+
+  const requireToken = process.env.REQUIRE_PLAY_TOKEN === 'true' || process.env.REQUIRE_PLAY_TOKEN === '1';
+  if (requireToken || token) {
+    const verified = verifyPlayToken(token, targetUrl);
+    if (!verified.valid) {
+      return sendJson(res, 403, {
+        error: 'Invalid or expired playback token',
+        reason: verified.error,
+        targetUrl,
+      });
+    }
+  }
+
+  const rangeHeader = typeof req.headers.range === 'string' ? req.headers.range : '';
+  const cachedSegment = defaultSegmentCache.get(targetUrl);
+  if (cachedSegment) {
+    const totalSize = cachedSegment.buffer.length;
+    if (rangeHeader) {
+      const parsed = parseByteRange(rangeHeader, totalSize);
+      if (parsed) {
+        const { start, end } = parsed;
+        const slice = cachedSegment.buffer.subarray(start, end + 1);
+        res.writeHead(206, {
+          'Content-Type': cachedSegment.contentType || 'video/MP2T',
+          'Content-Range': `bytes ${start}-${end}/${totalSize}`,
+          'Content-Length': slice.length,
+          'Accept-Ranges': 'bytes',
+          'X-Suno-Cache': 'HIT-RANGE',
+          'Cache-Control': 'no-cache',
+          ...CORS_HEADERS,
+        });
+        if (req.method === 'HEAD') return res.end();
+        return res.end(slice);
+      }
+    }
+    res.writeHead(200, {
+      'Content-Type': cachedSegment.contentType || 'video/MP2T',
+      'Content-Length': totalSize,
+      'Accept-Ranges': 'bytes',
+      'X-Suno-Cache': 'HIT',
+      'Cache-Control': 'public, max-age=3600',
+      ...CORS_HEADERS,
+    });
+    if (req.method === 'HEAD') return res.end();
+    return res.end(cachedSegment.buffer);
   }
 
   const abortController = new AbortController();
@@ -691,7 +1099,6 @@ async function handleHlsProxyRequest(req, res, reqUrl) {
   res.on('close', onResClose);
 
   try {
-    const rangeHeader = typeof req.headers.range === 'string' ? req.headers.range : '';
     const upstreamHeaders = buildProxyUpstreamHeaders(referer, rangeHeader, true);
 
     let upstreamResp = await fetchWithRetry(targetUrl, {
@@ -757,10 +1164,12 @@ async function handleHlsProxyRequest(req, res, reqUrl) {
         return res.end();
       }
       const text = await upstreamResp.text();
-      const rewritten = rewriteHlsManifest(text, finalUrl, '/api/proxy/hls', referer || finalUrl);
+      const rewritten = rewriteHlsManifest(text, finalUrl, '/api/proxy/hls', referer || finalUrl, token);
+      triggerLookaheadPrefetch(text, finalUrl, referer || finalUrl, defaultSegmentCache, token);
       res.writeHead(200, {
         'Content-Type': 'application/vnd.apple.mpegurl; charset=utf-8',
         'Cache-Control': 'no-cache',
+        'X-Suno-Cache': 'MISS',
         ...CORS_HEADERS,
       });
       return res.end(rewritten);
@@ -776,6 +1185,7 @@ async function handleHlsProxyRequest(req, res, reqUrl) {
       'Content-Type': resolveSegmentMimeType(finalUrl, contentType),
       'Accept-Ranges': acceptRanges,
       'Cache-Control': status === 206 ? 'no-cache' : 'public, max-age=3600',
+      'X-Suno-Cache': 'MISS',
       ...CORS_HEADERS,
     };
     if (upstreamContentRange) outHeaders['Content-Range'] = upstreamContentRange;
@@ -827,10 +1237,12 @@ async function handleHlsProxyRequest(req, res, reqUrl) {
           if (value && value.length > 0) restChunks.push(Buffer.from(value));
         }
         const text = Buffer.concat(restChunks).toString('utf8');
-        const rewritten = rewriteHlsManifest(text, finalUrl, '/api/proxy/hls', referer || finalUrl);
+        const rewritten = rewriteHlsManifest(text, finalUrl, '/api/proxy/hls', referer || finalUrl, token);
+        triggerLookaheadPrefetch(text, finalUrl, referer || finalUrl, defaultSegmentCache, token);
         res.writeHead(200, {
           'Content-Type': 'application/vnd.apple.mpegurl; charset=utf-8',
           'Cache-Control': 'no-cache',
+          'X-Suno-Cache': 'MISS',
           ...CORS_HEADERS,
         });
         return res.end(rewritten);
@@ -862,7 +1274,16 @@ async function handleHlsProxyRequest(req, res, reqUrl) {
     }
 
     res.writeHead(200, outHeaders);
-    await pipeline(Readable.from(streamPrefetchedChunks(headBuf, reader)), res);
+    await pipeline(
+      Readable.from(
+        streamPrefetchedAndCacheChunks(headBuf, reader, (fullBuf) => {
+          defaultSegmentCache.set(finalUrl, fullBuf, {
+            'content-type': outHeaders['Content-Type'],
+          });
+        })
+      ),
+      res
+    );
   } catch (err) {
     if (res.destroyed || abortController.signal.aborted || err?.code === 'ERR_STREAM_PREMATURE_CLOSE') {
       return;
@@ -2199,7 +2620,7 @@ export function createSunoCinemaServer(rootDir = ROOT_DIR) {
         product: 'Suno Cinema',
         embedOrigin: 'https://embed.vidrift.net',
         tmdbConfigured: Boolean(process.env.TMDB_API_KEY),
-        debridConfigured: Boolean(process.env.DEBRID_API_KEY),
+        debridConfigured: Boolean(process.env.DEBRID_API_KEY || process.env.REALDEBRID_API_KEY || process.env.TORBOX_API_KEY),
         addonConfigured: Boolean(process.env.STREMIO_ADDON_URLS || process.env.STREMIO_ADDON_URL),
         customResolverConfigured: Boolean(process.env.CUSTOM_RESOLVER_URL),
         hlsProxyEnabled: true,
@@ -2209,6 +2630,87 @@ export function createSunoCinemaServer(rootDir = ROOT_DIR) {
         addonManifestResolverEnabled: true,
         multiAddonEnabled: true,
         catalogCount: CATALOG_ITEMS.length,
+      });
+    }
+
+    if (pathname === '/api/bootstrap') {
+      const activeHost = req.headers.host || `localhost:${DEFAULT_PORT}`;
+      const proto = req.headers['x-forwarded-proto'] || 'http';
+      const activeOrigin = `${proto}://${activeHost}`;
+      const rawMirrors = process.env.SUNO_BOOTSTRAP_MIRRORS || '';
+      const mirrors = rawMirrors
+        ? rawMirrors.split(',').map((m) => m.trim()).filter(Boolean)
+        : [activeOrigin];
+      if (!mirrors.includes(activeOrigin)) {
+        mirrors.unshift(activeOrigin);
+      }
+      const descriptor = Buffer.from(
+        JSON.stringify({
+          activeOrigin,
+          mirrors,
+          timestamp: Date.now(),
+          version: '1.0.0',
+        }),
+        'utf8'
+      ).toString('base64');
+      return sendJson(res, 200, {
+        version: '1.0.0',
+        activeOrigin,
+        mirrors,
+        descriptor,
+        timestamp: Date.now(),
+      });
+    }
+
+    if (pathname === '/api/play') {
+      const targetUrl = reqUrl.searchParams.get('url') || '';
+      if (!targetUrl || !/^https?:\/\//i.test(targetUrl)) {
+        return sendJson(res, 400, { error: 'Valid http/https "url" query parameter required' });
+      }
+      const expSec = Number(reqUrl.searchParams.get('exp')) || 7200;
+      const mediaId = reqUrl.searchParams.get('id') || '';
+      const referer = reqUrl.searchParams.get('referer') || '';
+      const token = signPlayToken(targetUrl, { expiresInSeconds: expSec, id: mediaId });
+      const nowSec = Math.floor(Date.now() / 1000);
+      return sendJson(res, 200, {
+        token,
+        streamUrl: targetUrl,
+        expiresAt: nowSec + expSec,
+        proxyUrl: `/api/proxy/hls?url=${encodeURIComponent(targetUrl)}${
+          referer ? `&referer=${encodeURIComponent(referer)}` : ''
+        }&token=${encodeURIComponent(token)}`,
+      });
+    }
+
+    if (pathname === '/api/backend/status') {
+      const debridConfigured = Boolean(
+        process.env.DEBRID_API_KEY || process.env.REALDEBRID_API_KEY || process.env.TORBOX_API_KEY
+      );
+      const debridProvider = process.env.TORBOX_API_KEY
+        ? 'torbox'
+        : process.env.REALDEBRID_API_KEY || process.env.DEBRID_API_KEY
+        ? 'realdebrid'
+        : 'none';
+      const tokenVerification = Boolean(
+        process.env.REQUIRE_PLAY_TOKEN === 'true' || process.env.REQUIRE_PLAY_TOKEN === '1'
+      );
+      return sendJson(res, 200, {
+        status: 'ready',
+        version: '1.0.0',
+        timestamp: Date.now(),
+        tmdb: { configured: Boolean(process.env.TMDB_API_KEY) },
+        debrid: { configured: debridConfigured, provider: debridProvider },
+        stremio: { configured: true, maxAddons: MAX_ADDONS },
+        jellyfin: {
+          configured: Boolean(process.env.JELLYFIN_URL),
+          url: process.env.JELLYFIN_URL ? process.env.JELLYFIN_URL.replace(/\/+$/, '') : '',
+        },
+        vodOrigin: {
+          configured: Boolean(process.env.SUNO_VOD_ORIGIN),
+          origin: process.env.SUNO_VOD_ORIGIN || '',
+        },
+        tokenVerification: { enabled: tokenVerification },
+        cache: defaultSegmentCache.getStats(),
       });
     }
 

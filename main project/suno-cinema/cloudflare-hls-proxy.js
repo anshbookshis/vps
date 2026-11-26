@@ -43,6 +43,145 @@ function isTimeoutError(err) {
   return Boolean(err && (err.name === 'AbortError' || err.name === 'TimeoutError' || /timeout/i.test(err.message || '')));
 }
 
+export function base64UrlEncode(bufferOrString) {
+  let bytes;
+  if (typeof bufferOrString === 'string') {
+    bytes = new TextEncoder().encode(bufferOrString);
+  } else if (bufferOrString instanceof Uint8Array) {
+    bytes = bufferOrString;
+  } else if (bufferOrString instanceof ArrayBuffer) {
+    bytes = new Uint8Array(bufferOrString);
+  } else {
+    bytes = new Uint8Array(0);
+  }
+  let binary = '';
+  for (let i = 0; i < bytes.byteLength; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+export function base64UrlDecode(str) {
+  let base64 = String(str || '').replace(/-/g, '+').replace(/_/g, '/');
+  while (base64.length % 4) {
+    base64 += '=';
+  }
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+}
+
+/**
+ * Sign an HMAC-SHA256 playback token using WebCrypto subtle API.
+ *
+ * @param {string} streamUrl
+ * @param {object} [options]
+ * @param {string} [secret]
+ * @returns {Promise<string>}
+ */
+export async function signPlayTokenWorker(
+  streamUrl,
+  options = {},
+  secret = 'suno-cinema-secret-token-key-2026'
+) {
+  const enc = new TextEncoder();
+  const tokenSecret = options.secret || secret || 'suno-cinema-secret-token-key-2026';
+  const expiresInSeconds = Number.isFinite(options.expiresInSeconds) ? options.expiresInSeconds : 7200;
+  const nowSec = Math.floor(Date.now() / 1000);
+  const exp = options.exp || nowSec + expiresInSeconds;
+  const payload = {
+    url: String(streamUrl || ''),
+    exp,
+    iat: nowSec,
+    ...(options.id ? { id: options.id } : {}),
+  };
+  const payloadB64 = base64UrlEncode(JSON.stringify(payload));
+  const key = await crypto.subtle.importKey(
+    'raw',
+    enc.encode(tokenSecret),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign']
+  );
+  const sigBuffer = await crypto.subtle.sign('HMAC', key, enc.encode(payloadB64));
+  const sigB64 = base64UrlEncode(sigBuffer);
+  return `${payloadB64}.${sigB64}`;
+}
+
+/**
+ * Verify an HMAC-SHA256 playback token using WebCrypto subtle API.
+ *
+ * @param {string} tokenString
+ * @param {string} [targetUrl]
+ * @param {object} [options]
+ * @param {string} [secret]
+ * @returns {Promise<{ valid: boolean, error?: string, payload?: object }>}
+ */
+export async function verifyPlayTokenWorker(
+  tokenString,
+  targetUrl,
+  options = {},
+  secret = 'suno-cinema-secret-token-key-2026'
+) {
+  if (!tokenString || typeof tokenString !== 'string') {
+    return { valid: false, error: 'Token missing' };
+  }
+  const parts = tokenString.split('.');
+  if (parts.length !== 2) {
+    return { valid: false, error: 'Malformed token format' };
+  }
+  const [payloadB64, sigB64] = parts;
+  const tokenSecret = options.secret || secret || 'suno-cinema-secret-token-key-2026';
+  const enc = new TextEncoder();
+  try {
+    const key = await crypto.subtle.importKey(
+      'raw',
+      enc.encode(tokenSecret),
+      { name: 'HMAC', hash: 'SHA-256' },
+      false,
+      ['verify']
+    );
+    const sigBytes = base64UrlDecode(sigB64);
+    const verified = await crypto.subtle.verify('HMAC', key, sigBytes, enc.encode(payloadB64));
+    if (!verified) {
+      return { valid: false, error: 'Invalid token signature' };
+    }
+
+    const payloadBytes = base64UrlDecode(payloadB64);
+    const payloadJson = new TextDecoder().decode(payloadBytes);
+    const payload = JSON.parse(payloadJson);
+
+    const nowSec = Math.floor(Date.now() / 1000);
+    if (payload.exp && payload.exp < nowSec) {
+      return { valid: false, error: 'Token expired', payload };
+    }
+
+    if (targetUrl && payload.url) {
+      const normTarget = String(targetUrl).trim();
+      const normTokenUrl = String(payload.url).trim();
+      if (normTarget !== normTokenUrl) {
+        try {
+          const tObj = new URL(normTarget);
+          const pObj = new URL(normTokenUrl);
+          const pBasePath = pObj.pathname.substring(0, pObj.pathname.lastIndexOf('/') + 1);
+          if (tObj.origin !== pObj.origin || !tObj.pathname.startsWith(pBasePath)) {
+            return { valid: false, error: 'Token scope mismatch', payload };
+          }
+        } catch {
+          return { valid: false, error: 'Token scope mismatch', payload };
+        }
+      }
+    }
+
+    return { valid: true, payload };
+  } catch (err) {
+    return { valid: false, error: err.message || 'Token verification failed' };
+  }
+}
+
 export async function fetchWithRetry(url, options = {}, config = {}) {
   const timeoutMs = config.timeoutMs ?? DEFAULT_FETCH_TIMEOUT_MS;
   const maxRetries = config.maxRetries ?? 2;
@@ -127,12 +266,20 @@ function isAlreadyProxiedUri(rawUri, absHref, proxyEndpoint) {
   return false;
 }
 
-export function rewriteHlsManifest(manifestText, baseUrl, proxyEndpoint = '/api/proxy/hls', referer = '') {
+export function rewriteHlsManifest(
+  manifestText,
+  baseUrl,
+  proxyEndpoint = '/api/proxy/hls',
+  referer = '',
+  token = ''
+) {
   if (typeof manifestText !== 'string') return '';
-  const buildProxyUrl = (absHref) =>
-    `${proxyEndpoint}?url=${encodeURIComponent(absHref)}${
-      referer ? `&referer=${encodeURIComponent(referer)}` : ''
-    }`;
+  const buildProxyUrl = (absHref) => {
+    let u = `${proxyEndpoint}?url=${encodeURIComponent(absHref)}`;
+    if (referer) u += `&referer=${encodeURIComponent(referer)}`;
+    if (token) u += `&token=${encodeURIComponent(token)}`;
+    return u;
+  };
 
   return manifestText
     .split(/\r?\n/)
@@ -144,7 +291,13 @@ export function rewriteHlsManifest(manifestText, baseUrl, proxyEndpoint = '/api/
         return line.replace(/URI="([^"]+)"/gi, (match, uri) => {
           try {
             const abs = new URL(uri, baseUrl).href;
-            if (isAlreadyProxiedUri(uri, abs, proxyEndpoint)) return match;
+            if (isAlreadyProxiedUri(uri, abs, proxyEndpoint)) {
+              if (token && !uri.includes('token=')) {
+                const delim = uri.includes('?') ? '&' : '?';
+                return `URI="${uri}${delim}token=${encodeURIComponent(token)}"`;
+              }
+              return match;
+            }
             return `URI="${buildProxyUrl(abs)}"`;
           } catch {
             return match;
@@ -155,7 +308,13 @@ export function rewriteHlsManifest(manifestText, baseUrl, proxyEndpoint = '/api/
       if (!trimmed.startsWith('#')) {
         try {
           const abs = new URL(trimmed, baseUrl).href;
-          if (isAlreadyProxiedUri(trimmed, abs, proxyEndpoint)) return line;
+          if (isAlreadyProxiedUri(trimmed, abs, proxyEndpoint)) {
+            if (token && !trimmed.includes('token=')) {
+              const delim = trimmed.includes('?') ? '&' : '?';
+              return `${trimmed}${delim}token=${encodeURIComponent(token)}`;
+            }
+            return line;
+          }
           return buildProxyUrl(abs);
         } catch {
           return line;
@@ -279,13 +438,14 @@ function buildUpstreamHeaders(referer, rangeHeader) {
   return headers;
 }
 
-async function handleHlsProxy(request, reqUrl) {
+async function handleHlsProxy(request, reqUrl, env = {}, ctx = null) {
   if (request.method !== 'GET' && request.method !== 'HEAD') {
     return jsonResponse({ error: 'Method not allowed' }, 405);
   }
 
   const targetUrl = reqUrl.searchParams.get('url') || '';
   const referer = reqUrl.searchParams.get('referer') || '';
+  const token = reqUrl.searchParams.get('token') || '';
   if (!targetUrl || !/^https?:\/\//i.test(targetUrl)) {
     return jsonResponse({ error: 'Valid http/https "url" query parameter required' }, 400);
   }
@@ -293,6 +453,21 @@ async function handleHlsProxy(request, reqUrl) {
     new URL(targetUrl);
   } catch {
     return jsonResponse({ error: 'Malformed target "url" query parameter' }, 400);
+  }
+
+  const requireToken = env.REQUIRE_PLAY_TOKEN === 'true' || env.REQUIRE_PLAY_TOKEN === '1';
+  if (requireToken || token) {
+    const verified = await verifyPlayTokenWorker(token, targetUrl, {}, env.SUNO_PLAY_SECRET);
+    if (!verified.valid) {
+      return jsonResponse(
+        {
+          error: 'Invalid or expired playback token',
+          reason: verified.error,
+          targetUrl,
+        },
+        403
+      );
+    }
   }
 
   const proxyEndpoint = reqUrl.pathname === '/' ? '/' : '/api/proxy/hls';
@@ -373,17 +548,19 @@ async function handleHlsProxy(request, reqUrl) {
         headers: {
           'Content-Type': 'application/vnd.apple.mpegurl; charset=utf-8',
           'Cache-Control': 'no-cache',
+          'X-Suno-Cache': 'MISS',
           ...CORS_HEADERS,
         },
       });
     }
     const text = await upstreamResp.text();
-    const rewritten = rewriteHlsManifest(text, finalUrl, proxyEndpoint, referer || finalUrl);
+    const rewritten = rewriteHlsManifest(text, finalUrl, proxyEndpoint, referer || finalUrl, token);
     return new Response(rewritten, {
       status: 200,
       headers: {
         'Content-Type': 'application/vnd.apple.mpegurl; charset=utf-8',
         'Cache-Control': 'no-cache',
+        'X-Suno-Cache': 'MISS',
         ...CORS_HEADERS,
       },
     });
@@ -398,6 +575,7 @@ async function handleHlsProxy(request, reqUrl) {
     'Content-Type': resolveSegmentMimeType(finalUrl, upstreamCt),
     'Accept-Ranges': acceptRanges,
     'Cache-Control': status === 206 ? 'no-cache' : 'public, max-age=3600',
+    'X-Suno-Cache': 'MISS',
     ...CORS_HEADERS,
   });
   if (upstreamContentRange) outHeaders.set('Content-Range', upstreamContentRange);
@@ -1713,7 +1891,7 @@ async function handleResolveStream(request, reqUrl, env = {}) {
 }
 
 export default {
-  async fetch(request, env = {}) {
+  async fetch(request, env = {}, ctx = null) {
     if (request.method === 'OPTIONS') {
       return new Response(null, {
         status: 204,
@@ -1743,9 +1921,91 @@ export default {
         streamResolverEnabled: true,
         addonManifestResolverEnabled: true,
         multiAddonEnabled: true,
-        debridConfigured: Boolean(env.DEBRID_API_KEY),
+        debridConfigured: Boolean(env.DEBRID_API_KEY || env.REALDEBRID_API_KEY || env.TORBOX_API_KEY),
         addonConfigured: Boolean(env.STREMIO_ADDON_URLS || env.STREMIO_ADDON_URL),
         customResolverConfigured: Boolean(env.CUSTOM_RESOLVER_URL),
+      });
+    }
+
+    if (pathname === '/api/bootstrap') {
+      const activeOrigin = reqUrl.origin;
+      const rawMirrors = env.SUNO_BOOTSTRAP_MIRRORS || '';
+      const mirrors = rawMirrors
+        ? rawMirrors.split(',').map((m) => m.trim()).filter(Boolean)
+        : [activeOrigin];
+      if (!mirrors.includes(activeOrigin)) {
+        mirrors.unshift(activeOrigin);
+      }
+      const descriptor = base64UrlEncode(
+        JSON.stringify({
+          activeOrigin,
+          mirrors,
+          timestamp: Date.now(),
+          version: '1.0.0',
+        })
+      );
+      return jsonResponse({
+        version: '1.0.0',
+        activeOrigin,
+        mirrors,
+        descriptor,
+        timestamp: Date.now(),
+      });
+    }
+
+    if (pathname === '/api/play') {
+      const targetUrl = reqUrl.searchParams.get('url') || '';
+      if (!targetUrl || !/^https?:\/\//i.test(targetUrl)) {
+        return jsonResponse({ error: 'Valid http/https "url" query parameter required' }, 400);
+      }
+      const expSec = Number(reqUrl.searchParams.get('exp')) || 7200;
+      const mediaId = reqUrl.searchParams.get('id') || '';
+      const referer = reqUrl.searchParams.get('referer') || '';
+      const token = await signPlayTokenWorker(
+        targetUrl,
+        { expiresInSeconds: expSec, id: mediaId },
+        env.SUNO_PLAY_SECRET
+      );
+      const nowSec = Math.floor(Date.now() / 1000);
+      return jsonResponse({
+        token,
+        streamUrl: targetUrl,
+        expiresAt: nowSec + expSec,
+        proxyUrl: `/api/proxy/hls?url=${encodeURIComponent(targetUrl)}${
+          referer ? `&referer=${encodeURIComponent(referer)}` : ''
+        }&token=${encodeURIComponent(token)}`,
+      });
+    }
+
+    if (pathname === '/api/backend/status') {
+      const debridConfigured = Boolean(
+        env.DEBRID_API_KEY || env.REALDEBRID_API_KEY || env.TORBOX_API_KEY
+      );
+      const debridProvider = env.TORBOX_API_KEY
+        ? 'torbox'
+        : env.REALDEBRID_API_KEY || env.DEBRID_API_KEY
+        ? 'realdebrid'
+        : 'none';
+      const tokenVerification = Boolean(
+        env.REQUIRE_PLAY_TOKEN === 'true' || env.REQUIRE_PLAY_TOKEN === '1'
+      );
+      return jsonResponse({
+        status: 'ready',
+        version: '1.0.0',
+        runtime: 'cloudflare-worker',
+        timestamp: Date.now(),
+        tmdb: { configured: Boolean(env.TMDB_API_KEY) },
+        debrid: { configured: debridConfigured, provider: debridProvider },
+        stremio: { configured: true, maxAddons: 12 },
+        jellyfin: {
+          configured: Boolean(env.JELLYFIN_URL),
+          url: env.JELLYFIN_URL ? env.JELLYFIN_URL.replace(/\/+$/, '') : '',
+        },
+        vodOrigin: {
+          configured: Boolean(env.SUNO_VOD_ORIGIN),
+          origin: env.SUNO_VOD_ORIGIN || '',
+        },
+        tokenVerification: { enabled: tokenVerification },
       });
     }
 
@@ -1762,21 +2022,24 @@ export default {
     }
 
     if (pathname === '/api/proxy/hls') {
-      return handleHlsProxy(request, reqUrl);
+      return handleHlsProxy(request, reqUrl, env, ctx);
     }
 
     if (pathname === '/') {
       if (reqUrl.searchParams.has('url')) {
-        return handleHlsProxy(request, reqUrl);
+        return handleHlsProxy(request, reqUrl, env, ctx);
       }
       return jsonResponse({
         ok: true,
         service: 'Suno Cinema Edge HLS Proxy',
         routes: [
-          '/api/proxy/hls?url=&referer=',
+          '/api/proxy/hls?url=&referer=&token=',
           '/api/proxy/subtitles?url=&referer=',
           '/api/resolve/addon-manifest?url=',
           '/api/resolve/stream',
+          '/api/bootstrap',
+          '/api/play?url=',
+          '/api/backend/status',
           '/api/health',
         ],
       });

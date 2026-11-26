@@ -14,6 +14,7 @@ import {
   getPlayableHlsNodes,
   createFailoverState,
   recordFailoverAttempt,
+  resolveBootstrapOrigin,
 } from './utils/vidrift.js';
 import { antiRedirectGuard } from './utils/anti-redirect.js';
 import {
@@ -149,10 +150,14 @@ const state = {
   sourcesAddonLoading: false,
   sourcesAddonError: '',
   sourcesProxyTest: { status: 'idle', message: '' },
+  sourcesBackendStatus: null,
   sourcesDirtyInPlayer: false,
   sourcesDraft: {
     hlsProxyUrl: null,
     customResolverUrl: null,
+    bootstrapMirrors: null,
+    jellyfinUrl: null,
+    jellyfinApiKey: null,
     debridApiKey: null,
     debridProvider: null,
     magnetInput: '',
@@ -3378,6 +3383,7 @@ function render(options = {}) {
       addonLoading: state.sourcesAddonLoading,
       addonError: state.sourcesAddonError,
       proxyTest: state.sourcesProxyTest,
+      backendStatus: state.sourcesBackendStatus,
       magnetInput: state.sourcesDraft.magnetInput,
       magnetTitle: state.sourcesDraft.magnetTitle,
       directInput: state.sourcesDraft.directInput,
@@ -3385,6 +3391,9 @@ function render(options = {}) {
       directType: state.sourcesDraft.directType,
       customResolverInput: state.sourcesDraft.customResolverUrl,
       hlsProxyInput: state.sourcesDraft.hlsProxyUrl,
+      bootstrapMirrorsInput: state.sourcesDraft.bootstrapMirrors,
+      jellyfinUrlInput: state.sourcesDraft.jellyfinUrl,
+      jellyfinKeyInput: state.sourcesDraft.jellyfinApiKey,
       debridKeyInput: state.sourcesDraft.debridApiKey,
       debridProviderInput: state.sourcesDraft.debridProvider,
       playerOpen: state.playerOpen,
@@ -3456,6 +3465,12 @@ function snapshotSourcesDraft() {
   if (proxyEl) state.sourcesDraft.hlsProxyUrl = proxyEl.value;
   const customEl = document.getElementById('sources-custom-resolver-input');
   if (customEl) state.sourcesDraft.customResolverUrl = customEl.value;
+  const mirEl = document.getElementById('sources-bootstrap-mirrors-input');
+  if (mirEl) state.sourcesDraft.bootstrapMirrors = mirEl.value;
+  const jfUrlEl = document.getElementById('sources-jellyfin-url-input');
+  if (jfUrlEl) state.sourcesDraft.jellyfinUrl = jfUrlEl.value;
+  const jfKeyEl = document.getElementById('sources-jellyfin-key-input');
+  if (jfKeyEl) state.sourcesDraft.jellyfinApiKey = jfKeyEl.value;
   const debKeyEl = document.getElementById('sources-debrid-key');
   if (debKeyEl) state.sourcesDraft.debridApiKey = debKeyEl.value;
   const debProvEl = document.getElementById('sources-debrid-provider');
@@ -3478,6 +3493,11 @@ function openSourcesModal(tab = 'addons') {
   state.sourcesDraft = {
     hlsProxyUrl: state.prefs.hlsProxyUrl || '',
     customResolverUrl: state.prefs.customResolverUrl || '',
+    bootstrapMirrors: Array.isArray(state.prefs.bootstrapMirrors)
+      ? state.prefs.bootstrapMirrors.join('\n')
+      : String(state.prefs.bootstrapMirrors || ''),
+    jellyfinUrl: state.prefs.jellyfinUrl || '',
+    jellyfinApiKey: state.prefs.jellyfinApiKey || '',
     debridApiKey: state.prefs.debridApiKey || '',
     debridProvider: state.prefs.debridProvider || 'realdebrid',
     magnetInput: state.sourcesDraft.magnetInput || '',
@@ -3543,6 +3563,17 @@ async function testEdgeProxyHealth(rawUrl) {
       latencyMs,
       details: data,
     };
+
+    const statusEndpoint = clean ? `${clean}/api/backend/status` : './api/backend/status';
+    fetch(statusEndpoint, { headers: { Accept: 'application/json' }, signal: controller?.signal })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((bData) => {
+        if (bData) {
+          state.sourcesBackendStatus = bData;
+          if (state.modal === 'sources') render();
+        }
+      })
+      .catch(() => {});
   } catch (err) {
     state.sourcesProxyTest = {
       status: 'error',
@@ -4490,6 +4521,10 @@ function bindEvents() {
     } else if (e.target.id === 'sources-proxy-form') {
       const rawProxy = (document.getElementById('sources-hls-proxy-input')?.value || '').trim();
       const rawCustom = (document.getElementById('sources-custom-resolver-input')?.value || '').trim();
+      const rawMirrors = (document.getElementById('sources-bootstrap-mirrors-input')?.value || '').trim();
+      const rawJellyfinUrl = (document.getElementById('sources-jellyfin-url-input')?.value || '').trim();
+      const rawJellyfinKey = (document.getElementById('sources-jellyfin-key-input')?.value || '').trim();
+
       if (rawProxy && !cleanProxyUrl(rawProxy)) {
         showToast('Edge Proxy URL must start with http:// or https://');
         return;
@@ -4498,12 +4533,33 @@ function bindEvents() {
         showToast('Custom Resolver URL must start with http:// or https://');
         return;
       }
+      if (rawJellyfinUrl && !/^https?:\/\//i.test(rawJellyfinUrl)) {
+        showToast('Jellyfin URL must start with http:// or https://');
+        return;
+      }
+
       const hlsProxyUrl = cleanProxyUrl(rawProxy);
-      state.prefs = savePlayerPrefs({ hlsProxyUrl, customResolverUrl: rawCustom });
+      const bootstrapMirrors = rawMirrors
+        ? rawMirrors
+            .split(/[\r\n,]+/)
+            .map((m) => m.trim())
+            .filter((m) => /^https?:\/\//i.test(m))
+        : [];
+
+      state.prefs = savePlayerPrefs({
+        hlsProxyUrl,
+        customResolverUrl: rawCustom,
+        bootstrapMirrors,
+        jellyfinUrl: rawJellyfinUrl,
+        jellyfinApiKey: rawJellyfinKey,
+      });
       state.sourcesDraft.hlsProxyUrl = hlsProxyUrl;
       state.sourcesDraft.customResolverUrl = rawCustom;
+      state.sourcesDraft.bootstrapMirrors = rawMirrors;
+      state.sourcesDraft.jellyfinUrl = rawJellyfinUrl;
+      state.sourcesDraft.jellyfinApiKey = rawJellyfinKey;
       if (state.playerOpen) state.sourcesDirtyInPlayer = true;
-      showToast('Saved Edge Proxy & Custom Resolver');
+      showToast('Saved Edge Proxy, Mirrors & Resolver');
       render();
     } else if (e.target.id === 'sources-direct-form') {
       const raw = (document.getElementById('sources-direct-input')?.value || '').trim();
@@ -4794,6 +4850,46 @@ async function loadHomeDynamicFeeds() {
 }
 
 async function init() {
+  if (typeof window !== 'undefined' && window.location?.search) {
+    try {
+      const urlParams = new URLSearchParams(window.location.search);
+      const qProxy = urlParams.get('proxy');
+      const qMirrors = urlParams.get('mirrors');
+      const qResolver = urlParams.get('resolver');
+      const qDebrid = urlParams.get('debridKey');
+      const qProvider = urlParams.get('debridProvider');
+      const patch = {};
+      if (qProxy) patch.hlsProxyUrl = cleanProxyUrl(qProxy);
+      if (qMirrors) {
+        patch.bootstrapMirrors = qMirrors
+          .split(',')
+          .map((s) => s.trim())
+          .filter((s) => /^https?:\/\//i.test(s));
+      }
+      if (qResolver) patch.customResolverUrl = qResolver.trim();
+      if (qDebrid) patch.debridApiKey = qDebrid.trim();
+      if (qProvider) patch.debridProvider = qProvider.trim().toLowerCase();
+      if (Object.keys(patch).length > 0) {
+        state.prefs = savePlayerPrefs(patch);
+      }
+    } catch {}
+  }
+
+  if (
+    Array.isArray(state.prefs.bootstrapMirrors) &&
+    state.prefs.bootstrapMirrors.length > 0 &&
+    !state.prefs.hlsProxyUrl
+  ) {
+    resolveBootstrapOrigin(state.prefs.bootstrapMirrors)
+      .then((res) => {
+        if (res?.status === 'ok' && res.activeOrigin) {
+          state.prefs = savePlayerPrefs({ hlsProxyUrl: res.activeOrigin });
+          if (state.modal === 'sources') render();
+        }
+      })
+      .catch(() => {});
+  }
+
   antiRedirectGuard.install();
   antiRedirectGuard.subscribe((snapshot) => {
     state.shield = snapshot;

@@ -155,12 +155,12 @@ export function collectStremioAddonUrls(input = {}) {
 
 /**
  * Build a proxy URL for HLS manifests/segments using either a configured Edge Proxy or relative ./api/proxy/hls.
- * Avoids double-wrapping already-proxied or blob/data URLs.
+ * Avoids double-wrapping already-proxied or blob/data URLs, passing optional referer and play token.
  * @param {string} streamUrl
- * @param {{ hlsProxyUrl?: string, referer?: string }} [options]
+ * @param {{ hlsProxyUrl?: string, referer?: string, token?: string }} [options]
  * @returns {string}
  */
-export function buildHlsProxyUrl(streamUrl, { hlsProxyUrl = '', referer = '' } = {}) {
+export function buildHlsProxyUrl(streamUrl, { hlsProxyUrl = '', referer = '', token = '' } = {}) {
   const trimmed = String(streamUrl || '').trim();
   if (!trimmed) return '';
   if (trimmed.startsWith('blob:') || trimmed.startsWith('data:')) return trimmed;
@@ -170,15 +170,192 @@ export function buildHlsProxyUrl(streamUrl, { hlsProxyUrl = '', referer = '' } =
 
   if (trimmed.startsWith('/api/proxy/hls?') || trimmed.startsWith('./api/proxy/hls?')) {
     const queryPart = trimmed.slice(trimmed.indexOf('?'));
-    return `${endpoint}${queryPart}`;
+    let res = `${endpoint}${queryPart}`;
+    if (token && !res.includes('token=')) {
+      res += `&token=${encodeURIComponent(token)}`;
+    }
+    return res;
   }
   if (trimmed.includes('/api/proxy/hls?url=')) {
+    if (token && !trimmed.includes('token=')) {
+      return `${trimmed}&token=${encodeURIComponent(token)}`;
+    }
     return trimmed;
   }
 
-  return `${endpoint}?url=${encodeURIComponent(trimmed)}${
+  let out = `${endpoint}?url=${encodeURIComponent(trimmed)}${
     referer ? `&referer=${encodeURIComponent(referer)}` : ''
   }`;
+  if (token) {
+    out += `&token=${encodeURIComponent(token)}`;
+  }
+  return out;
+}
+
+/**
+ * Sequential/fallback discovery of live mirror backends from a list of configured bootstrap candidates.
+ * Returns the fastest responding live mirror origin and mirror list.
+ *
+ * @param {string[]|string} mirrors
+ * @param {{ timeoutMs?: number }} [options]
+ * @returns {Promise<{ activeOrigin: string, mirrors: string[], latencyMs: number, status: string }>}
+ */
+export async function resolveBootstrapOrigin(mirrors = [], options = {}) {
+  const timeoutMs = options.timeoutMs || 2500;
+  const list = Array.isArray(mirrors) ? mirrors : [mirrors];
+  const candidates = list
+    .map((m) => String(m || '').trim().replace(/\/+$/, ''))
+    .filter((m) => /^https?:\/\//i.test(m));
+
+  if (!candidates.length) {
+    return {
+      activeOrigin: '',
+      mirrors: [],
+      latencyMs: -1,
+      status: 'empty',
+    };
+  }
+
+  for (const candidate of candidates) {
+    const start = Date.now();
+    try {
+      const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+      const timer = ctrl ? setTimeout(() => ctrl.abort(), timeoutMs) : null;
+      const resp = await fetch(`${candidate}/api/bootstrap`, {
+        method: 'GET',
+        headers: { Accept: 'application/json' },
+        signal: ctrl?.signal,
+      }).finally(() => {
+        if (timer) clearTimeout(timer);
+      });
+
+      if (resp.ok) {
+        const data = await resp.json();
+        let payload = data;
+        if (data.descriptor) {
+          try {
+            const decodedJson =
+              typeof atob === 'function'
+                ? atob(data.descriptor)
+                : Buffer.from(data.descriptor, 'base64').toString('utf8');
+            const decoded = JSON.parse(decodedJson);
+            payload = { ...data, ...decoded };
+          } catch {}
+        }
+        return {
+          activeOrigin: payload.activeOrigin || candidate,
+          mirrors: Array.isArray(payload.mirrors) && payload.mirrors.length ? payload.mirrors : candidates,
+          latencyMs: Date.now() - start,
+          status: 'ok',
+        };
+      }
+    } catch {
+      // Continue to next mirror candidate
+    }
+  }
+
+  return {
+    activeOrigin: candidates[0],
+    mirrors: candidates,
+    latencyMs: -1,
+    status: 'failed',
+  };
+}
+
+/**
+ * Request a short-lived HMAC-signed playback token from the active Edge Proxy or Node backend.
+ *
+ * @param {string} streamUrl
+ * @param {object} [options]
+ * @returns {Promise<{ token: string, streamUrl: string, expiresAt: number, proxyUrl: string } | null>}
+ */
+export async function fetchPlayToken(streamUrl, options = {}) {
+  if (!streamUrl) return null;
+  const base = cleanProxyUrl(options.hlsProxyUrl || '');
+  const endpoint = base ? `${base}/api/play` : './api/play';
+  const q = new URLSearchParams({ url: streamUrl });
+  if (options.exp) q.set('exp', String(options.exp));
+  if (options.id) q.set('id', String(options.id));
+  if (options.referer) q.set('referer', String(options.referer));
+
+  try {
+    const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const timer = ctrl ? setTimeout(() => ctrl.abort(), options.timeoutMs || 4000) : null;
+    const resp = await fetch(`${endpoint}?${q.toString()}`, {
+      headers: { Accept: 'application/json' },
+      signal: ctrl?.signal,
+    }).finally(() => {
+      if (timer) clearTimeout(timer);
+    });
+
+    if (resp.ok) {
+      return await resp.json();
+    }
+  } catch {}
+  return null;
+}
+
+/**
+ * Resolve direct video stream from a configured Jellyfin/Emby instance matching catalog title or IDs.
+ *
+ * @param {string} jellyfinUrl
+ * @param {string} apiKey
+ * @param {object} item
+ * @param {object} [options]
+ * @returns {Promise<object | null>}
+ */
+export async function resolveJellyfinStream(jellyfinUrl, apiKey, item, options = {}) {
+  const server = String(jellyfinUrl || '').trim().replace(/\/+$/, '');
+  const key = String(apiKey || '').trim();
+  if (!server || !key || !item) return null;
+
+  const title = item.title || '';
+  if (!title) return null;
+
+  try {
+    const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const timer = ctrl ? setTimeout(() => ctrl.abort(), options.timeoutMs || 4000) : null;
+    const searchUrl = `${server}/Items?searchTerm=${encodeURIComponent(
+      title
+    )}&limit=5&recursive=true&api_key=${encodeURIComponent(key)}`;
+    const resp = await fetch(searchUrl, {
+      headers: { Accept: 'application/json' },
+      signal: ctrl?.signal,
+    }).finally(() => {
+      if (timer) clearTimeout(timer);
+    });
+
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    const items = Array.isArray(data?.Items) ? data.Items : [];
+    if (!items.length) return null;
+
+    const match =
+      items.find((it) => {
+        if (item.imdbId && it.ProviderIds?.Imdb === item.imdbId) return true;
+        if (item.tmdbId && String(it.ProviderIds?.Tmdb) === String(item.tmdbId)) return true;
+        return it.Name && it.Name.toLowerCase() === title.toLowerCase();
+      }) || items[0];
+
+    if (!match?.Id) return null;
+
+    const streamUrl = `${server}/Videos/${encodeURIComponent(match.Id)}/master.m3u8?api_key=${encodeURIComponent(
+      key
+    )}`;
+    return {
+      id: `jellyfin-${match.Id}`,
+      name: `Jellyfin (${match.Name || title})`,
+      type: 'direct-hls',
+      url: streamUrl,
+      quality: '1080p',
+      shielded: false,
+      sandboxed: false,
+      direct: true,
+      node: 'jellyfin',
+    };
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -718,6 +895,20 @@ export async function fetchStreamSources(item, options = {}) {
           });
 
           const hasDirect = mapped.some(isPlayableDirectSource);
+          if (options.jellyfinUrl && options.jellyfinApiKey) {
+            const jfNode = await resolveJellyfinStream(
+              options.jellyfinUrl,
+              options.jellyfinApiKey,
+              item,
+              options
+            ).catch(() => null);
+            if (jfNode) {
+              const firstEmbedIdx = mapped.findIndex((s) => s.type === 'embed');
+              if (firstEmbedIdx >= 0) mapped.splice(firstEmbedIdx, 0, jfNode);
+              else mapped.push(jfNode);
+            }
+          }
+
           if (
             !hasDirect &&
             options.includeArchiveFallback !== false &&
