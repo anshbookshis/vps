@@ -111,7 +111,6 @@ export function renderSettingsSheet({ appearance, prefs, shield, profile }) {
             <select id="pref-debrid-provider" class="field-select">
               <option value="realdebrid" ${(prefs.debridProvider || 'realdebrid') === 'realdebrid' ? 'selected' : ''}>Real-Debrid</option>
               <option value="torbox" ${prefs.debridProvider === 'torbox' ? 'selected' : ''}>TorBox</option>
-              <option value="alldebrid" ${prefs.debridProvider === 'alldebrid' ? 'selected' : ''}>AllDebrid</option>
             </select>
           </div>
           <div style="display:flex;flex-direction:column;gap:5px;">
