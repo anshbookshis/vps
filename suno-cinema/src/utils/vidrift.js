@@ -6,6 +6,55 @@ export const VIDFAST_ORIGIN = 'https://vidfast.vc';
 export const VIDSRC_PRO_ORIGIN = 'https://vidsrc.su';
 export const VIDSRC_TO_ORIGIN = 'https://vidsrc.to';
 
+export const EMBED_IFRAME_SANDBOX =
+  'allow-scripts allow-same-origin allow-forms allow-presentation';
+
+/**
+ * Determine whether an embed provider should enforce strict iframe sandboxing.
+ * Only explicit `vidrift-direct` disables sandbox when Shield is active.
+ * @param {string} provider
+ * @param {boolean} [strictFrameMode=true]
+ * @returns {boolean}
+ */
+export function shouldSandboxProvider(provider, strictFrameMode = true) {
+  if (!strictFrameMode) return false;
+  return provider !== 'vidrift-direct';
+}
+
+function escapeIframeAttr(str) {
+  return String(str || '')
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+/**
+ * Build a sandbox-first embed <iframe> HTML element with `sandbox` emitted before `src`
+ * so the browser locks permissions prior to initiating the initial navigation.
+ * @param {{ id?: string, url: string, title?: string, provider?: string, strictFrameMode?: boolean, allow?: string }} opts
+ * @returns {string}
+ */
+export function buildEmbedIframeHtml({
+  id = 'vidrift-player',
+  url,
+  title = '',
+  provider = 'vidlink',
+  strictFrameMode = true,
+  allow = 'autoplay; fullscreen; picture-in-picture; encrypted-media',
+}) {
+  const sandboxAttr = shouldSandboxProvider(provider, strictFrameMode)
+    ? ` sandbox="${EMBED_IFRAME_SANDBOX}"`
+    : '';
+  return `<iframe id="${escapeIframeAttr(id)}"${sandboxAttr} title="${escapeIframeAttr(
+    title
+  )}" allow="${escapeIframeAttr(
+    allow
+  )}" allowfullscreen referrerpolicy="strict-origin-when-cross-origin" src="${escapeIframeAttr(
+    url
+  )}"></iframe>`;
+}
+
 export const PLAYER_PROVIDERS = [
   {
     id: 'hls-direct',
@@ -28,14 +77,14 @@ export const PLAYER_PROVIDERS = [
   {
     id: 'vidsrc-pro',
     label: 'VidSrc Pro',
-    sandboxed: false,
-    description: 'Multi-mirror cloud embed server with wide 2025/2026 & regional support',
+    sandboxed: true,
+    description: 'Multi-mirror cloud embed server with popup & redirect sandbox enabled',
   },
   {
     id: 'vidsrc-to',
     label: 'VidSrc.to',
     sandboxed: true,
-    description: 'Classic multi-mirror embed fallback for movies & series',
+    description: 'Classic multi-mirror embed fallback with popup & redirect sandbox enabled',
   },
   {
     id: 'vidrift',
@@ -1333,7 +1382,7 @@ export async function fetchStreamSources(item, options = {}) {
       url: buildVidsrcProEmbedUrl(item, { ...options, season, episode }),
       quality: '1080p',
       shielded: true,
-      sandboxed: false,
+      sandboxed: true,
       direct: false,
       node: 'vidsrc-pro',
     });

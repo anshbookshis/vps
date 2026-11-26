@@ -37,6 +37,8 @@ export class AntiRedirectGuard {
     this._origOpen = null;
     this._beforeUnloadHandler = null;
     this._blurHandler = null;
+    this._clickHandler = null;
+    this._submitHandler = null;
     this._lastIframeFocusAt = 0;
   }
 
@@ -112,6 +114,9 @@ export class AntiRedirectGuard {
       const activeEl = document.activeElement;
       if (activeEl && activeEl.tagName === 'IFRAME') {
         this._lastIframeFocusAt = Date.now();
+        if (!this.strictFrameMode) {
+          this.recordBlock('Blocked/logged iframe focus hijack', 'Focus left window while Shield OFF');
+        }
       }
     };
     window.addEventListener('blur', this._blurHandler);
@@ -126,24 +131,35 @@ export class AntiRedirectGuard {
     };
     window.addEventListener('beforeunload', this._beforeUnloadHandler);
 
-    // Enforce rel="noopener noreferrer" on all clicks on outbound links
-    document.addEventListener(
-      'click',
-      (e) => {
-        const anchor = e.target?.closest?.('a[href]');
-        if (!anchor) return;
-        const href = anchor.getAttribute('href') || '';
-        if (/^https?:\/\//i.test(href) && !isAllowedExternalUrl(href)) {
-          e.preventDefault();
-          this.recordBlock('Blocked external redirect link', href);
-          return;
-        }
-        if (anchor.target === '_blank') {
-          anchor.rel = 'noopener noreferrer';
-        }
-      },
-      true
-    );
+    // Enforce rel="noopener noreferrer" on all clicks on outbound links & block unapproved external redirects
+    this._clickHandler = (e) => {
+      const anchor = e.target?.closest?.('a[href]');
+      if (!anchor) return;
+      const href = anchor.getAttribute('href') || '';
+      if (/^https?:\/\//i.test(href) && !isAllowedExternalUrl(href)) {
+        e.preventDefault();
+        anchor.removeAttribute('target');
+        this.recordBlock('Blocked external redirect link', href);
+        return;
+      }
+      if (anchor.target === '_blank') {
+        anchor.rel = 'noopener noreferrer';
+      }
+    };
+    document.addEventListener('click', this._clickHandler, true);
+
+    // Block popup form submissions (target="_blank") or external form redirects
+    this._submitHandler = (e) => {
+      const form = e.target;
+      if (!form || form.tagName !== 'FORM') return;
+      const action = form.getAttribute('action') || '';
+      const isBlank = String(form.getAttribute('target') || '').toLowerCase() === '_blank';
+      if (isBlank || (/^https?:\/\//i.test(action) && !isAllowedExternalUrl(action))) {
+        e.preventDefault();
+        this.recordBlock('Blocked popup form redirect', action || '_blank');
+      }
+    };
+    document.addEventListener('submit', this._submitHandler, true);
 
     this.notify();
   }
@@ -157,6 +173,8 @@ export class AntiRedirectGuard {
     }
     if (this._blurHandler) window.removeEventListener('blur', this._blurHandler);
     if (this._beforeUnloadHandler) window.removeEventListener('beforeunload', this._beforeUnloadHandler);
+    if (this._clickHandler) document.removeEventListener('click', this._clickHandler, true);
+    if (this._submitHandler) document.removeEventListener('submit', this._submitHandler, true);
     this.installed = false;
   }
 }
