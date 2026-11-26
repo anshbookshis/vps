@@ -1,12 +1,16 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
+import { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
 import { CATALOG_ITEMS } from './src/data/catalog.js';
 import { SONIC_PROFILES, SCORE_MOODS } from './src/utils/sonic-engine.js';
 
 const ROOT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_PORT = Number(process.env.PORT || 3000);
+const DEFAULT_FETCH_TIMEOUT_MS = 8000;
+const DEFAULT_RETRY_BACKOFF_MS = [250, 600];
 
 const MIME_TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -21,43 +25,155 @@ const MIME_TYPES = {
   '.ico': 'image/x-icon',
 };
 
-function sendJson(res, statusCode, payload) {
+const CORS_HEADERS = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
+  'Access-Control-Allow-Headers': '*',
+  'Access-Control-Expose-Headers': 'Content-Length, Content-Range, Accept-Ranges, Content-Type',
+};
+
+function sendJson(res, statusCode, payload, extraHeaders = {}) {
   const body = JSON.stringify(payload);
   res.writeHead(statusCode, {
     'Content-Type': 'application/json; charset=utf-8',
     'Cache-Control': 'no-store',
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
-    'Access-Control-Allow-Headers': '*',
+    ...CORS_HEADERS,
+    ...extraHeaders,
   });
+  if (res.req?.method === 'HEAD') {
+    res.end();
+    return;
+  }
   res.end(body);
 }
 
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isTimeoutError(err) {
+  return Boolean(err && (err.name === 'AbortError' || err.name === 'TimeoutError' || /timeout/i.test(err.message || '')));
+}
+
+/**
+ * Fetch wrapper with per-attempt timeout and automatic backoff retries on 5xx, 429, or network/timeout errors.
+ * Clears timeout once headers arrive so large streaming responses are not aborted mid-transfer.
+ *
+ * @param {string} url
+ * @param {RequestInit & { signal?: AbortSignal }} [options]
+ * @param {{ timeoutMs?: number, maxRetries?: number, backoffMs?: number[] }} [config]
+ * @returns {Promise<Response>}
+ */
+export async function fetchWithRetry(url, options = {}, config = {}) {
+  const timeoutMs = config.timeoutMs ?? DEFAULT_FETCH_TIMEOUT_MS;
+  const maxRetries = config.maxRetries ?? 2;
+  const backoffMs = config.backoffMs ?? DEFAULT_RETRY_BACKOFF_MS;
+  const callerSignal = options.signal;
+
+  let lastError = null;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    if (callerSignal?.aborted) {
+      throw callerSignal.reason || new Error('Client aborted request');
+    }
+
+    const controller = new AbortController();
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort(new Error(`Upstream request timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+
+    const onCallerAbort = () => controller.abort(callerSignal.reason || new Error('Client aborted request'));
+    if (callerSignal) {
+      callerSignal.addEventListener('abort', onCallerAbort, { once: true });
+    }
+
+    try {
+      const resp = await fetch(url, {
+        ...options,
+        signal: controller.signal,
+      });
+      clearTimeout(timer);
+      if (callerSignal) callerSignal.removeEventListener('abort', onCallerAbort);
+
+      const retryableStatus = resp.status === 429 || resp.status >= 500;
+      if (retryableStatus && attempt < maxRetries) {
+        await resp.body?.cancel?.().catch(() => {});
+        await delay(backoffMs[Math.min(attempt, backoffMs.length - 1)] ?? 250);
+        continue;
+      }
+
+      return resp;
+    } catch (err) {
+      clearTimeout(timer);
+      if (callerSignal) callerSignal.removeEventListener('abort', onCallerAbort);
+      if (callerSignal?.aborted) throw err;
+
+      lastError = timedOut ? new Error(`Upstream request timed out after ${timeoutMs}ms`) : err;
+      if (timedOut) lastError.name = 'TimeoutError';
+
+      if (attempt < maxRetries) {
+        await delay(backoffMs[Math.min(attempt, backoffMs.length - 1)] ?? 250);
+        continue;
+      }
+      throw lastError;
+    }
+  }
+
+  throw lastError || new Error('Upstream request failed');
+}
+
 async function fetchJsonWithTimeout(url, options = {}, timeoutMs = 6000) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const resp = await fetch(url, {
+  const resp = await fetchWithRetry(
+    url,
+    {
       ...options,
-      signal: controller.signal,
       headers: {
         'User-Agent': 'SunoCinema/1.0',
         ...(options.headers || {}),
       },
-    });
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    return await resp.json();
-  } finally {
-    clearTimeout(timer);
+    },
+    { timeoutMs, maxRetries: 1, backoffMs: [200] }
+  );
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  return await resp.json();
+}
+
+function isAlreadyProxiedUri(rawUri, absHref, proxyEndpoint) {
+  if (!rawUri) return false;
+  if (
+    rawUri.startsWith('/api/proxy/hls?') ||
+    rawUri.startsWith('/api/proxy/subtitles?') ||
+    rawUri.startsWith(`${proxyEndpoint}?`)
+  ) {
+    return true;
   }
+  try {
+    const parsed = new URL(absHref);
+    const epPath = new URL(proxyEndpoint, 'http://127.0.0.1').pathname;
+    if (
+      epPath !== '/' &&
+      (parsed.pathname === epPath || parsed.pathname === '/api/proxy/hls' || parsed.pathname === '/api/proxy/subtitles') &&
+      parsed.searchParams.has('url')
+    ) {
+      return true;
+    }
+  } catch {
+    // Ignore parse error
+  }
+  return false;
+}
+
+function buildProxyUrl(absHref, proxyEndpoint, referer = '') {
+  return `${proxyEndpoint}?url=${encodeURIComponent(absHref)}${
+    referer ? `&referer=${encodeURIComponent(referer)}` : ''
+  }`;
 }
 
 /**
- * Rewrite HLS M3U8 manifest content to route all child playlists, chunks, and keys through the local HLS proxy.
- * Implements Method 3/4 front-end pipeline requirements:
- * - Rewrites segment URIs with upstream base URL resolution
- * - Preserves upstream Referer/Origin tokens
- * - Rewrites #EXT-X-KEY and #EXT-X-MAP URI attributes
+ * Rewrite HLS M3U8 manifest content to route all child playlists, chunks, audio/subtitle media tracks, and keys
+ * through the HLS proxy while avoiding double-wrapping already proxied URIs.
  *
  * @param {string} manifestText
  * @param {string} baseUrl
@@ -72,15 +188,15 @@ export function rewriteHlsManifest(manifestText, baseUrl, proxyEndpoint = '/api/
     const trimmed = line.trim();
     if (!trimmed) return line;
 
-    // Rewrite tags containing URI="..." such as #EXT-X-KEY or #EXT-X-MAP
-    if (trimmed.startsWith('#') && trimmed.includes('URI=')) {
-      return line.replace(/URI="([^"]+)"/g, (match, uri) => {
+    // Rewrite tags containing URI="..." (#EXT-X-MEDIA, #EXT-X-KEY, #EXT-X-MAP, #EXT-X-I-FRAME-STREAM-INF, etc.)
+    if (trimmed.startsWith('#') && /URI="[^"]+"/i.test(line)) {
+      return line.replace(/URI="([^"]+)"/gi, (match, uri) => {
         try {
           const abs = new URL(uri, baseUrl).href;
-          const param = `${proxyEndpoint}?url=${encodeURIComponent(abs)}${
-            referer ? `&referer=${encodeURIComponent(referer)}` : ''
-          }`;
-          return `URI="${param}"`;
+          if (isAlreadyProxiedUri(uri, abs, proxyEndpoint)) {
+            return match;
+          }
+          return `URI="${buildProxyUrl(abs, proxyEndpoint, referer)}"`;
         } catch {
           return match;
         }
@@ -91,9 +207,10 @@ export function rewriteHlsManifest(manifestText, baseUrl, proxyEndpoint = '/api/
     if (!trimmed.startsWith('#')) {
       try {
         const abs = new URL(trimmed, baseUrl).href;
-        return `${proxyEndpoint}?url=${encodeURIComponent(abs)}${
-          referer ? `&referer=${encodeURIComponent(referer)}` : ''
-        }`;
+        if (isAlreadyProxiedUri(trimmed, abs, proxyEndpoint)) {
+          return line;
+        }
+        return buildProxyUrl(abs, proxyEndpoint, referer);
       } catch {
         return line;
       }
@@ -103,6 +220,32 @@ export function rewriteHlsManifest(manifestText, baseUrl, proxyEndpoint = '/api/
   });
 
   return rewritten.join('\n');
+}
+
+/**
+ * Convert an SRT subtitle payload to clean WebVTT on the fly (stripping UTF-8 BOM and normalizing timestamps).
+ * Passes existing WEBVTT content through unchanged except line-ending/BOM normalization.
+ *
+ * @param {string} rawText
+ * @returns {string}
+ */
+export function convertSrtToVtt(rawText) {
+  if (typeof rawText !== 'string' || !rawText.trim()) return 'WEBVTT\n\n';
+
+  const clean = rawText.replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n');
+  const trimmedStart = clean.trimStart();
+
+  if (/^WEBVTT(?:[ \t\n]|$)/i.test(trimmedStart)) {
+    return trimmedStart;
+  }
+
+  const converted = trimmedStart.replace(
+    /^(\d{1,2}):(\d{2}:\d{2})[,.](\d{3})([ \t]*-->[ \t]*)(\d{1,2}):(\d{2}:\d{2})[,.](\d{3})(.*)$/gm,
+    (_, h1, ms1, f1, arrow, h2, ms2, f2, rest) =>
+      `${h1.padStart(2, '0')}:${ms1}.${f1}${arrow}${h2.padStart(2, '0')}:${ms2}.${f2}${rest}`
+  );
+
+  return `WEBVTT\n\n${converted}`;
 }
 
 /**
@@ -121,8 +264,8 @@ export function unmaskDisguisedSegment(buffer) {
   const isWoff = buffer[0] === 0x77 && buffer[1] === 0x4f && buffer[2] === 0x46 && buffer[3] === 0x32;
 
   if (isPng || isJpg || isWoff) {
-    // Scan for repeating 188-byte MPEG-TS sync byte (0x47)
-    const scanLimit = Math.min(buffer.length - 188 * 3, 16384);
+    // Scan for repeating 188-byte MPEG-TS sync byte (0x47) across 3 consecutive packet headers
+    const scanLimit = Math.min(buffer.length - 376, 16384);
     for (let i = 0; i < scanLimit; i++) {
       if (
         buffer[i] === 0x47 &&
@@ -444,6 +587,821 @@ async function searchWikidataKeyless(query, type) {
   return results;
 }
 
+function hasDisguisedHeader(buffer) {
+  if (!buffer || buffer.length < 4) return false;
+  const isPng = buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4e && buffer[3] === 0x47;
+  const isJpg = buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff;
+  const isWoff = buffer[0] === 0x77 && buffer[1] === 0x4f && buffer[2] === 0x46 && buffer[3] === 0x32;
+  return isPng || isJpg || isWoff;
+}
+
+function resolveSegmentMimeType(targetUrl, upstreamContentType = '') {
+  let cleanPath = '';
+  try {
+    cleanPath = new URL(targetUrl).pathname.toLowerCase();
+  } catch {
+    cleanPath = String(targetUrl || '').toLowerCase();
+  }
+  const ctLower = String(upstreamContentType || '').toLowerCase();
+
+  if (cleanPath.endsWith('.vtt') || ctLower.includes('text/vtt')) return 'text/vtt; charset=utf-8';
+  if (cleanPath.endsWith('.m4s') || cleanPath.endsWith('.mp4') || cleanPath.endsWith('.m4v') || cleanPath.endsWith('.cmfv')) {
+    return 'video/mp4';
+  }
+  if (cleanPath.endsWith('.m4a') || cleanPath.endsWith('.cmfa')) return 'audio/mp4';
+  if (cleanPath.endsWith('.aac')) return 'audio/aac';
+  if (cleanPath.endsWith('.mp3')) return 'audio/mpeg';
+  if (cleanPath.endsWith('.key')) return 'application/octet-stream';
+  if (cleanPath.endsWith('.ts')) return 'video/mp2t';
+
+  if (
+    ctLower &&
+    !ctLower.startsWith('image/') &&
+    !ctLower.startsWith('font/') &&
+    ctLower !== 'application/octet-stream'
+  ) {
+    return upstreamContentType;
+  }
+  return 'video/mp2t';
+}
+
+function buildProxyUpstreamHeaders(referer = '', rangeHeader = '', identityEncoding = true) {
+  const headers = {
+    'User-Agent':
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+    Accept: '*/*',
+  };
+  if (identityEncoding) {
+    headers['Accept-Encoding'] = 'identity';
+  }
+  if (referer) {
+    headers['Referer'] = referer;
+    try {
+      headers['Origin'] = new URL(referer).origin;
+    } catch {
+      // Ignore invalid referer
+    }
+  }
+  if (rangeHeader) {
+    headers['Range'] = rangeHeader;
+  }
+  return headers;
+}
+
+async function* streamPrefetchedChunks(headBuf, reader) {
+  if (headBuf && headBuf.length > 0) {
+    yield headBuf;
+  }
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    if (value && value.length > 0) {
+      yield Buffer.from(value);
+    }
+  }
+}
+
+async function handleHlsProxyRequest(req, res, reqUrl) {
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204, { ...CORS_HEADERS, 'Access-Control-Max-Age': '86400' });
+    return res.end();
+  }
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    return sendJson(res, 405, { error: 'Method not allowed' });
+  }
+
+  const targetUrl = reqUrl.searchParams.get('url') || '';
+  const referer = reqUrl.searchParams.get('referer') || '';
+  if (!targetUrl || !/^https?:\/\//i.test(targetUrl)) {
+    return sendJson(res, 400, { error: 'Valid http/https "url" query parameter required' });
+  }
+  try {
+    new URL(targetUrl);
+  } catch {
+    return sendJson(res, 400, { error: 'Malformed target "url" query parameter' });
+  }
+
+  const abortController = new AbortController();
+  const onResClose = () => {
+    if (!res.writableFinished) {
+      abortController.abort(new Error('Client disconnected'));
+    }
+  };
+  res.on('close', onResClose);
+
+  try {
+    const rangeHeader = typeof req.headers.range === 'string' ? req.headers.range : '';
+    const upstreamHeaders = buildProxyUpstreamHeaders(referer, rangeHeader, true);
+
+    let upstreamResp = await fetchWithRetry(targetUrl, {
+      method: req.method,
+      headers: upstreamHeaders,
+      redirect: 'follow',
+      signal: abortController.signal,
+    });
+
+    if (req.method === 'HEAD' && upstreamResp.status === 405) {
+      await upstreamResp.body?.cancel?.().catch(() => {});
+      upstreamResp = await fetchWithRetry(targetUrl, {
+        method: 'GET',
+        headers: upstreamHeaders,
+        redirect: 'follow',
+        signal: abortController.signal,
+      });
+    }
+
+    if (upstreamResp.status === 416) {
+      const contentRange = upstreamResp.headers.get('content-range');
+      await upstreamResp.body?.cancel?.().catch(() => {});
+      return sendJson(
+        res,
+        416,
+        { error: 'Requested range not satisfiable', targetUrl },
+        contentRange ? { 'Content-Range': contentRange } : {}
+      );
+    }
+
+    if (!upstreamResp.ok) {
+      await upstreamResp.body?.cancel?.().catch(() => {});
+      return sendJson(res, upstreamResp.status, {
+        error: `Upstream HTTP ${upstreamResp.status} ${upstreamResp.statusText}`.trim(),
+        targetUrl,
+      });
+    }
+
+    const finalUrl = upstreamResp.url || targetUrl;
+    let cleanPath = '';
+    try {
+      cleanPath = new URL(finalUrl).pathname.toLowerCase();
+    } catch {
+      cleanPath = finalUrl.toLowerCase();
+    }
+
+    const contentType = upstreamResp.headers.get('content-type') || '';
+    const ctLower = contentType.toLowerCase();
+    const isManifest =
+      ctLower.includes('mpegurl') ||
+      cleanPath.endsWith('.m3u8') ||
+      cleanPath.endsWith('.m3u') ||
+      finalUrl.toLowerCase().includes('.m3u8');
+
+    if (isManifest) {
+      if (req.method === 'HEAD') {
+        await upstreamResp.body?.cancel?.().catch(() => {});
+        res.writeHead(200, {
+          'Content-Type': 'application/vnd.apple.mpegurl; charset=utf-8',
+          'Cache-Control': 'no-cache',
+          ...CORS_HEADERS,
+        });
+        return res.end();
+      }
+      const text = await upstreamResp.text();
+      const rewritten = rewriteHlsManifest(text, finalUrl, '/api/proxy/hls', referer || finalUrl);
+      res.writeHead(200, {
+        'Content-Type': 'application/vnd.apple.mpegurl; charset=utf-8',
+        'Cache-Control': 'no-cache',
+        ...CORS_HEADERS,
+      });
+      return res.end(rewritten);
+    }
+
+    const status = upstreamResp.status === 206 ? 206 : 200;
+    const upstreamContentRange = upstreamResp.headers.get('content-range');
+    const upstreamContentEncoding = upstreamResp.headers.get('content-encoding');
+    const upstreamContentLength = !upstreamContentEncoding ? upstreamResp.headers.get('content-length') : null;
+    const acceptRanges = upstreamResp.headers.get('accept-ranges') || 'bytes';
+
+    const outHeaders = {
+      'Content-Type': resolveSegmentMimeType(finalUrl, contentType),
+      'Accept-Ranges': acceptRanges,
+      'Cache-Control': status === 206 ? 'no-cache' : 'public, max-age=3600',
+      ...CORS_HEADERS,
+    };
+    if (upstreamContentRange) outHeaders['Content-Range'] = upstreamContentRange;
+    if (upstreamContentLength !== null) outHeaders['Content-Length'] = upstreamContentLength;
+
+    if (req.method === 'HEAD' || !upstreamResp.body) {
+      await upstreamResp.body?.cancel?.().catch(() => {});
+      res.writeHead(status, outHeaders);
+      return res.end();
+    }
+
+    // Stream 206 partial content directly without buffering or altering byte offsets
+    if (status === 206) {
+      res.writeHead(206, outHeaders);
+      await pipeline(Readable.fromWeb(upstreamResp.body), res);
+      return;
+    }
+
+    // For 200 responses, peek initial bytes only to handle text/plain M3U8 or disguised image/font prefixes
+    const reader = upstreamResp.body.getReader();
+    const initialChunks = [];
+    let initialLen = 0;
+
+    while (initialLen < 8) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      if (value && value.length > 0) {
+        const buf = Buffer.from(value);
+        initialChunks.push(buf);
+        initialLen += buf.length;
+      }
+    }
+
+    if (initialLen === 0) {
+      outHeaders['Content-Length'] = '0';
+      res.writeHead(200, outHeaders);
+      return res.end();
+    }
+
+    let headBuf = initialChunks.length === 1 ? initialChunks[0] : Buffer.concat(initialChunks);
+
+    if (ctLower.startsWith('text/plain') && !cleanPath.endsWith('.vtt') && !cleanPath.endsWith('.srt')) {
+      const probe = headBuf.subarray(0, 32).toString('utf8');
+      if (probe.trimStart().startsWith('#EXTM3U')) {
+        const restChunks = [headBuf];
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          if (value && value.length > 0) restChunks.push(Buffer.from(value));
+        }
+        const text = Buffer.concat(restChunks).toString('utf8');
+        const rewritten = rewriteHlsManifest(text, finalUrl, '/api/proxy/hls', referer || finalUrl);
+        res.writeHead(200, {
+          'Content-Type': 'application/vnd.apple.mpegurl; charset=utf-8',
+          'Cache-Control': 'no-cache',
+          ...CORS_HEADERS,
+        });
+        return res.end(rewritten);
+      }
+    }
+
+    if (hasDisguisedHeader(headBuf)) {
+      const scanChunks = [headBuf];
+      let total = headBuf.length;
+      while (total < 20480) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        if (value && value.length > 0) {
+          const buf = Buffer.from(value);
+          scanChunks.push(buf);
+          total += buf.length;
+        }
+      }
+      const rawHead = scanChunks.length === 1 ? scanChunks[0] : Buffer.concat(scanChunks);
+      const unmasked = unmaskDisguisedSegment(rawHead);
+      const stripped = rawHead.length - unmasked.length;
+      headBuf = unmasked;
+      if (stripped > 0) {
+        if (upstreamContentLength !== null && Number.isFinite(Number(upstreamContentLength))) {
+          outHeaders['Content-Length'] = Math.max(0, Number(upstreamContentLength) - stripped);
+        }
+        outHeaders['Content-Type'] = resolveSegmentMimeType(finalUrl, '');
+      }
+    }
+
+    res.writeHead(200, outHeaders);
+    await pipeline(Readable.from(streamPrefetchedChunks(headBuf, reader)), res);
+  } catch (err) {
+    if (res.destroyed || abortController.signal.aborted || err?.code === 'ERR_STREAM_PREMATURE_CLOSE') {
+      return;
+    }
+    if (!res.headersSent) {
+      return sendJson(res, isTimeoutError(err) ? 504 : 502, {
+        error: isTimeoutError(err) ? 'HLS proxy upstream timeout' : 'HLS proxy upstream gateway error',
+        message: err.message,
+        targetUrl,
+      });
+    }
+    res.destroy();
+  } finally {
+    res.off('close', onResClose);
+  }
+}
+
+async function handleSubtitleProxyRequest(req, res, reqUrl) {
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204, { ...CORS_HEADERS, 'Access-Control-Max-Age': '86400' });
+    return res.end();
+  }
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    return sendJson(res, 405, { error: 'Method not allowed' });
+  }
+
+  const targetUrl = reqUrl.searchParams.get('url') || '';
+  const referer = reqUrl.searchParams.get('referer') || '';
+  if (!targetUrl || !/^https?:\/\//i.test(targetUrl)) {
+    return sendJson(res, 400, { error: 'Valid http/https "url" query parameter required' });
+  }
+  try {
+    new URL(targetUrl);
+  } catch {
+    return sendJson(res, 400, { error: 'Malformed target "url" query parameter' });
+  }
+
+  const abortController = new AbortController();
+  const onResClose = () => {
+    if (!res.writableFinished) {
+      abortController.abort(new Error('Client disconnected'));
+    }
+  };
+  res.on('close', onResClose);
+
+  try {
+    const upstreamHeaders = buildProxyUpstreamHeaders(referer, '', false);
+    let upstreamResp = await fetchWithRetry(targetUrl, {
+      method: req.method,
+      headers: upstreamHeaders,
+      redirect: 'follow',
+      signal: abortController.signal,
+    });
+
+    if (req.method === 'HEAD' && upstreamResp.status === 405) {
+      await upstreamResp.body?.cancel?.().catch(() => {});
+      upstreamResp = await fetchWithRetry(targetUrl, {
+        method: 'GET',
+        headers: upstreamHeaders,
+        redirect: 'follow',
+        signal: abortController.signal,
+      });
+    }
+
+    if (!upstreamResp.ok) {
+      await upstreamResp.body?.cancel?.().catch(() => {});
+      return sendJson(res, upstreamResp.status, {
+        error: `Upstream HTTP ${upstreamResp.status} ${upstreamResp.statusText}`.trim(),
+        targetUrl,
+      });
+    }
+
+    const vttHeaders = {
+      'Content-Type': 'text/vtt; charset=utf-8',
+      'Cache-Control': 'public, max-age=3600',
+      ...CORS_HEADERS,
+    };
+
+    if (req.method === 'HEAD') {
+      await upstreamResp.body?.cancel?.().catch(() => {});
+      res.writeHead(200, vttHeaders);
+      return res.end();
+    }
+
+    const rawText = await upstreamResp.text();
+    const vttText = convertSrtToVtt(rawText);
+    res.writeHead(200, vttHeaders);
+    return res.end(vttText);
+  } catch (err) {
+    if (res.destroyed || abortController.signal.aborted) return;
+    return sendJson(res, isTimeoutError(err) ? 504 : 502, {
+      error: isTimeoutError(err) ? 'Subtitle proxy upstream timeout' : 'Subtitle proxy upstream error',
+      message: err.message,
+      targetUrl,
+    });
+  } finally {
+    res.off('close', onResClose);
+  }
+}
+
+function extractInfoHash(magnet, rawHash = '') {
+  const cleanHash = String(rawHash || '').trim();
+  if (/^[a-fA-F0-9]{40}$/.test(cleanHash)) return cleanHash.toLowerCase();
+  const match = String(magnet || '').match(/xt=urn:btih:([a-zA-Z0-9]+)/i);
+  return match ? match[1].toLowerCase() : '';
+}
+
+function makeProxyHlsUrl(targetUrl, referer = '') {
+  if (!targetUrl) return '';
+  if (targetUrl.startsWith('/api/proxy/hls?') || targetUrl.startsWith('./api/proxy/hls?')) {
+    return targetUrl;
+  }
+  return `/api/proxy/hls?url=${encodeURIComponent(targetUrl)}${
+    referer ? `&referer=${encodeURIComponent(referer)}` : ''
+  }`;
+}
+
+async function resolveRealDebridStream(apiKey, magnetUri) {
+  const headers = { Authorization: `Bearer ${apiKey}` };
+  const addResp = await fetchWithRetry(
+    'https://api.real-debrid.com/rest/1.0/torrents/addMagnet',
+    {
+      method: 'POST',
+      headers: { ...headers, 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ magnet: magnetUri }).toString(),
+    },
+    { timeoutMs: 6000, maxRetries: 1 }
+  );
+  if (!addResp.ok) return null;
+  const added = await addResp.json();
+  if (!added?.id) return null;
+
+  const torrentId = added.id;
+  await fetchWithRetry(
+    `https://api.real-debrid.com/rest/1.0/torrents/selectFiles/${encodeURIComponent(torrentId)}`,
+    {
+      method: 'POST',
+      headers: { ...headers, 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ files: 'all' }).toString(),
+    },
+    { timeoutMs: 6000, maxRetries: 1 }
+  ).catch(() => null);
+
+  const infoResp = await fetchWithRetry(
+    `https://api.real-debrid.com/rest/1.0/torrents/info/${encodeURIComponent(torrentId)}`,
+    { headers },
+    { timeoutMs: 6000, maxRetries: 1 }
+  );
+  if (!infoResp.ok) return null;
+  const info = await infoResp.json();
+  if (info?.status !== 'downloaded' || !Array.isArray(info.links) || !info.links[0]) {
+    await fetch(`https://api.real-debrid.com/rest/1.0/torrents/delete/${encodeURIComponent(torrentId)}`, {
+      method: 'DELETE',
+      headers,
+    }).catch(() => {});
+    return null;
+  }
+
+  const unrestrictResp = await fetchWithRetry(
+    'https://api.real-debrid.com/rest/1.0/unrestrict/link',
+    {
+      method: 'POST',
+      headers: { ...headers, 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ link: info.links[0] }).toString(),
+    },
+    { timeoutMs: 6000, maxRetries: 1 }
+  );
+  if (!unrestrictResp.ok) return null;
+  const unrestrict = await unrestrictResp.json();
+  return unrestrict?.download && /^https?:\/\//i.test(unrestrict.download) ? unrestrict.download : null;
+}
+
+async function resolveTorBoxStream(apiKey, magnetUri, infoHash, preferredFileIdx) {
+  const headers = { Authorization: `Bearer ${apiKey}` };
+  if (infoHash) {
+    const checkResp = await fetchWithRetry(
+      `https://api.torbox.app/v1/api/torrents/checkcached?hash=${encodeURIComponent(infoHash)}&format=list`,
+      { headers },
+      { timeoutMs: 5000, maxRetries: 1 }
+    ).catch(() => null);
+    if (checkResp?.ok) {
+      const checkJson = await checkResp.json().catch(() => null);
+      if (Array.isArray(checkJson?.data) && checkJson.data.length === 0) return null;
+    }
+  }
+
+  const createResp = await fetchWithRetry(
+    'https://api.torbox.app/v1/api/torrents/createtorrent',
+    {
+      method: 'POST',
+      headers: { ...headers, 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ magnet: magnetUri }).toString(),
+    },
+    { timeoutMs: 6000, maxRetries: 1 }
+  );
+  if (!createResp.ok) return null;
+  const created = await createResp.json();
+  const torrentId = created?.data?.torrent_id;
+  if (!torrentId) return null;
+
+  const listResp = await fetchWithRetry(
+    `https://api.torbox.app/v1/api/torrents/mylist?id=${encodeURIComponent(torrentId)}`,
+    { headers },
+    { timeoutMs: 6000, maxRetries: 1 }
+  );
+  if (!listResp.ok) return null;
+  const listJson = await listResp.json();
+  const torrentObj = Array.isArray(listJson?.data) ? listJson.data[0] : listJson?.data;
+  const files = Array.isArray(torrentObj?.files) ? torrentObj.files : [];
+  if (!files.length) return null;
+
+  const picked =
+    (Number.isInteger(preferredFileIdx) ? files[preferredFileIdx] : null) ||
+    files.reduce((best, f) => (!best || (f.size || 0) > (best.size || 0) ? f : best), null);
+  if (!picked?.id) return null;
+
+  const dlResp = await fetchWithRetry(
+    `https://api.torbox.app/v1/api/torrents/requestdl?token=${encodeURIComponent(apiKey)}&torrent_id=${encodeURIComponent(
+      torrentId
+    )}&file_id=${encodeURIComponent(picked.id)}`,
+    { headers },
+    { timeoutMs: 6000, maxRetries: 1 }
+  );
+  if (!dlResp.ok) return null;
+  const dlJson = await dlResp.json();
+  return dlJson?.data && /^https?:\/\//i.test(dlJson.data) ? dlJson.data : null;
+}
+
+export async function resolveDebridStream({ provider = 'realdebrid', apiKey, magnet, infoHash, fileIdx }) {
+  if (!apiKey) return null;
+  const hash = extractInfoHash(magnet, infoHash);
+  const magnetUri = magnet && magnet.startsWith('magnet:') ? magnet : hash ? `magnet:?xt=urn:btih:${hash}` : '';
+  if (!magnetUri) return null;
+
+  const normProvider = String(provider || 'realdebrid').toLowerCase().replace(/[-_\s]/g, '');
+  try {
+    if (normProvider === 'torbox') {
+      return await resolveTorBoxStream(apiKey, magnetUri, hash, fileIdx);
+    }
+    return await resolveRealDebridStream(apiKey, magnetUri);
+  } catch {
+    return null;
+  }
+}
+
+function buildAddonStreamEndpoint({ addonUrl, tmdbId, imdbId, anilistId, mediaType, season, episode }) {
+  if (!addonUrl || !/^https?:\/\//i.test(addonUrl)) return '';
+  if (addonUrl.includes('{')) {
+    return addonUrl
+      .replace(/\{tmdbId\}/g, encodeURIComponent(tmdbId || ''))
+      .replace(/\{imdbId\}/g, encodeURIComponent(imdbId || ''))
+      .replace(/\{anilistId\}/g, encodeURIComponent(anilistId || ''))
+      .replace(/\{mediaType\}/g, encodeURIComponent(mediaType || 'movie'))
+      .replace(/\{season\}/g, encodeURIComponent(String(season || 1)))
+      .replace(/\{episode\}/g, encodeURIComponent(String(episode || 1)));
+  }
+  const addonBase = addonUrl.replace(/\/manifest\.json\/?$/i, '').replace(/\/+$/, '');
+  const stremioType =
+    mediaType === 'tv' || mediaType === 'series' ? 'series' : mediaType === 'anime' && !imdbId ? 'anime' : 'movie';
+  const stremioId =
+    stremioType === 'series'
+      ? imdbId
+        ? `${imdbId}:${season}:${episode}`
+        : tmdbId
+        ? `tmdb:${tmdbId}:${season}:${episode}`
+        : ''
+      : stremioType === 'anime'
+      ? anilistId
+        ? `anilist:${anilistId}:${episode}`
+        : ''
+      : imdbId || (tmdbId ? `tmdb:${tmdbId}` : '');
+
+  return stremioId ? `${addonBase}/stream/${stremioType}/${encodeURIComponent(stremioId)}.json` : '';
+}
+
+async function handleResolveStreamRequest(req, res, reqUrl) {
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204, { ...CORS_HEADERS, 'Access-Control-Max-Age': '86400' });
+    return res.end();
+  }
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    return sendJson(res, 405, { error: 'Method not allowed' });
+  }
+
+  const tmdbId = reqUrl.searchParams.get('tmdbId') || '';
+  const imdbIdParam = reqUrl.searchParams.get('imdbId') || '';
+  const anilistId = reqUrl.searchParams.get('anilistId') || '';
+  const malIdParam = reqUrl.searchParams.get('malId') || '';
+  const mediaType = reqUrl.searchParams.get('mediaType') || 'movie';
+  const season = Math.max(1, Number(reqUrl.searchParams.get('season') || 1));
+  const episode = Math.max(1, Number(reqUrl.searchParams.get('episode') || 1));
+  const directUrl = reqUrl.searchParams.get('directUrl') || '';
+  const referer = reqUrl.searchParams.get('referer') || '';
+  const magnet = reqUrl.searchParams.get('magnet') || '';
+  const hash = (reqUrl.searchParams.get('hash') || reqUrl.searchParams.get('infoHash') || '').trim();
+
+  const addonUrl = (
+    reqUrl.searchParams.get('addonUrl') ||
+    req.headers['x-addon-url'] ||
+    process.env.STREMIO_ADDON_URL ||
+    ''
+  ).trim();
+  const debridKey = (
+    reqUrl.searchParams.get('debridKey') ||
+    reqUrl.searchParams.get('debridToken') ||
+    req.headers['x-debrid-key'] ||
+    process.env.DEBRID_API_KEY ||
+    ''
+  ).trim();
+  const debridProvider = (
+    reqUrl.searchParams.get('debridProvider') ||
+    req.headers['x-debrid-provider'] ||
+    process.env.DEBRID_PROVIDER ||
+    'realdebrid'
+  )
+    .trim()
+    .toLowerCase();
+
+  const localItem = CATALOG_ITEMS.find(
+    (x) =>
+      (tmdbId && String(x.tmdbId) === String(tmdbId)) ||
+      (imdbIdParam && String(x.imdbId) === String(imdbIdParam)) ||
+      (anilistId && String(x.anilistId) === String(anilistId))
+  );
+  const imdbId = imdbIdParam || localItem?.imdbId || '';
+  const malId = malIdParam || localItem?.malId || '';
+
+  const sources = [];
+  const warnings = [];
+
+  // 1. Custom Direct stream URL (skip duplicate if identical to localItem primary catalog URL)
+  if (directUrl && /^https?:\/\//i.test(directUrl) && directUrl !== localItem?.hlsStreamUrl) {
+    const isHls = directUrl.toLowerCase().includes('.m3u8');
+    sources.push({
+      id: 'custom-stream',
+      name: isHls ? 'Direct HLS Stream (Proxy)' : 'Direct MP4 Video',
+      type: isHls ? 'hls' : 'direct',
+      url: isHls ? makeProxyHlsUrl(directUrl, referer) : directUrl,
+      rawUrl: directUrl,
+      referer: referer || undefined,
+      quality: 'Original Quality',
+      shielded: true,
+      direct: true,
+      node: isHls ? 'proxy' : 'direct',
+    });
+    if (isHls) {
+      sources.push({
+        id: 'custom-stream-direct',
+        name: 'Direct HLS Stream (CORS)',
+        type: 'hls',
+        url: directUrl,
+        rawUrl: directUrl,
+        quality: 'Original Quality',
+        shielded: true,
+        direct: true,
+        node: 'direct',
+      });
+    }
+  }
+
+  // 2. Catalog HLS primary + mirrors (both proxied and direct CORS nodes)
+  const catalogUrls = Array.from(
+    new Set(
+      [localItem?.hlsStreamUrl, ...(Array.isArray(localItem?.hlsMirrors) ? localItem.hlsMirrors : [])].filter(
+        (u) => typeof u === 'string' && /^https?:\/\//i.test(u)
+      )
+    )
+  );
+  catalogUrls.forEach((streamUrl, idx) => {
+    const isPrimary = idx === 0;
+    const baseId = isPrimary ? 'catalog-hls' : `catalog-hls-mirror-${idx}`;
+    const labelPrefix = isPrimary ? 'Direct HLS Stream' : `Catalog Mirror ${idx}`;
+    sources.push({
+      id: baseId,
+      name: `${labelPrefix} (Proxy Node)`,
+      type: 'hls',
+      url: makeProxyHlsUrl(streamUrl),
+      rawUrl: streamUrl,
+      quality: isPrimary ? '1080p UHD' : '1080p',
+      shielded: true,
+      direct: true,
+      node: isPrimary ? 'catalog-proxy' : 'catalog-mirror-proxy',
+    });
+    sources.push({
+      id: `${baseId}-direct`,
+      name: `${labelPrefix} (Direct CORS)`,
+      type: 'hls',
+      url: streamUrl,
+      rawUrl: streamUrl,
+      quality: isPrimary ? '1080p UHD' : '1080p',
+      shielded: true,
+      direct: true,
+      node: isPrimary ? 'catalog-direct' : 'catalog-mirror-direct',
+    });
+  });
+
+  // 3. Configurable Stremio addon / external HLS extractor
+  let pendingDebridCandidate = null;
+  const addonEndpoint = buildAddonStreamEndpoint({
+    addonUrl,
+    tmdbId,
+    imdbId,
+    anilistId,
+    mediaType,
+    season,
+    episode,
+  });
+  if (addonEndpoint) {
+    try {
+      const addonData = await fetchJsonWithTimeout(
+        addonEndpoint,
+        { headers: { Accept: 'application/json' } },
+        6000
+      );
+      const streams = Array.isArray(addonData?.streams) ? addonData.streams : [];
+      let addedCount = 0;
+      for (const stream of streams) {
+        if (addedCount >= 6) break;
+        if (stream?.url && /^https?:\/\//i.test(stream.url)) {
+          const reqProxyHeaders = stream.behaviorHints?.proxyHeaders?.request || {};
+          const streamReferer = reqProxyHeaders.Referer || reqProxyHeaders.referer || '';
+          const lowerUrl = stream.url.toLowerCase();
+          const isMp4 = lowerUrl.includes('.mp4') && !lowerUrl.includes('.m3u8');
+          if (stream.behaviorHints?.notWebReady === true && !lowerUrl.includes('.m3u8') && !isMp4) {
+            continue;
+          }
+          const label =
+            [stream.name, stream.title].filter(Boolean).join(' — ').split('\n')[0].slice(0, 80) ||
+            'Addon HLS Stream';
+          sources.push({
+            id: addedCount === 0 ? 'addon-hls' : `addon-hls-${addedCount + 1}`,
+            name: label,
+            type: isMp4 ? 'direct' : 'hls',
+            url: makeProxyHlsUrl(stream.url, streamReferer),
+            rawUrl: stream.url,
+            referer: streamReferer || undefined,
+            quality: /2160|4k/i.test(label) ? '4K UHD' : /1080/i.test(label) ? '1080p' : /720/i.test(label) ? '720p' : 'HD',
+            shielded: true,
+            direct: true,
+            node: 'addon-proxy',
+          });
+          addedCount += 1;
+        } else if (stream?.infoHash && !pendingDebridCandidate) {
+          pendingDebridCandidate = { infoHash: stream.infoHash, fileIdx: stream.fileIdx };
+        }
+      }
+    } catch (err) {
+      warnings.push(`Addon lookup failed: ${err.message}`);
+    }
+  }
+
+  // 4. Configurable Debrid instant-cache resolution (only emit when an actual playable URL resolves)
+  const resolvedHash = extractInfoHash(magnet, hash || pendingDebridCandidate?.infoHash || '');
+  if (debridKey && (magnet || resolvedHash)) {
+    const playable = await resolveDebridStream({
+      provider: debridProvider,
+      apiKey: debridKey,
+      magnet,
+      infoHash: resolvedHash,
+      fileIdx: pendingDebridCandidate?.fileIdx,
+    });
+    if (playable) {
+      const isHls = playable.toLowerCase().includes('.m3u8');
+      sources.push({
+        id: 'debrid-instant-cache',
+        name: `Instant Cached Stream (${debridProvider.toUpperCase()})`,
+        type: isHls ? 'hls' : 'direct',
+        url: makeProxyHlsUrl(playable),
+        rawUrl: playable,
+        provider: debridProvider,
+        quality: '1080p Remux',
+        shielded: true,
+        direct: true,
+        node: 'debrid',
+      });
+    }
+  }
+
+  // 5. Fallback Shielded Embeds (VidLink, VidRift)
+  if (tmdbId || imdbId || (mediaType === 'anime' && malId)) {
+    let vidlinkUrl;
+    if (mediaType === 'anime' && malId) {
+      vidlinkUrl = `https://vidlink.pro/anime/${encodeURIComponent(malId)}/${episode}/sub?primaryColor=ff4d6d&secondaryColor=00f0ff&autoplay=false&fallback=true`;
+    } else if (mediaType === 'tv') {
+      const idVal = tmdbId || imdbId;
+      vidlinkUrl = `https://vidlink.pro/tv/${encodeURIComponent(idVal)}/${season}/${episode}?primaryColor=ff4d6d&secondaryColor=00f0ff&iconColor=ff4d6d&title=false&poster=true&autoplay=false`;
+    } else {
+      const idVal = tmdbId || imdbId;
+      vidlinkUrl = `https://vidlink.pro/movie/${encodeURIComponent(idVal)}?primaryColor=ff4d6d&secondaryColor=00f0ff&iconColor=ff4d6d&title=false&poster=true&autoplay=false`;
+    }
+
+    sources.push({
+      id: 'vidlink-shield',
+      name: 'VidLink (No-Redirect Shield)',
+      type: 'embed',
+      url: vidlinkUrl,
+      quality: '1080p',
+      shielded: true,
+      sandboxed: true,
+      direct: false,
+    });
+  }
+
+  if (tmdbId || imdbId || anilistId) {
+    let vidriftUrl;
+    if (mediaType === 'anime' && anilistId) {
+      vidriftUrl = `https://embed.vidrift.net/embed/anilist/${encodeURIComponent(anilistId)}/${episode}?primaryColor=ff4d6d&autoplay=false`;
+    } else if (mediaType === 'tv' && (tmdbId || imdbId)) {
+      const idVal = tmdbId || imdbId;
+      vidriftUrl = `https://embed.vidrift.net/embed/tv/${encodeURIComponent(idVal)}/${season}/${episode}?primaryColor=ff4d6d&autoplay=false`;
+    } else {
+      const idVal = tmdbId || imdbId;
+      vidriftUrl = `https://embed.vidrift.net/embed/movie/${encodeURIComponent(idVal)}?primaryColor=ff4d6d&autoplay=false`;
+    }
+
+    sources.push({
+      id: 'vidrift-sandboxed',
+      name: 'VidRift (Sandboxed)',
+      type: 'embed',
+      url: vidriftUrl,
+      quality: '720p/1080p',
+      shielded: true,
+      sandboxed: true,
+      direct: false,
+    });
+  }
+
+  return sendJson(res, 200, {
+    ok: true,
+    tmdbId,
+    imdbId,
+    anilistId,
+    mediaType,
+    season,
+    episode,
+    sources,
+    ...(warnings.length ? { warnings } : {}),
+  });
+}
+
 /**
  * Create the Suno Cinema HTTP server.
  * @param {string} [rootDir]
@@ -471,229 +1429,25 @@ export function createSunoCinemaServer(rootDir = ROOT_DIR) {
         embedOrigin: 'https://embed.vidrift.net',
         tmdbConfigured: Boolean(process.env.TMDB_API_KEY),
         debridConfigured: Boolean(process.env.DEBRID_API_KEY),
+        addonConfigured: Boolean(process.env.STREMIO_ADDON_URL),
         hlsProxyEnabled: true,
+        subtitleProxyEnabled: true,
+        rangeForwardingEnabled: true,
         streamResolverEnabled: true,
         catalogCount: CATALOG_ITEMS.length,
       });
     }
 
     if (pathname === '/api/proxy/hls') {
-      if (req.method === 'OPTIONS') {
-        res.writeHead(204, {
-          'Access-Control-Allow-Origin': '*',
-          'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
-          'Access-Control-Allow-Headers': '*',
-        });
-        return res.end();
-      }
+      return handleHlsProxyRequest(req, res, reqUrl);
+    }
 
-      const targetUrl = reqUrl.searchParams.get('url');
-      const referer = reqUrl.searchParams.get('referer') || '';
-      if (!targetUrl || !/^https?:\/\//i.test(targetUrl)) {
-        return sendJson(res, 400, { error: 'Valid http/https "url" query parameter required' });
-      }
-
-      try {
-        const upstreamHeaders = {
-          'User-Agent':
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-          Accept: '*/*',
-        };
-        if (referer) {
-          upstreamHeaders['Referer'] = referer;
-          try {
-            upstreamHeaders['Origin'] = new URL(referer).origin;
-          } catch {}
-        }
-
-        const upstreamResp = await fetch(targetUrl, {
-          headers: upstreamHeaders,
-          redirect: 'follow',
-        });
-
-        if (!upstreamResp.ok) {
-          return sendJson(res, upstreamResp.status, {
-            error: `Upstream HTTP ${upstreamResp.status} ${upstreamResp.statusText}`,
-            targetUrl,
-          });
-        }
-
-        const contentType = upstreamResp.headers.get('content-type') || '';
-        const isManifest =
-          contentType.includes('mpegurl') ||
-          contentType.includes('application/x-mpegURL') ||
-          targetUrl.includes('.m3u8');
-
-        if (isManifest) {
-          const text = await upstreamResp.text();
-          const rewritten = rewriteHlsManifest(text, targetUrl, '/api/proxy/hls', referer || targetUrl);
-          res.writeHead(200, {
-            'Content-Type': 'application/vnd.apple.mpegurl; charset=utf-8',
-            'Access-Control-Allow-Origin': '*',
-            'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
-            'Access-Control-Allow-Headers': '*',
-            'Cache-Control': 'no-cache',
-          });
-          return res.end(rewritten);
-        }
-
-        const arrayBuf = await upstreamResp.arrayBuffer();
-        const buf = Buffer.from(arrayBuf);
-        const unmasked = unmaskDisguisedSegment(buf);
-
-        let outMime = 'video/mp2t';
-        if (targetUrl.includes('.m4s') || targetUrl.includes('.mp4')) {
-          outMime = 'video/mp4';
-        } else if (targetUrl.includes('.aac')) {
-          outMime = 'audio/aac';
-        }
-
-        res.writeHead(200, {
-          'Content-Type': outMime,
-          'Content-Length': unmasked.length,
-          'Access-Control-Allow-Origin': '*',
-          'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
-          'Access-Control-Allow-Headers': '*',
-          'Access-Control-Expose-Headers': 'Content-Length, Content-Range',
-          'Cache-Control': 'public, max-age=3600',
-        });
-        return res.end(unmasked);
-      } catch (err) {
-        return sendJson(res, 502, {
-          error: 'HLS proxy upstream gateway error',
-          message: err.message,
-          targetUrl,
-        });
-      }
+    if (pathname === '/api/proxy/subtitles') {
+      return handleSubtitleProxyRequest(req, res, reqUrl);
     }
 
     if (pathname === '/api/resolve/stream') {
-      if (req.method === 'OPTIONS') {
-        res.writeHead(204, {
-          'Access-Control-Allow-Origin': '*',
-          'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
-          'Access-Control-Allow-Headers': '*',
-        });
-        return res.end();
-      }
-
-      const tmdbId = reqUrl.searchParams.get('tmdbId') || '';
-      const imdbId = reqUrl.searchParams.get('imdbId') || '';
-      const anilistId = reqUrl.searchParams.get('anilistId') || '';
-      const mediaType = reqUrl.searchParams.get('mediaType') || 'movie';
-      const season = Math.max(1, Number(reqUrl.searchParams.get('season') || 1));
-      const episode = Math.max(1, Number(reqUrl.searchParams.get('episode') || 1));
-      const directUrl = reqUrl.searchParams.get('directUrl') || '';
-
-      const sources = [];
-
-      // Custom Direct stream URL
-      if (directUrl) {
-        const isHls = directUrl.includes('.m3u8');
-        sources.push({
-          id: 'custom-stream',
-          name: isHls ? 'Direct HLS Stream' : 'Direct MP4 Video',
-          type: isHls ? 'hls' : 'direct',
-          url: isHls ? `/api/proxy/hls?url=${encodeURIComponent(directUrl)}` : directUrl,
-          rawUrl: directUrl,
-          quality: 'Original Quality',
-          shielded: true,
-          direct: true,
-        });
-      }
-
-      // Catalog stream reference (demo/tested direct streams)
-      const localItem = CATALOG_ITEMS.find(
-        (x) =>
-          (tmdbId && String(x.tmdbId) === String(tmdbId)) ||
-          (imdbId && String(x.imdbId) === String(imdbId)) ||
-          (anilistId && String(x.anilistId) === String(anilistId))
-      );
-
-      if (localItem?.hlsStreamUrl && (!directUrl || directUrl !== localItem.hlsStreamUrl)) {
-        sources.push({
-          id: 'catalog-hls',
-          name: 'Direct HLS Stream (Zero Ads)',
-          type: 'hls',
-          url: `/api/proxy/hls?url=${encodeURIComponent(localItem.hlsStreamUrl)}`,
-          rawUrl: localItem.hlsStreamUrl,
-          quality: '1080p UHD',
-          shielded: true,
-          direct: true,
-        });
-      }
-
-      // Method 3: Debrid / Torrent cache configuration
-      const debridApiKey = process.env.DEBRID_API_KEY || '';
-      const debridProvider = (process.env.DEBRID_PROVIDER || 'realdebrid').toLowerCase();
-      if (debridApiKey) {
-        sources.push({
-          id: 'debrid-instant-cache',
-          name: `Instant Cached Stream (${debridProvider.toUpperCase()})`,
-          type: 'debrid',
-          configured: true,
-          provider: debridProvider,
-          quality: '1080p Remux',
-          shielded: true,
-          direct: true,
-        });
-      }
-
-      // VidLink No-Redirect Pro Player (sandboxed ad-free shield)
-      if (tmdbId || imdbId) {
-        const idVal = tmdbId || imdbId;
-        const vidlinkUrl =
-          mediaType === 'tv'
-            ? `https://vidlink.pro/tv/${encodeURIComponent(idVal)}/${season}/${episode}?primaryColor=ff4d6d&secondaryColor=00f0ff&iconColor=ff4d6d&title=false&poster=true&autoplay=false`
-            : `https://vidlink.pro/movie/${encodeURIComponent(idVal)}?primaryColor=ff4d6d&secondaryColor=00f0ff&iconColor=ff4d6d&title=false&poster=true&autoplay=false`;
-
-        sources.push({
-          id: 'vidlink-shield',
-          name: 'VidLink (No-Redirect Shield)',
-          type: 'embed',
-          url: vidlinkUrl,
-          quality: '1080p',
-          shielded: true,
-          sandboxed: true,
-          direct: false,
-        });
-      }
-
-      // VidRift Sandboxed
-      if (tmdbId || imdbId || anilistId) {
-        let vidriftUrl;
-        if (mediaType === 'anime' && anilistId) {
-          vidriftUrl = `https://embed.vidrift.net/embed/anilist/${encodeURIComponent(anilistId)}/${episode}?primaryColor=ff4d6d&autoplay=false`;
-        } else if (mediaType === 'tv' && (tmdbId || imdbId)) {
-          const idVal = tmdbId || imdbId;
-          vidriftUrl = `https://embed.vidrift.net/embed/tv/${encodeURIComponent(idVal)}/${season}/${episode}?primaryColor=ff4d6d&autoplay=false`;
-        } else {
-          const idVal = tmdbId || imdbId;
-          vidriftUrl = `https://embed.vidrift.net/embed/movie/${encodeURIComponent(idVal)}?primaryColor=ff4d6d&autoplay=false`;
-        }
-
-        sources.push({
-          id: 'vidrift-sandboxed',
-          name: 'VidRift (Sandboxed)',
-          type: 'embed',
-          url: vidriftUrl,
-          quality: '720p/1080p',
-          shielded: true,
-          sandboxed: true,
-          direct: false,
-        });
-      }
-
-      return sendJson(res, 200, {
-        ok: true,
-        tmdbId,
-        imdbId,
-        anilistId,
-        mediaType,
-        season,
-        episode,
-        sources,
-      });
+      return handleResolveStreamRequest(req, res, reqUrl);
     }
 
     if (pathname === '/api/catalog') {
