@@ -156,7 +156,7 @@ export function renderSettingsSheet({ appearance, prefs, shield, profile, backen
 export function renderCategoriesSheet(activeGenre, { desktop = false } = {}) {
   if (desktop) {
     return `<div class="dk-popover-backdrop" data-close-modal="true">
-      <div class="dk-genres-popover" role="dialog" aria-modal="true" aria-label="Genres" onclick="event.stopPropagation()">
+      <div class="dk-genres-popover" role="dialog" aria-modal="true" aria-label="Genres">
         <div class="dk-popover-head">
           <span>Genres</span>
           <button type="button" class="icon-btn" data-close-modal="true" aria-label="Close" style="width:28px;height:28px;">
@@ -175,7 +175,7 @@ export function renderCategoriesSheet(activeGenre, { desktop = false } = {}) {
   }
 
   return `<div class="android-cat-overlay" data-close-modal="true" role="dialog" aria-modal="true" aria-label="Categories">
-    <div class="android-cat-scroll" onclick="event.stopPropagation()">
+    <div class="android-cat-scroll">
       ${BROWSE_GENRES.map(
         (g) => `<button type="button" class="android-cat-item ${
           activeGenre === g ? 'is-active' : ''
@@ -188,12 +188,15 @@ export function renderCategoriesSheet(activeGenre, { desktop = false } = {}) {
   </div>`;
 }
 
-export function renderNotificationsSheet(items, { desktop = false } = {}) {
+export function renderNotificationsSheet(items, { desktop = false, seenIds = [] } = {}) {
+  const seenSet = new Set(Array.isArray(seenIds) ? seenIds : []);
   const listHtml = (items || [])
     .slice(0, 6)
-    .map(
-      (item, idx) => `<button type="button" class="dk-notif-row" data-open-detail="${escapeHtml(getMediaKey(item))}">
-        <span class="dk-notif-dot ${idx < 4 ? 'is-unread' : ''}"></span>
+    .map((item) => {
+      const k = getMediaKey(item);
+      const isUnread = !seenSet.has(k);
+      return `<button type="button" class="dk-notif-row" data-open-detail="${escapeHtml(k)}">
+        <span class="dk-notif-dot ${isUnread ? 'is-unread' : ''}"></span>
         <div class="top-search-thumb">
           <img src="${escapeHtml(item.backdrop || item.poster)}" alt="" referrerpolicy="no-referrer" />
         </div>
@@ -203,19 +206,22 @@ export function renderNotificationsSheet(items, { desktop = false } = {}) {
           )}</div>
           <div class="dim" style="font-size:12px;margin-top:2px;">New Arrival • ${escapeHtml(item.year || 'HD')}</div>
         </div>
-      </button>`
-    )
+      </button>`;
+    })
     .join('');
 
   if (desktop) {
     return `<div class="dk-popover-backdrop is-clear" data-close-modal="true">
-      <div class="dk-notif-popover" role="dialog" aria-modal="true" aria-label="Notifications" onclick="event.stopPropagation()">
+      <div class="dk-notif-popover" role="dialog" aria-modal="true" aria-label="Notifications">
         <div class="dk-notif-top-border"></div>
         <div class="dk-popover-head">
           <span>New on Suno Cinema</span>
-          <button type="button" class="icon-btn" data-close-modal="true" aria-label="Close" style="width:28px;height:28px;">
-            ${svgIcon('close', 16)}
-          </button>
+          <div style="display:flex;align-items:center;gap:6px;">
+            <button type="button" class="outline-chip" id="notifications-mark-read-btn" style="height:24px;padding:0 8px;font-size:11px;">Mark read</button>
+            <button type="button" class="icon-btn" data-close-modal="true" aria-label="Close" style="width:28px;height:28px;">
+              ${svgIcon('close', 16)}
+            </button>
+          </div>
         </div>
         <div class="dk-notif-list">${listHtml}</div>
       </div>
@@ -227,9 +233,12 @@ export function renderNotificationsSheet(items, { desktop = false } = {}) {
       <div class="sheet-grab-bar" aria-hidden="true"></div>
       <div style="display:flex;align-items:center;justify-content:space-between;">
         <h2 style="font-size:18px;font-weight:700;">New on Suno Cinema</h2>
-        <button type="button" class="icon-btn" data-close-modal="true" aria-label="Close">
-          ${svgIcon('close', 20)}
-        </button>
+        <div style="display:flex;align-items:center;gap:6px;">
+          <button type="button" class="outline-chip" id="notifications-mark-read-btn" style="height:26px;padding:0 10px;font-size:11px;">Mark read</button>
+          <button type="button" class="icon-btn" data-close-modal="true" aria-label="Close">
+            ${svgIcon('close', 20)}
+          </button>
+        </div>
       </div>
       <div style="display:flex;flex-direction:column;gap:8px;">
         ${listHtml}
@@ -765,7 +774,7 @@ export function renderStreamSourcesModal({
   }
 
   return `<div class="sheet-backdrop" data-close-modal="true">
-    <div class="sheet-card sources-hub-card" role="dialog" aria-modal="true" aria-label="Stream Sources & Addons" onclick="event.stopPropagation()">
+    <div class="sheet-card sources-hub-card" role="dialog" aria-modal="true" aria-label="Stream Sources & Addons">
       <div class="sheet-grab-bar" aria-hidden="true"></div>
       <div class="sources-hub-header">
         <div>

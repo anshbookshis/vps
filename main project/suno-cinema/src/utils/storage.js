@@ -493,3 +493,30 @@ export function forgetSearch(term) {
   }
   return next;
 }
+
+export const NOTIF_SEEN_KEY = 'suno_cinema:notif_seen';
+
+/**
+ * Load dismissed/seen notification IDs from localStorage.
+ * @returns {string[]}
+ */
+export function loadNotifSeenIds() {
+  if (typeof localStorage === 'undefined') return [];
+  const saved = safeParse(localStorage.getItem(NOTIF_SEEN_KEY), []);
+  return Array.isArray(saved) ? saved : [];
+}
+
+/**
+ * Persist seen notification IDs to localStorage.
+ * @param {string[]} ids
+ * @returns {string[]}
+ */
+export function saveNotifSeenIds(ids) {
+  const clean = Array.from(new Set(Array.isArray(ids) ? ids : [])).slice(0, 60);
+  if (typeof localStorage !== 'undefined') {
+    try {
+      localStorage.setItem(NOTIF_SEEN_KEY, JSON.stringify(clean));
+    } catch {}
+  }
+  return clean;
+}

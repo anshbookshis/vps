@@ -60,7 +60,7 @@ export function renderAndroidBillboard(items, activeIndex = 0, { myListSet = new
       <div class="billboard-scrim"></div>
       ${
         list.length > 1
-          ? `<div class="billboard-spotlight-controls" onclick="event.stopPropagation()">
+          ? `<div class="billboard-spotlight-controls">
               <button type="button" class="spotlight-step-btn" data-hero-step="-1" aria-label="Previous spotlight">${svgIcon('chevronLeft', 14)}</button>
               <span class="spotlight-counter">${safeIdx + 1}/${list.length}</span>
               <button type="button" class="spotlight-step-btn" data-hero-step="1" aria-label="Next spotlight">${svgIcon('chevronRight', 14)}</button>
@@ -81,7 +81,7 @@ export function renderAndroidBillboard(items, activeIndex = 0, { myListSet = new
             : `<div class="billboard-title">${escapeHtml(item.title)}</div>`
         }
         <div class="billboard-tags">${escapeHtml(tags.join(' • '))}</div>
-        <div class="billboard-actions" onclick="event.stopPropagation()">
+        <div class="billboard-actions">
           <button type="button" class="btn-white" data-play-key="${escapeHtml(key)}">
             ${svgIcon('play', 17)} Play ${typeWord === 'Movie' ? 'Movie' : ''}
           </button>
@@ -150,7 +150,7 @@ export function renderDesktopBillboard(
       <div class="dk-hero-scrim"></div>
       ${
         list.length > 1
-          ? `<div class="billboard-spotlight-controls" style="top:18px;right:20px;" onclick="event.stopPropagation()">
+          ? `<div class="billboard-spotlight-controls" style="top:18px;right:20px;">
               <button type="button" class="spotlight-step-btn" data-hero-step="-1" aria-label="Previous spotlight">${svgIcon('chevronLeft', 14)}</button>
               <span class="spotlight-counter">${safeIdx + 1}/${list.length}</span>
               <button type="button" class="spotlight-step-btn" data-hero-step="1" aria-label="Next spotlight">${svgIcon('chevronRight', 14)}</button>
@@ -178,7 +178,7 @@ export function renderDesktopBillboard(
         <p class="dk-hero-desc">${escapeHtml(
           item.overview || item.tagline || 'Stream full HD movies, series & anime free on Suno Cinema.'
         )}</p>
-        <div class="dk-hero-actions" onclick="event.stopPropagation()">
+        <div class="dk-hero-actions">
           <button type="button" class="dk-btn-play" data-play-key="${escapeHtml(key)}">
             ${svgIcon('play', 18)} Play
           </button>
@@ -194,7 +194,7 @@ export function renderDesktopBillboard(
       </div>
       ${
         list.length > 1
-          ? `<div class="billboard-dots" onclick="event.stopPropagation()">
+          ? `<div class="billboard-dots">
               ${list
                 .slice(0, 8)
                 .map(
@@ -206,8 +206,14 @@ export function renderDesktopBillboard(
             </div>`
           : ''
       }
-      <div class="dk-hero-right-dock" onclick="event.stopPropagation()">
-        <div class="dk-hero-cast-badge" title="${escapeHtml(castText)}">🎬 ${escapeHtml(castText)}</div>
+      <div class="dk-hero-right-dock">
+        <button type="button" class="dk-hero-cast-badge" ${
+          item.cast?.length
+            ? `data-quick-search="${escapeHtml(item.cast[0])}" title="Search cast: ${escapeHtml(
+                item.cast[0]
+              )}"`
+            : `data-open-detail="${escapeHtml(key)}" title="View title details"`
+        }>🎬 ${escapeHtml(castText)}</button>
         ${
           item.trailerId
             ? `<button type="button" class="dk-btn-circle" id="hero-trailer-toggle" title="${
@@ -248,6 +254,8 @@ export function renderDesktopFooter() {
       <button type="button" id="open-categories-btn">Browse Genres</button>
       <button type="button" id="open-notifications-btn">What's New</button>
       <button type="button" data-nav-tab="clips">Trailers &amp; Clips</button>
+      <button type="button" id="open-downloads-btn">Downloads</button>
+      <button type="button" data-open-sources="addons">Sources &amp; Addons</button>
       <button type="button" id="refresh-home-feed-btn">Refresh Live Feed</button>
     </div>
     <div class="dk-footer-copy">© 2026 Suno Cinema • A Suno Product • Powered by VidLink, VidRift, Cinemeta &amp; AniList</div>
@@ -477,6 +485,7 @@ export function renderDesktopDetailModal({
   item,
   inMyList = false,
   isLiked = false,
+  isDownloaded = false,
   savedProgress = null,
   trailerMuted = true,
   trailerPlaying = false,
@@ -499,7 +508,7 @@ export function renderDesktopDetailModal({
   return `<div class="dk-detail-backdrop" data-close-detail-modal="true">
     <article class="dk-detail-modal" role="dialog" aria-modal="true" aria-label="${escapeHtml(
       item.title
-    )}" onclick="event.stopPropagation()">
+    )}">
       <button type="button" class="dk-modal-close" id="detail-back-btn" aria-label="Close">
         ${svgIcon('close', 20)}
       </button>
@@ -550,6 +559,15 @@ export function renderDesktopDetailModal({
             )}" title="Share" aria-label="Share" style="width:40px;height:40px;">
               ${svgIcon('share', 16)}
             </button>
+            <button type="button" class="dk-circle-btn ${
+              isDownloaded ? 'is-on' : ''
+            }" data-toggle-download="${escapeHtml(
+              key
+            )}" title="${isDownloaded ? 'Queued for Downloads' : 'Queue Download'}" aria-label="${
+              isDownloaded ? 'Remove from Downloads' : 'Add to Downloads'
+            }" style="width:40px;height:40px;">
+              ${svgIcon('download', 16)}
+            </button>
             <button type="button" class="dk-btn-sources" data-open-sources="addons" title="Manage Stremio Addons, Debrid, Edge Proxy &amp; Direct HLS">
               ${svgIcon('sparkles', 16)} Sources / Addons
             </button>
@@ -582,14 +600,27 @@ export function renderDesktopDetailModal({
           <div class="dk-detail-right">
             ${
               item.cast?.length
-                ? `<div><span class="dk-meta-key">Cast: </span><span>${escapeHtml(
-                    item.cast.slice(0, 5).join(', ')
-                  )}</span></div>`
+                ? `<div><span class="dk-meta-key">Cast: </span><span class="dk-meta-links">${item.cast
+                    .slice(0, 5)
+                    .map(
+                      (c) =>
+                        `<button type="button" class="dk-meta-chip" data-quick-search="${escapeHtml(
+                          c
+                        )}">${escapeHtml(c)}</button>`
+                    )
+                    .join(', ')}</span></div>`
                 : ''
             }
             ${
               item.genres?.length
-                ? `<div><span class="dk-meta-key">Genres: </span><span>${escapeHtml(item.genres.join(', '))}</span></div>`
+                ? `<div><span class="dk-meta-key">Genres: </span><span class="dk-meta-links">${item.genres
+                    .map(
+                      (g) =>
+                        `<button type="button" class="dk-meta-chip" data-pick-category="${escapeHtml(
+                          g
+                        )}">${escapeHtml(g)}</button>`
+                    )
+                    .join(', ')}</span></div>`
                 : ''
             }
             ${
@@ -700,7 +731,7 @@ export function renderDesktopDetailModal({
                       </div>
                       <button type="button" class="dk-circle-btn ${rList ? 'is-on' : ''}" data-toggle-mylist="${escapeHtml(
                   rk
-                )}" onclick="event.stopPropagation()" aria-label="Toggle My List" style="width:32px;height:32px;">
+                )}" aria-label="Toggle My List" style="width:32px;height:32px;">
                         ${svgIcon(rList ? 'check' : 'plus', 15)}
                       </button>
                     </div>

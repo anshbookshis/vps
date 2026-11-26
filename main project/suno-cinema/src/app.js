@@ -19,6 +19,7 @@ import {
   resolveBootstrapOrigin,
 } from './utils/vidrift.js';
 import { antiRedirectGuard } from './utils/anti-redirect.js';
+import { sonicCurtain } from './utils/audio-curtain.js';
 import {
   LIKED_COLLECTION_ID,
   MY_LIST_COLLECTION_ID,
@@ -41,6 +42,8 @@ import {
   loadSearchHistory,
   rememberSearch,
   forgetSearch,
+  loadNotifSeenIds,
+  saveNotifSeenIds,
 } from './utils/storage.js';
 import {
   svgIcon,
@@ -145,6 +148,10 @@ const state = {
   collections: loadCollections(),
   downloads: loadDownloads(),
   searchHistory: loadSearchHistory(),
+  searchType: 'all',
+  activeAudioPreviewKey: null,
+  notifSeenIds: loadNotifSeenIds(),
+  spotlightCount: 8,
   shield: antiRedirectGuard.getSnapshot(),
   modal: null, // 'settings' | 'categories' | 'notifications' | 'cwmenu' | 'quicklaunch' | 'sources' | null
   sourcesTab: 'addons',
@@ -903,6 +910,8 @@ async function triggerHlsFailover(item, reason = 'Playback failed') {
 function fallbackToEmbedPlayer(item, message = 'Switched to Cloud Stream Server.', explicitUrl = '') {
   destroyHlsInstance();
   revokeActiveExternalSubBlob();
+  sonicCurtain.stop(250);
+  state.activeAudioPreviewKey = null;
   if (message) {
     showToast(message);
   }
@@ -1277,13 +1286,30 @@ async function selectStudioHub(hubId) {
   state.hubItems = immediate;
   render();
 
-  if (state.activeHub === 'korean' || state.activeHub === 'south' || state.activeHub === 'anime') {
-    const langMap = { korean: 'Korean', south: 'South Indian', anime: 'Japanese' };
+  if (
+    state.activeHub === 'korean' ||
+    state.activeHub === 'south' ||
+    state.activeHub === 'anime' ||
+    state.activeHub === 'bollywood'
+  ) {
+    const langMap = {
+      korean: 'Korean',
+      south: 'South Indian',
+      anime: 'Japanese',
+      bollywood: 'Hindi',
+    };
     try {
       const live = await fetchLanguageCatalog(langMap[state.activeHub]);
       registerItems(live);
       if (state.activeHub === hubId) {
-        state.hubItems = live.length ? live : getHubFilteredItems(state.activeHub);
+        const merged = [...live, ...getHubFilteredItems(state.activeHub)];
+        const seen = new Set();
+        state.hubItems = merged.filter((m) => {
+          const k = getMediaKey(m);
+          if (!k || seen.has(k)) return false;
+          seen.add(k);
+          return true;
+        });
         render();
       }
     } catch {}
@@ -1372,6 +1398,8 @@ async function launchStream(rawItem, { season, episode, resumeSeconds } = {}) {
 
   destroyHlsInstance();
   revokeActiveExternalSubBlob();
+  sonicCurtain.stop(250);
+  state.activeAudioPreviewKey = null;
 
   state.activeItem = getItemByKey(key) || item;
   state.activeSeason = resolvedSeason;
@@ -1637,9 +1665,24 @@ async function refreshDiscoverFeed({ reset = true } = {}) {
   }
 }
 
+function getUnreadNotifKeys() {
+  const seen = new Set(state.notifSeenIds || []);
+  return getAllKnownPool()
+    .slice(0, 6)
+    .map((item) => getMediaKey(item))
+    .filter((k) => k && !seen.has(k));
+}
+
+function renderUnreadNotifBadge() {
+  const count = getUnreadNotifKeys().length;
+  return count > 0 ? `<span class="notif-badge">${count}</span>` : '';
+}
+
 async function shareItem(item) {
   if (!item) return;
-  const url = window.location.href.split('#')[0];
+  const key = getMediaKey(item);
+  const baseUrl = window.location.href.split('#')[0].split('?')[0];
+  const url = key ? `${baseUrl}?watch=${encodeURIComponent(key)}` : baseUrl;
   const text = `Watch "${item.title}" on Suno Cinema`;
   if (navigator.share) {
     try {
@@ -1675,7 +1718,7 @@ function renderTopHeader({ leftHtml, rightExtras = '' }) {
       </button>
       <button type="button" class="icon-btn" id="open-notifications-btn" title="Notifications" aria-label="Notifications">
         ${svgIcon('bell', 21)}
-        <span class="notif-badge">4</span>
+        ${renderUnreadNotifBadge()}
       </button>
     </div>
   </header>`;
@@ -1749,9 +1792,13 @@ function renderDesktopTopbar() {
       <button type="button" class="icon-btn" id="open-quicklaunch-btn" title="Quick Launch ID or HLS URL" aria-label="Quick Launch">
         ${svgIcon('link', 19)}
       </button>
+      <button type="button" class="icon-btn" id="open-downloads-btn" title="Downloads &amp; Smart Queue" aria-label="Downloads">
+        ${svgIcon('download', 19)}
+        ${state.downloads.length > 0 ? `<span class="notif-badge">${state.downloads.length}</span>` : ''}
+      </button>
       <button type="button" class="icon-btn" id="open-notifications-btn" title="Notifications" aria-label="Notifications">
         ${svgIcon('bell', 20)}
-        <span class="notif-badge">4</span>
+        ${renderUnreadNotifBadge()}
       </button>
       <button type="button" class="dk-avatar-btn" id="open-settings-profile-btn" title="Profile, Ad-Shield & Phone Mode" aria-label="Account Settings">
         ${renderSunoMascotSvg(28)}
@@ -1834,6 +1881,7 @@ function renderDesktopHome({
             myListSet,
             likedSet,
             progressMap,
+            audioPreviewKey: state.activeAudioPreviewKey,
           })
         : ''
     }
@@ -1849,6 +1897,8 @@ function renderDesktopHome({
             myListSet,
             likedSet,
             progressMap,
+            audioPreviewKey: state.activeAudioPreviewKey,
+            isContinueRow: true,
           })
         : ''
     }
@@ -1864,6 +1914,7 @@ function renderDesktopHome({
             myListSet,
             likedSet,
             progressMap,
+            audioPreviewKey: state.activeAudioPreviewKey,
           })
         : ''
     }
@@ -1885,6 +1936,7 @@ function renderDesktopHome({
       myListSet,
       likedSet,
       progressMap,
+      audioPreviewKey: state.activeAudioPreviewKey,
     })}
 
     ${
@@ -1909,6 +1961,7 @@ function renderDesktopHome({
       myListSet,
       likedSet,
       progressMap,
+      audioPreviewKey: state.activeAudioPreviewKey,
     })}
 
     ${renderShelf({
@@ -1922,6 +1975,7 @@ function renderDesktopHome({
       myListSet,
       likedSet,
       progressMap,
+      audioPreviewKey: state.activeAudioPreviewKey,
     })}
 
     ${renderShelf({
@@ -1934,6 +1988,7 @@ function renderDesktopHome({
       myListSet,
       likedSet,
       progressMap,
+      audioPreviewKey: state.activeAudioPreviewKey,
     })}
 
     ${renderShelf({
@@ -1945,6 +2000,7 @@ function renderDesktopHome({
       myListSet,
       likedSet,
       progressMap,
+      audioPreviewKey: state.activeAudioPreviewKey,
     })}
 
     ${renderShelf({
@@ -1957,6 +2013,7 @@ function renderDesktopHome({
       myListSet,
       likedSet,
       progressMap,
+      audioPreviewKey: state.activeAudioPreviewKey,
     })}
 
     ${renderDesktopFooter()}
@@ -2012,6 +2069,7 @@ function renderDesktopLanguagesTab() {
                   progress: state.progressMap[getMediaKey(item)],
                   inMyList: myListSet.has(getMediaKey(item)),
                   isLiked: likedSet.has(getMediaKey(item)),
+                  audioPreviewActive: state.activeAudioPreviewKey === getMediaKey(item),
                 })
               )
               .join('')}
@@ -2090,6 +2148,7 @@ function renderHomeTab() {
     : [];
 
   if (isDesktopMode()) {
+    state.spotlightCount = Math.max(1, spotlightList.length);
     return renderDesktopHome({
       spotlightList,
       continueEntries,
@@ -2244,19 +2303,30 @@ function renderClipsTab() {
   const myListSet = getCollectionSet(MY_LIST_COLLECTION_ID);
 
   return `
-    ${renderTopHeader({
-      leftHtml: `
-        ${renderSunoRibbonSvg(22, 26)}
-        <span class="sc-topbar-title">Clips</span>
-      `,
-    })}
+    ${
+      isDesktopMode()
+        ? `<div class="dk-subhead">
+            <div class="dk-subhead-left">
+              <h1 class="dk-subhead-title">Trailers &amp; Clips</h1>
+            </div>
+            <button type="button" class="dk-genres-pill" data-open-sources="addons">
+              ${svgIcon('sparkles', 14)} Sources &amp; Addons
+            </button>
+          </div>`
+        : renderTopHeader({
+            leftHtml: `
+              ${renderSunoRibbonSvg(22, 26)}
+              <span class="sc-topbar-title">Clips</span>
+            `,
+          })
+    }
     <div class="clips-feed">
       ${pool.slice(0, 14).map((item) => {
         const key = getMediaKey(item);
         const playingClip = state.activeClipTrailerKey === key && item.trailerId;
         const inList = myListSet.has(key);
         return `<article class="clip-card">
-          <div class="clip-media">
+          <div class="clip-media" ${playingClip ? '' : `data-open-detail="${escapeHtml(key)}" style="cursor:pointer;"`}>
             ${
               playingClip
                 ? `<iframe
@@ -2274,7 +2344,7 @@ function renderClipsTab() {
           </div>
           <div class="clip-body">
             <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;">
-              <div>
+              <div data-open-detail="${escapeHtml(key)}" style="cursor:pointer;flex:1;min-width:0;">
                 <div style="font-size:16px;font-weight:700;">${escapeHtml(item.title)}</div>
                 <div class="dim" style="font-size:12px;margin-top:2px;">${escapeHtml(
                   [item.year, item.rating ? `★ ${item.rating}` : '', ...(item.genres || []).slice(0, 2)]
@@ -2401,6 +2471,7 @@ function renderDiscoverTab() {
                     progress: state.progressMap[getMediaKey(item)],
                     inMyList: myListSet.has(getMediaKey(item)),
                     isLiked: likedSet.has(getMediaKey(item)),
+                    audioPreviewActive: state.activeAudioPreviewKey === getMediaKey(item),
                   })
                 )
                 .join('')}
@@ -2481,11 +2552,45 @@ function renderDiscoverTab() {
 function renderSearchTab() {
   const direct = parseDirectTarget(state.searchQuery);
   const topRecommended = getAllKnownPool().slice(0, 14);
+  const rawList = state.searchQuery.trim() ? state.searchResults : topRecommended;
+  const filteredList =
+    state.searchType && state.searchType !== 'all'
+      ? rawList.filter((item) => item.mediaType === state.searchType)
+      : rawList;
+
+  const renderTypePills = () => `<div class="search-filter-row" role="tablist" aria-label="Filter results by type">
+    ${[
+      { id: 'all', label: 'All' },
+      { id: 'movie', label: 'Movies' },
+      { id: 'tv', label: 'TV Shows' },
+      { id: 'anime', label: 'Anime' },
+    ]
+      .map(
+        (f) => `<button type="button" class="outline-chip ${
+          state.searchType === f.id ? 'is-active' : ''
+        }" data-search-type="${f.id}">${f.label}</button>`
+      )
+      .join('')}
+  </div>`;
+
+  const renderHistoryChips = () =>
+    state.searchHistory.length > 0
+      ? `<div class="search-history-row">
+          <span class="dim" style="font-size:12px;">Recent:</span>
+          ${state.searchHistory
+            .map(
+              (term) => `<span class="search-history-chip">
+                <button type="button" class="search-history-term" data-quick-search="${escapeHtml(term)}">${escapeHtml(term)}</button>
+                <button type="button" class="search-chip-forget" data-forget-search="${escapeHtml(term)}" aria-label="Remove search ${escapeHtml(term)}">×</button>
+              </span>`
+            )
+            .join('')}
+        </div>`
+      : '';
 
   if (isDesktopMode()) {
     const myListSet = getCollectionSet(MY_LIST_COLLECTION_ID);
     const likedSet = getCollectionSet(LIKED_COLLECTION_ID);
-    const displayList = state.searchQuery.trim() ? state.searchResults : topRecommended;
     const heading = state.searchQuery.trim()
       ? `Results for "${state.searchQuery.trim()}"`
       : 'Explore Popular Searches';
@@ -2499,6 +2604,11 @@ function renderSearchTab() {
         <button type="button" class="dk-genres-pill" id="open-quicklaunch-btn">
           ${svgIcon('link', 14)} Quick Launch ID
         </button>
+      </div>
+
+      <div style="padding:0 36px 8px;">
+        ${renderTypePills()}
+        ${renderHistoryChips()}
       </div>
 
       ${
@@ -2516,22 +2626,24 @@ function renderSearchTab() {
       ${
         state.searchLoading
           ? `<p class="dim" style="padding:28px 36px;">Searching free Cinemeta &amp; AniList...</p>`
-          : displayList.length > 0
+          : filteredList.length > 0
           ? `<div class="dk-grid-6">
-              ${displayList
+              ${filteredList
                 .slice(0, 36)
-                .map((item, idx) =>
-                  renderDesktopWideCard(item, {
+                .map((item, idx) => {
+                  const k = getMediaKey(item);
+                  return renderDesktopWideCard(item, {
                     top10: idx < 2,
-                    progress: state.progressMap[getMediaKey(item)],
-                    inMyList: myListSet.has(getMediaKey(item)),
-                    isLiked: likedSet.has(getMediaKey(item)),
-                  })
-                )
+                    progress: state.progressMap[k],
+                    inMyList: myListSet.has(k),
+                    isLiked: likedSet.has(k),
+                    audioPreviewActive: state.activeAudioPreviewKey === k,
+                  });
+                })
                 .join('')}
             </div>`
           : `<div style="padding:28px 36px;display:flex;flex-direction:column;gap:12px;max-width:440px;">
-              <p class="dim">No exact matches found for "${escapeHtml(state.searchQuery)}".</p>
+              <p class="dim">No matching titles found${state.searchQuery.trim() ? ` for "${escapeHtml(state.searchQuery)}"` : ''}.</p>
               <button type="button" class="btn-dark" id="open-quicklaunch-btn">Launch by TMDB / AniList ID</button>
             </div>`
       }
@@ -2564,6 +2676,11 @@ function renderSearchTab() {
       </form>
     </div>
 
+    <div style="padding:2px 14px 4px;">
+      ${renderTypePills()}
+      ${renderHistoryChips()}
+    </div>
+
     ${
       direct
         ? `<div style="padding:4px 14px 10px;">
@@ -2580,7 +2697,7 @@ function renderSearchTab() {
       !state.searchQuery.trim()
         ? `<div style="padding:4px 0 12px;">
             <h2 class="nf-shelf-title" style="padding:6px 14px 10px;">Recommended Shows &amp; Movies</h2>
-            ${topRecommended
+            ${filteredList
               .map((item) => {
                 const key = getMediaKey(item);
                 return `<div class="top-search-row" data-open-detail="${escapeHtml(key)}">
@@ -2598,7 +2715,7 @@ function renderSearchTab() {
                   item.mediaType.toUpperCase()
                 )}</div>
                   </div>
-                  <button type="button" class="icon-btn" data-play-key="${escapeHtml(key)}" onclick="event.stopPropagation()" aria-label="Play ${escapeHtml(
+                  <button type="button" class="icon-btn" data-play-key="${escapeHtml(key)}" aria-label="Play ${escapeHtml(
                   item.title
                 )}">
                     ${svgIcon('play', 18)}
@@ -2609,10 +2726,10 @@ function renderSearchTab() {
           </div>`
         : state.searchLoading
         ? `<p class="dim" style="padding:20px 14px;">Searching free Cinemeta &amp; AniList...</p>`
-        : state.searchResults.length > 0
+        : filteredList.length > 0
         ? `<div>
             <h2 class="nf-shelf-title" style="padding:6px 14px 4px;">Top Results</h2>
-            <div class="poster-grid-3">${state.searchResults.map((x) => renderPosterCard(x)).join('')}</div>
+            <div class="poster-grid-3">${filteredList.map((x) => renderPosterCard(x)).join('')}</div>
           </div>`
         : `<div style="padding:22px 14px;display:flex;flex-direction:column;gap:12px;">
             <p class="dim">No exact matches found for "${escapeHtml(state.searchQuery)}".</p>
@@ -2677,6 +2794,8 @@ function renderMySunoTab() {
               myListSet,
               likedSet,
               progressMap: state.progressMap,
+              audioPreviewKey: state.activeAudioPreviewKey,
+              isContinueRow: true,
             })
           : `<section class="nf-shelf is-dk-shelf">
               <div class="nf-shelf-head"><h2 class="nf-shelf-title">Continue Watching</h2></div>
@@ -2694,6 +2813,7 @@ function renderMySunoTab() {
               myListSet,
               likedSet,
               progressMap: state.progressMap,
+              audioPreviewKey: state.activeAudioPreviewKey,
             })
           : `<section class="nf-shelf is-dk-shelf">
               <div class="nf-shelf-head"><h2 class="nf-shelf-title">TV Shows &amp; Movies You've Liked</h2></div>
@@ -2709,6 +2829,7 @@ function renderMySunoTab() {
         myListSet,
         likedSet,
         progressMap: state.progressMap,
+        audioPreviewKey: state.activeAudioPreviewKey,
       })}
 
       ${renderDesktopFooter()}
@@ -2793,14 +2914,28 @@ function renderDownloadsView() {
   const collageRight = getItemByKey('movie:1163194') || state.catalog[2];
 
   return `
-    ${renderTopHeader({
-      leftHtml: `
-        <button type="button" class="icon-btn" id="downloads-back-btn" aria-label="Back">
-          ${svgIcon('back', 22)}
-        </button>
-        <span class="sc-topbar-title">Downloads</span>
-      `,
-    })}
+    ${
+      isDesktopMode()
+        ? `<div class="dk-subhead">
+            <div class="dk-subhead-left">
+              <button type="button" class="dk-genres-pill" id="downloads-back-btn">
+                ${svgIcon('back', 14)} Back
+              </button>
+              <h1 class="dk-subhead-title">Downloads (${downloadedItems.length})</h1>
+            </div>
+            <button type="button" class="dk-genres-pill" data-nav-tab="discover">
+              Find More
+            </button>
+          </div>`
+        : renderTopHeader({
+            leftHtml: `
+              <button type="button" class="icon-btn" id="downloads-back-btn" aria-label="Back">
+                ${svgIcon('back', 22)}
+              </button>
+              <span class="sc-topbar-title">Downloads</span>
+            `,
+          })
+    }
 
     <div class="downloads-page">
       <button type="button" id="toggle-smart-downloads-btn" style="display:flex;align-items:center;gap:10px;font-size:15px;font-weight:600;padding:4px 0;">
@@ -2835,7 +2970,7 @@ function renderDownloadsView() {
       </div>
 
       <button type="button" class="btn-blue" id="setup-smart-dl-btn" style="width:100%;">
-        ${state.profile.smartDownloads ? 'Smart Queue Active ✓' : 'Set up'}
+        ${state.profile.smartDownloads ? 'Smart Queue Active ✓' : 'Set up Smart Downloads'}
       </button>
       <button type="button" class="btn-dark" data-nav-tab="discover" style="width:100%;height:44px;">
         Find More to Download
@@ -2845,8 +2980,19 @@ function renderDownloadsView() {
         downloadedItems.length > 0
           ? `<div style="margin-top:8px;">
               <h3 style="font-size:16px;font-weight:700;margin-bottom:10px;">Saved Queue (${downloadedItems.length})</h3>
-              <div class="poster-grid-3" style="padding:0;">
-                ${downloadedItems.map((item) => renderPosterCard(item)).join('')}
+              <div class="downloads-queue-grid">
+                ${downloadedItems
+                  .map((item) => {
+                    const dk = getMediaKey(item);
+                    return `<div class="downloads-item-card">
+                      ${renderPosterCard(item)}
+                      <div class="downloads-item-actions">
+                        <button type="button" class="btn-white" data-play-key="${escapeHtml(dk)}">▶ Play</button>
+                        <button type="button" class="btn-dark" data-toggle-download="${escapeHtml(dk)}" aria-label="Remove download">Remove</button>
+                      </div>
+                    </div>`;
+                  })
+                  .join('')}
               </div>
             </div>`
           : ''
@@ -3380,6 +3526,7 @@ function render(options = {}) {
       item,
       inMyList: getCollectionSet(MY_LIST_COLLECTION_ID).has(key),
       isLiked: getCollectionSet(LIKED_COLLECTION_ID).has(key),
+      isDownloaded: state.downloads.includes(key),
       savedProgress: state.progressMap[key],
       trailerMuted: state.detailTrailerMuted,
       trailerPlaying: state.detailTrailerPlaying,
@@ -3405,7 +3552,10 @@ function render(options = {}) {
   } else if (state.modal === 'categories') {
     modalMount.innerHTML = renderCategoriesSheet(state.discoverGenre, { desktop: dk });
   } else if (state.modal === 'notifications') {
-    modalMount.innerHTML = renderNotificationsSheet(getAllKnownPool(), { desktop: dk });
+    modalMount.innerHTML = renderNotificationsSheet(getAllKnownPool(), {
+      desktop: dk,
+      seenIds: state.notifSeenIds,
+    });
   } else if (state.modal === 'cwmenu') {
     modalMount.innerHTML = renderContinueMenuSheet(getItemByKey(state.cwMenuKey));
   } else if (state.modal === 'quicklaunch') {
@@ -3843,7 +3993,8 @@ function bindEvents() {
 
     const heroStep = target.closest('[data-hero-step]');
     if (heroStep) {
-      state.heroIndex = (state.heroIndex + Number(heroStep.dataset.heroStep) + 8) % 8;
+      const heroTotal = Math.max(1, state.spotlightCount || 8);
+      state.heroIndex = (state.heroIndex + Number(heroStep.dataset.heroStep) + heroTotal) % heroTotal;
       state.heroTrailerPlaying = false;
       render();
       return;
@@ -3911,6 +4062,8 @@ function bindEvents() {
     const pickCat = target.closest('[data-pick-category]');
     if (pickCat) {
       state.modal = null;
+      state.detailModalKey = null;
+      state.detailTrailerPlaying = false;
       if (state.homeFilter === 'movie' || state.homeFilter === 'tv' || state.homeFilter === 'anime') {
         state.discoverType = state.homeFilter;
       } else {
@@ -4013,9 +4166,42 @@ function bindEvents() {
       return;
     }
 
-    const detailBtn = target.closest('[data-open-detail]');
-    if (detailBtn) {
-      openDetailView(detailBtn.dataset.openDetail);
+    if (target.closest('#notifications-mark-read-btn')) {
+      const topKeys = getAllKnownPool()
+        .slice(0, 6)
+        .map((item) => getMediaKey(item))
+        .filter(Boolean);
+      state.notifSeenIds = saveNotifSeenIds([...(state.notifSeenIds || []), ...topKeys]);
+      showToast('All notifications marked as read');
+      render();
+      return;
+    }
+
+    const quickSearchBtn = target.closest('[data-quick-search]');
+    if (quickSearchBtn) {
+      const term = String(quickSearchBtn.dataset.quickSearch || '').trim();
+      if (term) {
+        state.modal = null;
+        state.detailModalKey = null;
+        state.detailTrailerPlaying = false;
+        state.tab = 'search';
+        state.desktopSearchOpen = true;
+        runSearch(term);
+      }
+      return;
+    }
+
+    const forgetSearchBtn = target.closest('[data-forget-search]');
+    if (forgetSearchBtn) {
+      state.searchHistory = forgetSearch(forgetSearchBtn.dataset.forgetSearch);
+      render();
+      return;
+    }
+
+    const searchTypeBtn = target.closest('[data-search-type]');
+    if (searchTypeBtn) {
+      state.searchType = searchTypeBtn.dataset.searchType || 'all';
+      render();
       return;
     }
 
@@ -4059,8 +4245,18 @@ function bindEvents() {
     const hoverSoundBtn = target.closest('[data-toggle-hover-sound]');
     if (hoverSoundBtn) {
       e.stopPropagation();
-      state.heroTrailerMuted = !state.heroTrailerMuted;
-      showToast(state.heroTrailerMuted ? 'Muted' : 'Audio Preview ON');
+      const k = hoverSoundBtn.dataset.toggleHoverSound;
+      if (state.activeAudioPreviewKey === k) {
+        sonicCurtain.stop(250);
+        state.activeAudioPreviewKey = null;
+        showToast('Audio preview stopped');
+      } else {
+        sonicCurtain.stop(120);
+        const item = getItemByKey(k);
+        const started = sonicCurtain.playMood(item?.sonic?.moodId || 'midnight-synth', item?.title || '');
+        state.activeAudioPreviewKey = started ? k : null;
+        showToast(started ? `Previewing mood score: ${item?.title || 'Score'}` : 'Audio preview unavailable');
+      }
       render();
       return;
     }
@@ -4084,9 +4280,29 @@ function bindEvents() {
     }
 
     if (target.closest('#setup-smart-dl-btn') || target.closest('#toggle-smart-downloads-btn')) {
-      state.profile = saveProfile({ smartDownloads: !state.profile.smartDownloads });
-      showToast(state.profile.smartDownloads ? 'Smart Downloads Queue enabled' : 'Smart Downloads paused');
+      const nextSmart = !state.profile.smartDownloads;
+      state.profile = saveProfile({ smartDownloads: nextSmart });
+      if (nextSmart) {
+        const candidates = getAllKnownPool()
+          .map((item) => getMediaKey(item))
+          .filter((k) => k && !state.downloads.includes(k))
+          .slice(0, 3);
+        if (candidates.length > 0) {
+          state.downloads = saveDownloads([...candidates, ...state.downloads]);
+          showToast(`Smart Downloads enabled • Queued ${candidates.length} picks`);
+        } else {
+          showToast('Smart Downloads Queue enabled');
+        }
+      } else {
+        showToast('Smart Downloads paused');
+      }
       render();
+      return;
+    }
+
+    const detailBtn = target.closest('[data-open-detail]');
+    if (detailBtn) {
+      openDetailView(detailBtn.dataset.openDetail);
       return;
     }
 
@@ -4982,6 +5198,44 @@ async function init() {
   state.progressMap = loadProgressMap();
   render();
 
+  if (typeof window !== 'undefined' && window.location?.search) {
+    try {
+      const qWatch = new URLSearchParams(window.location.search).get('watch');
+      if (qWatch) {
+        let targetItem = getItemByKey(qWatch);
+        if (!targetItem) {
+          const mTmdb = /^(movie|tv):(\d+)$/i.exec(qWatch);
+          const mImdb = /^(movie|tv):imdb:(tt\d+)$/i.exec(qWatch);
+          const mAnime = /^anime:(\d+)$/i.exec(qWatch);
+          if (mTmdb) {
+            targetItem = await resolveFullMetadata({
+              id: qWatch,
+              mediaType: mTmdb[1].toLowerCase(),
+              tmdbId: mTmdb[2],
+              title: `Title #${mTmdb[2]}`,
+            });
+          } else if (mImdb) {
+            targetItem = await resolveFullMetadata({
+              id: qWatch,
+              mediaType: mImdb[1].toLowerCase(),
+              imdbId: mImdb[2],
+              title: mImdb[2],
+            });
+          } else if (mAnime) {
+            targetItem = {
+              id: qWatch,
+              mediaType: 'anime',
+              anilistId: mAnime[1],
+              title: `Anime #${mAnime[1]}`,
+            };
+          }
+          if (targetItem) registerItems([targetItem]);
+        }
+        if (targetItem) openDetailView(getMediaKey(targetItem));
+      }
+    } catch {}
+  }
+
   clearInterval(heroTimer);
   heroTimer = setInterval(() => {
     const busyHover = typeof document !== 'undefined' && document.querySelector('.dk-card:hover, #dk-search-input:focus');
@@ -4993,7 +5247,8 @@ async function init() {
       !state.heroTrailerPlaying &&
       !busyHover
     ) {
-      state.heroIndex = (state.heroIndex + 1) % 8;
+      const heroTotal = Math.max(1, state.spotlightCount || 8);
+      state.heroIndex = (state.heroIndex + 1) % heroTotal;
       render();
     }
   }, 10000);

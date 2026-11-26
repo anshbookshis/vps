@@ -111,7 +111,16 @@ export function renderPosterCard(item, { top10 = false, recentlyAdded = false } 
  */
 export function renderDesktopWideCard(
   item,
-  { top10 = false, recentlyAdded = false, splitBadge = false, progress = null, inMyList = false, isLiked = false } = {}
+  {
+    top10 = false,
+    recentlyAdded = false,
+    splitBadge = false,
+    progress = null,
+    inMyList = false,
+    isLiked = false,
+    audioPreviewActive = false,
+    isContinueRow = false,
+  } = {}
 ) {
   const key = getMediaKey(item);
   const art = resolveArtUrl(item, 'wide');
@@ -150,7 +159,7 @@ export function renderDesktopWideCard(
         : ''
     }
 
-    <div class="dk-hover-panel" onclick="event.stopPropagation()">
+    <div class="dk-hover-panel">
       <div class="dk-hover-media" data-open-detail="${escapeHtml(key)}">
         <img src="${escapeHtml(art)}" alt="" loading="lazy" referrerpolicy="no-referrer" ${attachFallbackImgAttr(
     item,
@@ -175,11 +184,20 @@ export function renderDesktopWideCard(
   )}" title="${inMyList ? 'Remove from My List' : 'Add to My List'}" aria-label="Toggle My List">
             ${svgIcon(inMyList ? 'check' : 'plus', 15)}
           </button>
-          <button type="button" class="dk-circle-btn" data-toggle-hover-sound="${escapeHtml(
+          <button type="button" class="dk-circle-btn ${audioPreviewActive ? 'is-on' : ''}" data-toggle-hover-sound="${escapeHtml(
     key
-  )}" title="Preview Audio" aria-label="Preview Audio">
-            ${svgIcon('volumeOn', 14)}
+  )}" title="${audioPreviewActive ? 'Stop Audio Preview' : 'Play Sonic Preview'}" aria-label="Preview Audio">
+            ${svgIcon(audioPreviewActive ? 'volumeOn' : 'volumeOff', 14)}
           </button>
+          ${
+            isContinueRow
+              ? `<button type="button" class="dk-circle-btn" data-remove-cw="${escapeHtml(
+                  key
+                )}" title="Remove from Continue Watching" aria-label="Remove from Continue Watching">
+                  ${svgIcon('close', 14)}
+                </button>`
+              : ''
+          }
           <button type="button" class="dk-circle-btn dk-more-circle" data-open-detail="${escapeHtml(
             key
           )}" title="Episodes & Info" aria-label="More Info">
@@ -279,6 +297,8 @@ export function renderShelf({
   myListSet = new Set(),
   likedSet = new Set(),
   progressMap = {},
+  audioPreviewKey = null,
+  isContinueRow = false,
 }) {
   if (!items || items.length === 0) return '';
   const isDesktopShelf = kind === 'dk-wide' || kind === 'dk-top10';
@@ -300,6 +320,8 @@ export function renderShelf({
               progress: entry.item ? entry : progressMap[k],
               inMyList: myListSet.has(k),
               isLiked: likedSet.has(k),
+              audioPreviewActive: Boolean(audioPreviewKey && audioPreviewKey === k),
+              isContinueRow,
             });
           }
           return renderPosterCard(entry, {

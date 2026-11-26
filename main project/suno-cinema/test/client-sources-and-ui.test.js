@@ -22,8 +22,19 @@ import {
   collectStremioAddonUrls,
   fetchStreamSources,
 } from '../src/utils/vidrift.js';
-import { renderStreamSourcesModal, renderSettingsSheet } from '../src/components/modals.js';
-import { renderDetailView, renderDesktopDetailModal } from '../src/components/showcase.js';
+import {
+  renderStreamSourcesModal,
+  renderSettingsSheet,
+  renderCategoriesSheet,
+  renderNotificationsSheet,
+} from '../src/components/modals.js';
+import {
+  renderDesktopBillboard,
+  renderDesktopFooter,
+  renderDetailView,
+  renderDesktopDetailModal,
+} from '../src/components/showcase.js';
+import { renderDesktopWideCard } from '../src/components/cards.js';
 
 const ROOT_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -687,4 +698,79 @@ test('renderStreamSourcesModal, detail triggers, and static UI preserve Suno Cin
   assert.equal(/fetch\(\s*['"]\/(?:api|src)\//.test(appSource), false, 'app.js must use relative ./api/ paths');
   assert.ok(appSource.includes('./api/health'));
   assert.ok(appSource.includes('renderStreamSourcesModal'));
+});
+
+test('desktop clickability & interactive platform elements', () => {
+  const sampleItem = {
+    id: 'movie:872585',
+    tmdbId: '872585',
+    imdbId: 'tt15398776',
+    mediaType: 'movie',
+    title: 'Oppenheimer',
+    year: 2023,
+    genres: ['Drama', 'History'],
+    cast: ['Cillian Murphy', 'Emily Blunt'],
+  };
+
+  // No inline stopPropagation traps that swallow delegated clicks inside rootEl
+  const cardHtml = renderDesktopWideCard(sampleItem, {
+    inMyList: true,
+    isLiked: false,
+    audioPreviewActive: true,
+    isContinueRow: true,
+  });
+  assert.equal(cardHtml.includes('stopPropagation'), false, 'Desktop wide card must not block delegated clicks');
+  assert.ok(cardHtml.includes('data-toggle-hover-sound="movie:872585"'));
+  assert.ok(cardHtml.includes('class="dk-circle-btn is-on" data-toggle-hover-sound="movie:872585"'));
+  assert.ok(cardHtml.includes('data-remove-cw="movie:872585"'));
+
+  const heroHtml = renderDesktopBillboard([sampleItem, { ...sampleItem, id: 'movie:157336', tmdbId: '157336', title: 'Interstellar' }], 0, {
+    myListSet: new Set(['movie:872585']),
+  });
+  assert.equal(heroHtml.includes('stopPropagation'), false, 'Desktop billboard must not block delegated clicks');
+  assert.ok(heroHtml.includes('data-quick-search="Cillian Murphy"'));
+
+  const detailHtml = renderDesktopDetailModal({
+    item: sampleItem,
+    isDownloaded: true,
+    relatedItems: [{ ...sampleItem, id: 'movie:157336', tmdbId: '157336', title: 'Interstellar' }],
+    myListSet: new Set(),
+  });
+  assert.equal(detailHtml.includes('stopPropagation'), false, 'Desktop detail modal must not swallow button clicks');
+  assert.ok(detailHtml.includes('data-toggle-download="movie:872585"'));
+  assert.ok(detailHtml.includes('data-quick-search="Cillian Murphy"'));
+  assert.ok(detailHtml.includes('data-pick-category="Drama"'));
+  assert.equal(/net77|netflix/i.test(detailHtml), false);
+
+  const catHtml = renderCategoriesSheet('Action', { desktop: true });
+  assert.equal(catHtml.includes('stopPropagation'), false);
+  assert.ok(catHtml.includes('data-pick-category="Action"'));
+
+  const notifHtml = renderNotificationsSheet([sampleItem], {
+    desktop: true,
+    seenIds: ['movie:872585'],
+  });
+  assert.equal(notifHtml.includes('stopPropagation'), false);
+  assert.ok(notifHtml.includes('id="notifications-mark-read-btn"'));
+  assert.equal(notifHtml.includes('dk-notif-dot is-unread'), false);
+
+  const footerHtml = renderDesktopFooter();
+  assert.ok(footerHtml.includes('id="open-downloads-btn"'));
+  assert.ok(footerHtml.includes('data-open-sources="addons"'));
+
+  const appSource = fs.readFileSync(path.join(ROOT_DIR, 'src/app.js'), 'utf8');
+  assert.equal(appSource.includes('onclick="event.stopPropagation()"'), false);
+  const openDetailIdx = appSource.indexOf("target.closest('[data-open-detail]')");
+  for (const nestedSelector of [
+    "target.closest('[data-toggle-mylist]')",
+    "target.closest('[data-toggle-like]')",
+    "target.closest('[data-toggle-download]')",
+    "target.closest('[data-toggle-hover-sound]')",
+    "target.closest('[data-remove-cw]')",
+    "target.closest('[data-quick-search]')",
+    "target.closest('#notifications-mark-read-btn')",
+  ]) {
+    const nestedIdx = appSource.indexOf(nestedSelector);
+    assert.ok(nestedIdx > 0 && nestedIdx < openDetailIdx, `${nestedSelector} must run before [data-open-detail]`);
+  }
 });
