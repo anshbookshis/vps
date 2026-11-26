@@ -9,6 +9,7 @@ import {
   fetchStreamSources,
   cleanProxyUrl,
   cleanAddonUrl,
+  normalizeAddonManifestUrl,
   isPlayableDirectSource,
   getPlayableHlsNodes,
   createFailoverState,
@@ -22,6 +23,8 @@ import {
   saveAppearanceSettings,
   loadPlayerPrefs,
   savePlayerPrefs,
+  normalizeStremioAddon,
+  saveStremioAddons,
   loadProfile,
   saveProfile,
   getMediaKey,
@@ -67,6 +70,7 @@ import {
   renderNotificationsSheet,
   renderContinueMenuSheet,
   renderQuickLaunchSheet,
+  renderStreamSourcesModal,
 } from './components/modals.js';
 import {
   BROWSE_GENRES,
@@ -80,6 +84,7 @@ import {
   fetchTvSeasonsData,
   fetchFreeSubtitles,
   loadSubtitleTrackAsVttUrl,
+  fetchAddonManifest,
 } from './utils/client-api.js';
 
 const rootEl = document.getElementById('app');
@@ -138,7 +143,24 @@ const state = {
   downloads: loadDownloads(),
   searchHistory: loadSearchHistory(),
   shield: antiRedirectGuard.getSnapshot(),
-  modal: null, // 'settings' | 'categories' | 'notifications' | 'cwmenu' | 'quicklaunch' | null
+  modal: null, // 'settings' | 'categories' | 'notifications' | 'cwmenu' | 'quicklaunch' | 'sources' | null
+  sourcesTab: 'addons',
+  sourcesAddonInput: '',
+  sourcesAddonLoading: false,
+  sourcesAddonError: '',
+  sourcesProxyTest: { status: 'idle', message: '' },
+  sourcesDirtyInPlayer: false,
+  sourcesDraft: {
+    hlsProxyUrl: null,
+    customResolverUrl: null,
+    debridApiKey: null,
+    debridProvider: null,
+    magnetInput: '',
+    magnetTitle: '',
+    directInput: '',
+    directTitle: '',
+    directType: 'movie',
+  },
   cwMenuKey: null,
   activeItem: null,
   activeSeason: 1,
@@ -343,6 +365,83 @@ function getActiveResolvedSource() {
   return state.resolvedSources[state.activeSourceIndex] || state.resolvedSources[0] || null;
 }
 
+function getEnabledAddonsCount() {
+  const addons = Array.isArray(state.prefs?.stremioAddons) ? state.prefs.stremioAddons : [];
+  const enabled = addons.filter((a) => a && a.enabled !== false);
+  if (enabled.length > 0) return enabled.length;
+  return state.prefs?.stremioAddonUrl ? 1 : 0;
+}
+
+function hasAnyConfiguredSource() {
+  return Boolean(
+    getEnabledAddonsCount() > 0 ||
+      state.prefs?.debridApiKey ||
+      state.prefs?.hlsProxyUrl ||
+      state.prefs?.customResolverUrl
+  );
+}
+
+function getSourceDisplayBadges(src) {
+  if (!src || typeof src !== 'object') return [];
+  const badges = [];
+  const seen = new Set();
+  const push = (text, cls) => {
+    const clean = String(text || '').trim();
+    if (!clean) return;
+    const key = clean.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    badges.push({ text: clean, cls });
+  };
+
+  const quality = String(src.quality || '').trim();
+  if (quality) {
+    const qCls = /2160|4k|uhd/i.test(quality)
+      ? 'is-uhd'
+      : /1080|fhd/i.test(quality)
+      ? 'is-fhd'
+      : 'is-hd';
+    push(quality, qCls);
+  }
+
+  if (src.addonName) {
+    push(src.addonName, 'is-addon');
+  }
+
+  const node = String(src.node || '').toLowerCase();
+  const sourceTag = String(src.source || '').toLowerCase();
+  const id = String(src.id || '').toLowerCase();
+
+  if (node === 'archive-org' || sourceTag === 'archive.org' || id.includes('archive-org')) {
+    push('Archive.org', 'is-archive');
+  } else if (node === 'debrid' || src.type === 'debrid' || id.includes('debrid')) {
+    push('Debrid', 'is-debrid');
+  } else if (node.includes('custom-resolver') || id.includes('custom-resolver')) {
+    push('Custom', 'is-custom');
+  } else if (node === 'catalog-direct' || node === 'catalog-mirror-direct') {
+    push('Open Cinema', 'is-archive');
+  } else if (src.type === 'embed') {
+    push('Embed', 'is-embed');
+  }
+
+  const isProxied =
+    Boolean(src.proxied) ||
+    node === 'edge-proxy' ||
+    node === 'addon-edge-proxy' ||
+    String(src.url || '').includes('/api/proxy/hls');
+  if (isProxied) {
+    push('Proxy', 'is-proxy');
+  }
+
+  return badges;
+}
+
+function renderSourceBadgesHtml(src) {
+  return getSourceDisplayBadges(src)
+    .map((b) => `<span class="n77-node-badge ${b.cls}">${escapeHtml(b.text)}</span>`)
+    .join('');
+}
+
 function computeBufferedSeconds(videoEl) {
   if (!videoEl || !videoEl.buffered || videoEl.buffered.length === 0) return 0;
   const cur = Number(videoEl.currentTime || 0);
@@ -435,6 +534,11 @@ function updateTelemetryBadge(videoEl, precomputedBuf) {
   badge.textContent = [resText, mbpsText, bufText, nodeTag].filter(Boolean).join(' • ');
   badge.classList.toggle('is-warn', Boolean(t.stalled || (videoEl && !videoEl.paused && buf < 2)));
 
+  const hudBadgesEl = document.getElementById('n77-hud-node-badges');
+  if (hudBadgesEl) {
+    hudBadgesEl.innerHTML = activeSrc ? renderSourceBadgesHtml(activeSrc) : '';
+  }
+
   const qLabel = document.getElementById('n77-quality-label');
   if (qLabel) {
     if (t.levelIndex === -1 || !activeHlsInstance) {
@@ -462,8 +566,15 @@ function updateTelemetryBadge(videoEl, precomputedBuf) {
 
   const mLabel = document.getElementById('n77-mirror-label');
   if (mLabel) {
-    const shortName = activeSrc?.name ? activeSrc.name.split('(')[0].trim().slice(0, 14) : 'Node';
-    mLabel.textContent = shortName;
+    const primaryNode =
+      activeSrc?.addonName ||
+      (activeSrc?.node === 'archive-org' ? 'Archive.org' : '') ||
+      (activeSrc?.node === 'debrid' ? 'Debrid' : '');
+    const qText = activeSrc?.quality && activeSrc.quality !== 'HD' ? activeSrc.quality : '';
+    const shortName =
+      [qText, primaryNode].filter(Boolean).join(' • ') ||
+      (activeSrc?.name ? activeSrc.name.split('(')[0].trim().slice(0, 14) : 'Node');
+    mLabel.textContent = shortName.slice(0, 22);
   }
 }
 
@@ -670,22 +781,29 @@ function renderHudPopupMenu() {
   } else if (menu === 'mirrors') {
     title = 'Stream Mirrors & Nodes';
     const failed = state.failoverState?.failedIndices || new Set();
-    bodyHtml =
+    const listHtml =
       state.resolvedSources.length > 0
         ? state.resolvedSources
             .map((src, idx) => {
               const isAct = idx === state.activeSourceIndex;
               const isFailed = failed.has(idx);
               return `<button type="button" class="n77-menu-opt ${isAct ? 'is-active' : ''} ${isFailed ? 'is-failed' : ''}" data-pick-mirror="${idx}">
-                <span style="display:flex;flex-direction:column;align-items:flex-start;gap:2px;">
-                  <span>${escapeHtml(src.name || src.id)}</span>
-                  <span class="dim" style="font-size:10px;">${escapeHtml(src.quality || src.type)}${isFailed ? ' • Failed' : ''}</span>
+                <span class="n77-mirror-meta">
+                  <span class="n77-mirror-title">${escapeHtml(src.name || src.id)}</span>
+                  <span class="n77-badge-row">${renderSourceBadgesHtml(src)}${
+                    isFailed ? '<span class="n77-node-badge is-fail">Failed</span>' : ''
+                  }</span>
                 </span>
                 <span>${isAct ? '✓' : ''}</span>
               </button>`;
             })
             .join('')
         : `<div class="dim" style="padding:8px 10px;font-size:12px;">No alternate mirrors resolved</div>`;
+    bodyHtml = `${listHtml}
+      <button type="button" class="n77-menu-opt is-sources-link" data-open-sources="addons">
+        <span>+ Manage Sources &amp; Addons</span>
+        <span>→</span>
+      </button>`;
   }
 
   container.innerHTML = `<div class="n77-popup-card" role="menu">
@@ -779,6 +897,12 @@ function fallbackToEmbedPlayer(item, message = 'Switched to VidLink shield playe
 
   const topBar = document.querySelector('.player-top-bar');
   if (topBar) {
+    const sourcesBtn = document.getElementById('player-open-sources-btn');
+    if (sourcesBtn) {
+      sourcesBtn.classList.add('is-unlock');
+      const sp = sourcesBtn.querySelector('span');
+      if (sp) sp.textContent = 'Unlock HLS Addons';
+    }
     const shieldMount = topBar.querySelector('.shield-pill');
     if (shieldMount) {
       shieldMount.outerHTML = `<button type="button" class="shield-pill" id="toggle-strict-shield-btn">
@@ -798,6 +922,9 @@ function fallbackToEmbedPlayer(item, message = 'Switched to VidLink shield playe
           p.label
         )}</button>`
       ).join('')}
+      <button type="button" class="outline-chip is-sources-cta is-unlock" data-open-sources="addons" style="height:30px;font-size:11px;">
+        ${svgIcon('sparkles', 12)} Unlock HLS Addons
+      </button>
       <button type="button" class="outline-chip" id="reload-player-btn" style="height:30px;font-size:11px;">${svgIcon(
         'refresh',
         12
@@ -1185,12 +1312,27 @@ function sendPlayerCommand(action, payload = {}) {
 async function launchStream(rawItem, { season, episode, resumeSeconds } = {}) {
   if (!rawItem) return;
   let item = rawItem;
-  if (item.mediaType !== 'anime' && item.mediaType !== 'hls' && !item.tmdbId && !item.hlsStreamUrl) {
+  if (
+    item.mediaType !== 'anime' &&
+    item.mediaType !== 'hls' &&
+    !item.tmdbId &&
+    !item.hlsStreamUrl &&
+    !item.magnetUri &&
+    !item.infoHash
+  ) {
     showToast(`Loading "${item.title}" stream...`);
     item = await resolveFullMetadata(item);
     registerItems([item]);
   }
-  if (item.mediaType !== 'anime' && item.mediaType !== 'hls' && !item.tmdbId && !item.hlsStreamUrl) {
+  if (
+    item.mediaType !== 'anime' &&
+    item.mediaType !== 'hls' &&
+    !item.tmdbId &&
+    !item.imdbId &&
+    !item.hlsStreamUrl &&
+    !item.magnetUri &&
+    !item.infoHash
+  ) {
     showToast('Stream ID unavailable for this entry — try Quick Launch');
     return;
   }
@@ -1211,6 +1353,7 @@ async function launchStream(rawItem, { season, episode, resumeSeconds } = {}) {
   state.playerOpen = true;
   state.playerEpisodesOpen = false;
   state.modal = null;
+  state.sourcesDirtyInPlayer = false;
   state._hlsFallbackNotifiedItem = null;
   state.resolvedSources = [];
   state.activeSourceIndex = 0;
@@ -1240,6 +1383,26 @@ async function launchStream(rawItem, { season, episode, resumeSeconds } = {}) {
 
   render();
 
+  // Always hydrate missing imdbId (even when tmdbId is set!) so Stremio addons & OpenSubtitles v3 work
+  if (!item.imdbId && item.mediaType !== 'hls' && !item.hlsStreamUrl) {
+    try {
+      const hydrated = await resolveFullMetadata(item);
+      if (launchSeq !== activeLaunchSeq || !state.playerOpen) return;
+      if (hydrated) {
+        item = hydrated;
+        registerItems([item]);
+        state.activeItem = getItemByKey(getMediaKey(item)) || item;
+        const titleEl = document.getElementById('player-title-text');
+        if (titleEl && state.activeItem?.title) {
+          titleEl.textContent = state.activeItem.title;
+        }
+        if (state.activeItem?.mediaType === 'tv' && (state.activeItem.tmdbId || state.activeItem.imdbId)) {
+          loadTvSeasons(state.activeItem.tmdbId, state.activeItem.imdbId);
+        }
+      }
+    } catch {}
+  }
+
   const resolveOpts = {
     season: resolvedSeason,
     episode: resolvedEpisode,
@@ -1247,6 +1410,8 @@ async function launchStream(rawItem, { season, episode, resumeSeconds } = {}) {
     debridKey: state.prefs.debridApiKey,
     debridProvider: state.prefs.debridProvider,
     stremioAddonUrl: state.prefs.stremioAddonUrl,
+    stremioAddons: state.prefs.stremioAddons,
+    customResolverUrl: state.prefs.customResolverUrl,
     themeId: state.appearance.theme,
     autoplay: state.prefs.autoplay,
     sub: state.prefs.sub,
@@ -1286,7 +1451,9 @@ async function launchStream(rawItem, { season, episode, resumeSeconds } = {}) {
       } else if (firstHlsIdx >= 0) {
         pickedIndex = firstHlsIdx;
       } else {
-        if (prov === 'hls-direct') {
+        if ((state.activeItem.magnetUri || state.activeItem.infoHash) && firstHlsIdx < 0) {
+          showToast('Magnet/InfoHash requires a Debrid API key with Node server or Edge Proxy.');
+        } else if (prov === 'hls-direct') {
           state._hlsFallbackNotifiedItem = getMediaKey(state.activeItem);
           showToast('Direct HLS stream unavailable for this title. Switched to VidLink shield player.');
         }
@@ -1447,10 +1614,17 @@ async function shareItem(item) {
 }
 
 function renderTopHeader({ leftHtml, rightExtras = '' }) {
+  const addonCount = getEnabledAddonsCount();
+  const connected = hasAnyConfiguredSource();
   return `<header class="sc-topbar">
     <div class="sc-topbar-left">${leftHtml}</div>
     <div class="sc-topbar-actions">
       ${rightExtras}
+      <button type="button" class="mob-sources-btn ${connected ? 'is-connected' : ''}" data-open-sources="addons" title="Stream Sources &amp; Stremio Addons" aria-label="Sources and Addons">
+        ${svgIcon('sparkles', 13)}
+        <span>Sources</span>
+        ${addonCount > 0 ? `<span class="sources-count-dot">${addonCount}</span>` : ''}
+      </button>
       <button type="button" class="icon-btn" id="open-settings-btn" title="Shield, Cast & Theme" aria-label="Cast and Settings">
         ${svgIcon('cast', 21)}
       </button>
@@ -1491,6 +1665,8 @@ function renderDesktopTopbar() {
   ];
 
   const searchExpanded = state.desktopSearchOpen || state.tab === 'search';
+  const addonCount = getEnabledAddonsCount();
+  const connected = hasAnyConfiguredSource();
 
   return `<header class="dk-topbar">
     <div class="dk-topbar-left">
@@ -1523,6 +1699,11 @@ function renderDesktopTopbar() {
               ${svgIcon('search', 20)}
             </button>`
       }
+      <button type="button" class="dk-sources-btn ${connected ? 'is-connected' : ''}" id="open-sources-btn" data-open-sources="addons" title="Manage Stremio Addons, Debrid, Edge Proxy &amp; Direct HLS" aria-label="Sources and Addons">
+        ${svgIcon('sparkles', 14)}
+        <span>Sources / Addons</span>
+        ${addonCount > 0 ? `<span class="sources-count-dot">${addonCount}</span>` : ''}
+      </button>
       <button type="button" class="icon-btn" id="open-quicklaunch-btn" title="Quick Launch ID or HLS URL" aria-label="Quick Launch">
         ${svgIcon('link', 19)}
       </button>
@@ -2758,7 +2939,10 @@ function renderProHlsPlayerStage(item) {
     </div>
     <div class="n77-hud" id="n77-hud">
       <div class="n77-hud-telemetry-row">
-        <span class="n77-telemetry-badge" id="n77-telemetry-badge">HLS • Connecting...</span>
+        <div class="n77-hud-badges-wrap">
+          <span class="n77-telemetry-badge" id="n77-telemetry-badge">HLS • Connecting...</span>
+          <div class="n77-hud-node-badges" id="n77-hud-node-badges"></div>
+        </div>
         <div class="n77-hud-popups" id="n77-hud-popups"></div>
       </div>
       <div class="n77-timeline-wrap" id="n77-timeline-wrap" role="slider" aria-label="Seek timeline" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" tabindex="0">
@@ -2885,7 +3069,7 @@ function syncPlayerMount({ forceReload = false } = {}) {
             ${svgIcon('back', 22)}
           </button>
           <div style="min-width:0;">
-            <div style="font-size:15px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(
+            <div id="player-title-text" style="font-size:15px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(
               item.title
             )}</div>
             <div class="dim" id="player-stream-subtitle" style="font-size:11px;">${
@@ -2899,7 +3083,7 @@ function syncPlayerMount({ forceReload = false } = {}) {
             }</div>
           </div>
         </div>
-        <div style="display:flex;align-items:center;gap:8px;">
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end;">
           ${
             item.mediaType === 'tv' || item.mediaType === 'anime'
               ? `<button type="button" class="outline-chip ${
@@ -2909,6 +3093,10 @@ function syncPlayerMount({ forceReload = false } = {}) {
                 </button>`
               : ''
           }
+          <button type="button" class="sources-player-btn ${isHls ? '' : 'is-unlock'}" id="player-open-sources-btn" data-open-sources="addons" title="Manage Stremio Addons, Debrid, Edge Proxy &amp; Direct HLS">
+            ${svgIcon('sparkles', 13)}
+            <span>${isHls ? 'Manage Sources' : 'Unlock HLS Addons'}</span>
+          </button>
           ${
             isHls
               ? `<span class="shield-pill" id="player-hls-pill">${svgIcon('shield', 13)}<span>Pro HLS${
@@ -2931,7 +3119,8 @@ function syncPlayerMount({ forceReload = false } = {}) {
               </div>`
             : isHls
             ? renderProHlsPlayerStage(item)
-            : `<iframe
+            : streamUrl
+            ? `<iframe
                 id="vidrift-player"
                 src="${escapeHtml(streamUrl)}"
                 title="${escapeHtml(item.title)}"
@@ -2940,6 +3129,13 @@ function syncPlayerMount({ forceReload = false } = {}) {
                 referrerpolicy="strict-origin-when-cross-origin"
               ></iframe>
               ${renderPlayerEpisodesDrawer(item)}`
+            : `<div class="n77-resolving-box">
+                <p style="font-size:14px;font-weight:700;color:#fff;">No direct stream resolved for this entry</p>
+                <p class="dim" style="font-size:12px;max-width:340px;text-align:center;">Connect a Stremio addon, Debrid key, or Edge Proxy to resolve direct HLS streams.</p>
+                <button type="button" class="btn-white" data-open-sources="${
+                  item.magnetUri || item.infoHash ? 'debrid' : 'addons'
+                }" style="pointer-events:auto;">${svgIcon('sparkles', 15)} Open Stream Sources</button>
+              </div>`
         }
       </div>
 
@@ -2950,7 +3146,7 @@ function syncPlayerMount({ forceReload = false } = {}) {
       const videoEl = document.getElementById('hls-video-player');
       attachDirectVideoStream(videoEl, streamUrl, item, activeSrc);
       if (videoEl) videoEl.dataset.embedUrl = streamUrl;
-    } else if (!stillResolving) {
+    } else if (!stillResolving && streamUrl) {
       const frame = document.getElementById('vidrift-player');
       if (frame) {
         frame.dataset.embedUrl = streamUrl;
@@ -2958,7 +3154,7 @@ function syncPlayerMount({ forceReload = false } = {}) {
       }
     }
   } else if (!stillResolving) {
-    if (!isHls && existingFrame) {
+    if (!isHls && existingFrame && streamUrl) {
       const prevSandbox = existingFrame.hasAttribute('sandbox');
       applySandboxAttr(existingFrame);
       if (existingFrame.dataset.embedUrl !== streamUrl || prevSandbox !== isSandboxed) {
@@ -2979,6 +3175,13 @@ function syncPlayerMount({ forceReload = false } = {}) {
     }
     const epToggle = document.getElementById('toggle-player-ep-drawer-btn');
     if (epToggle) epToggle.classList.toggle('is-active', Boolean(state.playerEpisodesOpen));
+
+    const playerSourcesBtn = document.getElementById('player-open-sources-btn');
+    if (playerSourcesBtn) {
+      playerSourcesBtn.classList.toggle('is-unlock', !isHls);
+      const sp = playerSourcesBtn.querySelector('span');
+      if (sp) sp.textContent = isHls ? 'Manage Sources' : 'Unlock HLS Addons';
+    }
 
     const hlsPillSpan = document.querySelector('#player-hls-pill span');
     if (hlsPillSpan && isHls) {
@@ -3006,6 +3209,9 @@ function syncPlayerMount({ forceReload = false } = {}) {
           p.label
         )}</button>`
       ).join('')}
+      <button type="button" class="outline-chip is-sources-cta ${isHls ? '' : 'is-unlock'}" data-open-sources="addons" style="height:30px;font-size:11px;">
+        ${svgIcon('sparkles', 12)} ${isHls ? 'Manage Sources' : 'Unlock HLS Addons'}
+      </button>
       ${
         saved?.currentTime > 15 && provider !== 'vidlink' && !isHls
           ? `<button type="button" class="outline-chip" id="cmd-resume-btn" style="height:30px;font-size:11px;">Resume ${formatTime(
@@ -3163,6 +3369,27 @@ function render(options = {}) {
     modalMount.innerHTML = renderContinueMenuSheet(getItemByKey(state.cwMenuKey));
   } else if (state.modal === 'quicklaunch') {
     modalMount.innerHTML = renderQuickLaunchSheet();
+  } else if (state.modal === 'sources') {
+    modalMount.innerHTML = renderStreamSourcesModal({
+      activeTab: state.sourcesTab,
+      prefs: state.prefs,
+      addons: state.prefs.stremioAddons,
+      addonInput: state.sourcesAddonInput,
+      addonLoading: state.sourcesAddonLoading,
+      addonError: state.sourcesAddonError,
+      proxyTest: state.sourcesProxyTest,
+      magnetInput: state.sourcesDraft.magnetInput,
+      magnetTitle: state.sourcesDraft.magnetTitle,
+      directInput: state.sourcesDraft.directInput,
+      directTitle: state.sourcesDraft.directTitle,
+      directType: state.sourcesDraft.directType,
+      customResolverInput: state.sourcesDraft.customResolverUrl,
+      hlsProxyInput: state.sourcesDraft.hlsProxyUrl,
+      debridKeyInput: state.sourcesDraft.debridApiKey,
+      debridProviderInput: state.sourcesDraft.debridProvider,
+      playerOpen: state.playerOpen,
+      sourcesDirtyInPlayer: state.sourcesDirtyInPlayer,
+    });
   } else {
     modalMount.innerHTML = '';
   }
@@ -3222,6 +3449,160 @@ function buildDirectStreamItem(parsed, customTitle = '') {
   };
 }
 
+function snapshotSourcesDraft() {
+  const addonEl = document.getElementById('sources-addon-url-input');
+  if (addonEl) state.sourcesAddonInput = addonEl.value;
+  const proxyEl = document.getElementById('sources-hls-proxy-input');
+  if (proxyEl) state.sourcesDraft.hlsProxyUrl = proxyEl.value;
+  const customEl = document.getElementById('sources-custom-resolver-input');
+  if (customEl) state.sourcesDraft.customResolverUrl = customEl.value;
+  const debKeyEl = document.getElementById('sources-debrid-key');
+  if (debKeyEl) state.sourcesDraft.debridApiKey = debKeyEl.value;
+  const debProvEl = document.getElementById('sources-debrid-provider');
+  if (debProvEl) state.sourcesDraft.debridProvider = debProvEl.value;
+  const magEl = document.getElementById('sources-magnet-input');
+  if (magEl) state.sourcesDraft.magnetInput = magEl.value;
+  const magTitleEl = document.getElementById('sources-magnet-title');
+  if (magTitleEl) state.sourcesDraft.magnetTitle = magTitleEl.value;
+  const dirEl = document.getElementById('sources-direct-input');
+  if (dirEl) state.sourcesDraft.directInput = dirEl.value;
+  const dirTitleEl = document.getElementById('sources-direct-title');
+  if (dirTitleEl) state.sourcesDraft.directTitle = dirTitleEl.value;
+  const dirTypeEl = document.getElementById('sources-direct-type');
+  if (dirTypeEl) state.sourcesDraft.directType = dirTypeEl.value;
+}
+
+function openSourcesModal(tab = 'addons') {
+  state.sourcesTab = ['addons', 'debrid', 'proxy', 'direct'].includes(tab) ? tab : 'addons';
+  state.sourcesAddonError = '';
+  state.sourcesDraft = {
+    hlsProxyUrl: state.prefs.hlsProxyUrl || '',
+    customResolverUrl: state.prefs.customResolverUrl || '',
+    debridApiKey: state.prefs.debridApiKey || '',
+    debridProvider: state.prefs.debridProvider || 'realdebrid',
+    magnetInput: state.sourcesDraft.magnetInput || '',
+    magnetTitle: state.sourcesDraft.magnetTitle || '',
+    directInput: state.sourcesDraft.directInput || '',
+    directTitle: state.sourcesDraft.directTitle || '',
+    directType: state.sourcesDraft.directType || 'movie',
+  };
+  state.modal = 'sources';
+  render();
+}
+
+function closeActiveModal({ refreshPlayerIfDirty = true } = {}) {
+  const wasSources = state.modal === 'sources';
+  const shouldReresolve = Boolean(
+    refreshPlayerIfDirty && wasSources && state.sourcesDirtyInPlayer && state.playerOpen && state.activeItem
+  );
+  state.modal = null;
+  if (shouldReresolve) {
+    state.sourcesDirtyInPlayer = false;
+    showToast('Updating active stream with new sources...');
+    launchStream(state.activeItem, {
+      season: state.activeSeason,
+      episode: state.activeEpisode,
+    });
+    return;
+  }
+  render();
+}
+
+async function testEdgeProxyHealth(rawUrl) {
+  const clean = cleanProxyUrl(rawUrl);
+  const endpoint = clean ? `${clean}/api/health` : './api/health';
+  state.sourcesProxyTest = { status: 'testing', message: `Pinging ${endpoint}...` };
+  if (state.modal === 'sources') render();
+
+  const startedAt = typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now();
+  const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), 5000) : null;
+  try {
+    const resp = await fetch(endpoint, {
+      headers: { Accept: 'application/json' },
+      signal: controller?.signal,
+    });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const data = await resp.json();
+    if (!data?.ok) throw new Error('Health endpoint returned ok: false');
+    const endedAt = typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now();
+    const latencyMs = Math.max(1, Math.round(endedAt - startedAt));
+    const runtimeLabel =
+      data.runtime === 'cloudflare-worker' ? 'Cloudflare Worker' : data.product || 'Node Edge Server';
+    const caps = [
+      data.hlsProxyEnabled ? 'HLS Proxy' : '',
+      data.subtitleProxyEnabled ? 'Subtitles' : '',
+      data.addonManifestResolverEnabled ? 'Addon Resolver' : '',
+      data.multiAddonEnabled ? 'Multi-Addon' : '',
+    ]
+      .filter(Boolean)
+      .join(' • ');
+    state.sourcesProxyTest = {
+      status: 'ok',
+      message: `Connected to ${runtimeLabel} (${latencyMs}ms)${caps ? ` — ${caps}` : ''}`,
+      latencyMs,
+      details: data,
+    };
+  } catch (err) {
+    state.sourcesProxyTest = {
+      status: 'error',
+      message: `Health check failed (${err?.message || 'unreachable'}). Deploy cloudflare-hls-proxy.js or start local Node server.`,
+    };
+  } finally {
+    if (timer) clearTimeout(timer);
+    if (state.modal === 'sources') render();
+  }
+}
+
+async function handleAddStremioAddon(rawUrl) {
+  const trimmed = String(rawUrl || '').trim();
+  if (!trimmed) {
+    state.sourcesAddonError = 'Paste a Stremio manifest URL (https://.../manifest.json or stremio://...).';
+    render();
+    return;
+  }
+
+  state.sourcesAddonInput = trimmed;
+  state.sourcesAddonLoading = true;
+  state.sourcesAddonError = '';
+  render();
+
+  try {
+    const proxyBase = cleanProxyUrl(state.sourcesDraft.hlsProxyUrl ?? state.prefs.hlsProxyUrl ?? '');
+    const manifest = await fetchAddonManifest(trimmed, { hlsProxyUrl: proxyBase });
+    const entry = normalizeStremioAddon({
+      url: manifest.url || normalizeAddonManifestUrl(trimmed).replace(/\/manifest\.json$/i, ''),
+      name: manifest.name,
+      version: manifest.version,
+      description: manifest.description,
+      types: manifest.types,
+      idPrefixes: manifest.idPrefixes,
+      enabled: true,
+    });
+    if (!entry) throw new Error('Invalid Stremio addon descriptor');
+
+    const currentList = Array.isArray(state.prefs.stremioAddons) ? [...state.prefs.stremioAddons] : [];
+    const existingIdx = currentList.findIndex((a) => a.url === entry.url);
+    if (existingIdx >= 0) {
+      currentList[existingIdx] = { ...entry, enabled: true };
+    } else {
+      currentList.unshift(entry);
+    }
+
+    saveStremioAddons(currentList);
+    state.prefs = loadPlayerPrefs();
+    state.sourcesAddonInput = '';
+    state.sourcesAddonLoading = false;
+    state.sourcesAddonError = '';
+    if (state.playerOpen) state.sourcesDirtyInPlayer = true;
+    showToast(`Added "${entry.name}" (${entry.version || 'v1'})`);
+  } catch (err) {
+    state.sourcesAddonLoading = false;
+    state.sourcesAddonError = err?.message || 'Failed to inspect Stremio addon manifest.';
+  }
+  if (state.modal === 'sources') render();
+}
+
 function bindEvents() {
   rootEl.addEventListener('click', (e) => {
     const target = e.target;
@@ -3230,8 +3611,84 @@ function bindEvents() {
       target.closest('[data-close-modal="true"]') &&
       (target.matches('[data-close-modal="true"]') || target.closest('button[data-close-modal="true"]'))
     ) {
-      state.modal = null;
+      closeActiveModal();
+      return;
+    }
+
+    const openSourcesBtn = target.closest('[data-open-sources]');
+    if (openSourcesBtn) {
+      e.stopPropagation();
+      state.hudOpenMenu = null;
+      openSourcesModal(openSourcesBtn.dataset.openSources || 'addons');
+      return;
+    }
+
+    const sourcesTabBtn = target.closest('[data-sources-tab]');
+    if (sourcesTabBtn) {
+      snapshotSourcesDraft();
+      state.sourcesTab = sourcesTabBtn.dataset.sourcesTab;
       render();
+      return;
+    }
+
+    const toggleAddonBtn = target.closest('[data-toggle-addon]');
+    if (toggleAddonBtn) {
+      const addonUrl = cleanAddonUrl(toggleAddonBtn.dataset.toggleAddon);
+      const next = (state.prefs.stremioAddons || []).map((a) =>
+        a.url === addonUrl ? { ...a, enabled: a.enabled === false } : a
+      );
+      saveStremioAddons(next);
+      state.prefs = loadPlayerPrefs();
+      if (state.playerOpen) state.sourcesDirtyInPlayer = true;
+      const toggled = next.find((a) => a.url === addonUrl);
+      showToast(toggled?.enabled !== false ? `Enabled "${toggled?.name || addonUrl}"` : `Paused "${toggled?.name || addonUrl}"`);
+      render();
+      return;
+    }
+
+    const removeAddonBtn = target.closest('[data-remove-addon]');
+    if (removeAddonBtn) {
+      const addonUrl = cleanAddonUrl(removeAddonBtn.dataset.removeAddon);
+      const removed = (state.prefs.stremioAddons || []).find((a) => a.url === addonUrl);
+      const next = (state.prefs.stremioAddons || []).filter((a) => a.url !== addonUrl);
+      saveStremioAddons(next);
+      state.prefs = loadPlayerPrefs();
+      if (state.playerOpen) state.sourcesDirtyInPlayer = true;
+      showToast(`Removed "${removed?.name || addonUrl}"`);
+      render();
+      return;
+    }
+
+    if (target.closest('#sources-test-proxy-btn')) {
+      snapshotSourcesDraft();
+      const candidateUrl = document.getElementById('sources-hls-proxy-input')?.value ?? state.sourcesDraft.hlsProxyUrl ?? '';
+      testEdgeProxyHealth(candidateUrl);
+      return;
+    }
+
+    const fillDirectBtn = target.closest('[data-fill-direct]');
+    if (fillDirectBtn) {
+      const urlVal = fillDirectBtn.dataset.fillDirect || '';
+      const titleVal = fillDirectBtn.dataset.fillTitle || '';
+      state.sourcesDraft.directInput = urlVal;
+      if (titleVal) state.sourcesDraft.directTitle = titleVal;
+      const inputEl = document.getElementById('sources-direct-input');
+      const titleEl = document.getElementById('sources-direct-title');
+      if (inputEl) inputEl.value = urlVal;
+      if (titleEl && titleVal) titleEl.value = titleVal;
+      return;
+    }
+
+    if (target.closest('#sources-reload-player-btn')) {
+      closeActiveModal({ refreshPlayerIfDirty: false });
+      state.sourcesDirtyInPlayer = false;
+      if (state.playerOpen && state.activeItem) {
+        showToast('Re-resolving stream sources...');
+        launchStream(state.activeItem, {
+          season: state.activeSeason,
+          episode: state.activeEpisode,
+        });
+      }
       return;
     }
 
@@ -3863,6 +4320,14 @@ function bindEvents() {
 
   rootEl.addEventListener('change', (e) => {
     const t = e.target;
+    if (t.id === 'sources-debrid-provider') {
+      state.sourcesDraft.debridProvider = t.value;
+      return;
+    }
+    if (t.id === 'sources-direct-type') {
+      state.sourcesDraft.directType = t.value;
+      return;
+    }
     if (t.id === 'detail-season-select' || t.id === 'player-ep-season-select') {
       state.activeSeason = Number(t.value) || 1;
       if (t.id === 'detail-season-select') state.activeEpisode = 1;
@@ -3901,6 +4366,38 @@ function bindEvents() {
 
   rootEl.addEventListener('input', (e) => {
     const t = e.target;
+    if (t.id === 'sources-addon-url-input') {
+      state.sourcesAddonInput = t.value;
+      return;
+    }
+    if (t.id === 'sources-hls-proxy-input') {
+      state.sourcesDraft.hlsProxyUrl = t.value;
+      return;
+    }
+    if (t.id === 'sources-custom-resolver-input') {
+      state.sourcesDraft.customResolverUrl = t.value;
+      return;
+    }
+    if (t.id === 'sources-debrid-key') {
+      state.sourcesDraft.debridApiKey = t.value;
+      return;
+    }
+    if (t.id === 'sources-magnet-input') {
+      state.sourcesDraft.magnetInput = t.value;
+      return;
+    }
+    if (t.id === 'sources-magnet-title') {
+      state.sourcesDraft.magnetTitle = t.value;
+      return;
+    }
+    if (t.id === 'sources-direct-input') {
+      state.sourcesDraft.directInput = t.value;
+      return;
+    }
+    if (t.id === 'sources-direct-title') {
+      state.sourcesDraft.directTitle = t.value;
+      return;
+    }
     if (t.id === 'n77-vol-slider') {
       const videoEl = document.getElementById('hls-video-player');
       if (videoEl) {
@@ -3958,6 +4455,70 @@ function bindEvents() {
         return;
       }
       state.modal = null;
+      launchStream(buildDirectStreamItem(parsed, customTitle), {
+        season: parsed.season || 1,
+        episode: parsed.episode || 1,
+      });
+    } else if (e.target.id === 'sources-add-addon-form') {
+      const raw = document.getElementById('sources-addon-url-input')?.value || '';
+      handleAddStremioAddon(raw);
+    } else if (e.target.id === 'sources-debrid-form') {
+      const debridProvider = document.getElementById('sources-debrid-provider')?.value || 'realdebrid';
+      const debridApiKey = (document.getElementById('sources-debrid-key')?.value || '').trim();
+      state.prefs = savePlayerPrefs({ debridProvider, debridApiKey });
+      state.sourcesDraft.debridProvider = debridProvider;
+      state.sourcesDraft.debridApiKey = debridApiKey;
+      if (state.playerOpen) state.sourcesDirtyInPlayer = true;
+      showToast(debridApiKey ? `Saved ${debridProvider === 'torbox' ? 'TorBox' : 'Real-Debrid'} API key` : 'Cleared Debrid key');
+      render();
+    } else if (e.target.id === 'sources-magnet-form') {
+      let raw = (document.getElementById('sources-magnet-input')?.value || '').trim();
+      const customTitle = (document.getElementById('sources-magnet-title')?.value || '').trim();
+      if (/^[a-zA-Z2-7]{32}$/.test(raw) && !/^[a-fA-F0-9]{40}$/.test(raw)) {
+        raw = `magnet:?xt=urn:btih:${raw}`;
+      }
+      const parsed = parseDirectTarget(raw);
+      if (!parsed || (!parsed.infoHash && !parsed.magnetUri)) {
+        showToast('Enter a valid magnet:?xt=urn:btih:... URI or 40-char SHA-1 infoHash');
+        return;
+      }
+      state.modal = null;
+      state.sourcesDirtyInPlayer = false;
+      state.sourcesDraft.magnetInput = '';
+      state.sourcesDraft.magnetTitle = '';
+      launchStream(buildDirectStreamItem(parsed, customTitle), { season: 1, episode: 1 });
+    } else if (e.target.id === 'sources-proxy-form') {
+      const rawProxy = (document.getElementById('sources-hls-proxy-input')?.value || '').trim();
+      const rawCustom = (document.getElementById('sources-custom-resolver-input')?.value || '').trim();
+      if (rawProxy && !cleanProxyUrl(rawProxy)) {
+        showToast('Edge Proxy URL must start with http:// or https://');
+        return;
+      }
+      if (rawCustom && !/^https?:\/\//i.test(rawCustom)) {
+        showToast('Custom Resolver URL must start with http:// or https://');
+        return;
+      }
+      const hlsProxyUrl = cleanProxyUrl(rawProxy);
+      state.prefs = savePlayerPrefs({ hlsProxyUrl, customResolverUrl: rawCustom });
+      state.sourcesDraft.hlsProxyUrl = hlsProxyUrl;
+      state.sourcesDraft.customResolverUrl = rawCustom;
+      if (state.playerOpen) state.sourcesDirtyInPlayer = true;
+      showToast('Saved Edge Proxy & Custom Resolver');
+      render();
+    } else if (e.target.id === 'sources-direct-form') {
+      const raw = (document.getElementById('sources-direct-input')?.value || '').trim();
+      const fallbackType = document.getElementById('sources-direct-type')?.value || 'movie';
+      const customTitle = (document.getElementById('sources-direct-title')?.value || '').trim();
+      let parsed = parseDirectTarget(raw, fallbackType);
+      if (!parsed && /^https?:\/\/[^\s]+/i.test(raw) && isDirectStreamUrl(raw)) {
+        parsed = { mediaType: 'hls', hlsUrl: raw, format: raw.toLowerCase().includes('.mp4') ? 'mp4' : 'hls' };
+      }
+      if (!parsed) {
+        showToast('Enter a valid https:// .m3u8/.mp4 URL or TMDB/AniList ID');
+        return;
+      }
+      state.modal = null;
+      state.sourcesDirtyInPlayer = false;
       launchStream(buildDirectStreamItem(parsed, customTitle), {
         season: parsed.season || 1,
         episode: parsed.episode || 1,
@@ -4138,7 +4699,9 @@ function bindEvents() {
     const isTyping = tag === 'input' || tag === 'textarea' || tag === 'select' || e.target?.isContentEditable;
 
     if (e.key === 'Escape') {
-      if (state.playerOpen && state.hudOpenMenu) {
+      if (state.modal) {
+        closeActiveModal();
+      } else if (state.playerOpen && state.hudOpenMenu) {
         state.hudOpenMenu = null;
         renderHudPopupMenu();
         wakePlayerHud();
@@ -4152,9 +4715,6 @@ function bindEvents() {
         state.resolvingStream = false;
         state.resolvedSources = [];
         antiRedirectGuard.setTheaterActive(false);
-        render();
-      } else if (state.modal) {
-        state.modal = null;
         render();
       } else if (state.detailModalKey) {
         state.detailModalKey = null;

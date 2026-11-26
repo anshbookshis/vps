@@ -287,9 +287,14 @@ export function renderDetailView({
         <button type="button" class="icon-btn" id="detail-back-btn" aria-label="Back" style="background:rgba(0,0,0,0.45);">
           ${svgIcon('back', 22)}
         </button>
-        <button type="button" class="icon-btn" id="open-shield-settings-btn" aria-label="Cast & Shield" style="background:rgba(0,0,0,0.45);">
-          ${svgIcon('cast', 20)}
-        </button>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <button type="button" class="detail-sources-pill" data-open-sources="addons" aria-label="Sources and Addons">
+            ${svgIcon('sparkles', 14)} Sources / Addons
+          </button>
+          <button type="button" class="icon-btn" id="open-shield-settings-btn" aria-label="Cast & Shield" style="background:rgba(0,0,0,0.45);">
+            ${svgIcon('cast', 20)}
+          </button>
+        </div>
       </div>
       ${
         trailerPlaying && item.trailerId
@@ -368,6 +373,10 @@ export function renderDetailView({
         <button type="button" class="detail-icon-act" data-share-key="${escapeHtml(key)}">
           ${svgIcon('share', 21)}
           <span>Share</span>
+        </button>
+        <button type="button" class="detail-icon-act" data-open-sources="addons">
+          ${svgIcon('sparkles', 21)}
+          <span>Sources</span>
         </button>
       </div>
     </div>
@@ -540,6 +549,9 @@ export function renderDesktopDetailModal({
               key
             )}" title="Share" aria-label="Share" style="width:40px;height:40px;">
               ${svgIcon('share', 16)}
+            </button>
+            <button type="button" class="dk-btn-sources" data-open-sources="addons" title="Manage Stremio Addons, Debrid, Edge Proxy &amp; Direct HLS">
+              ${svgIcon('sparkles', 16)} Sources / Addons
             </button>
           </div>
         </div>
