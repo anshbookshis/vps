@@ -1263,6 +1263,8 @@ export async function resolveDebridCandidates({ provider = 'realdebrid', apiKey,
   }
 
   const MAX_RD_PROBES = 7;
+  const rdDiag = {};
+  const FATAL_RD_ERRORS = new Set(['bad_token', 'hoster_not_free', 'permission_denied', 'traffic_exhausted', 'account_locked']);
   const existingByHash = new Map();
   try {
     const listResp = await fetchWithRetry(
@@ -1312,20 +1314,24 @@ export async function resolveDebridCandidates({ provider = 'realdebrid', apiKey,
         ) {
           return { url: unrestrict.download, candidate };
         }
+      } else if (unrestrictResp) {
+        const errJson = await unrestrictResp.json().catch(() => null);
+        if (errJson?.error && FATAL_RD_ERRORS.has(errJson.error)) {
+          return { url: null, debridError: errJson.error };
+        }
       }
     } catch {
       // Fall through to fresh resolution if reuse unrestrict fails
     }
   }
 
-  const rdDiag = {};
   for (const candidate of orderedCandidates.slice(0, MAX_RD_PROBES)) {
     const magnetUri = buildMagnetUri(candidate);
     if (!magnetUri) continue;
     try {
       const playable = await resolveRealDebridStream(apiKey, magnetUri, candidate.fileIdx, rdDiag);
       if (playable) return { url: playable, candidate };
-      if (rdDiag.error === 'bad_token' || rdDiag.error === 'hoster_not_free' || rdDiag.error === 'traffic_exhausted') {
+      if (rdDiag.error && FATAL_RD_ERRORS.has(rdDiag.error)) {
         return { url: null, debridError: rdDiag.error };
       }
     } catch {
@@ -2237,8 +2243,8 @@ async function handleResolveStream(request, reqUrl, env = {}) {
 
   let debridWarning = '';
   if (!debridResult?.url && debridResult?.debridError) {
-    if (debridResult.debridError === 'hoster_not_free') {
-      debridWarning = 'Real-Debrid account is on Free tier — switched to Cloud Stream Servers.';
+    if (debridResult.debridError === 'hoster_not_free' || debridResult.debridError === 'permission_denied') {
+      debridWarning = 'Real-Debrid Free account requires Premium for Debrid streaming — switched to Cloud Stream Servers.';
     } else if (debridResult.debridError === 'bad_token') {
       debridWarning = 'Debrid API key is invalid or expired — switched to Cloud Stream Servers.';
     } else {
