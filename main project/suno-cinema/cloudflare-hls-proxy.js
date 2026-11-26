@@ -2340,7 +2340,7 @@ async function handleResolveStream(request, reqUrl, env = {}) {
         : `https://vidsrc.su/embed/movie/${encodeURIComponent(idVal)}`,
       quality: '1080p',
       shielded: true,
-      sandboxed: false,
+      sandboxed: true,
       direct: false,
     });
     sources.push({

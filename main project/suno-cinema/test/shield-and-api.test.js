@@ -1,6 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { AntiRedirectGuard, isAllowedExternalUrl } from '../src/utils/anti-redirect.js';
+import {
+  EMBED_IFRAME_SANDBOX,
+  shouldSandboxProvider,
+  buildEmbedIframeHtml,
+  PLAYER_PROVIDERS,
+} from '../src/utils/vidrift.js';
 import { normalizeCinemetaItem, searchLocalItems, fetchLanguageCatalog } from '../src/utils/client-api.js';
 import { getMediaKey } from '../src/utils/storage.js';
 import { renderDesktopWideCard, renderDesktopTop10Card, renderShelf, computeMatchPercent, computeContinueLabel, renderSkeletonShelf } from '../src/components/cards.js';
@@ -154,4 +163,32 @@ test('desktop UI renderers and language catalog maintain Suno Cinema branding', 
   assert.ok(STUDIO_HUBS.length >= 6);
   assert.ok(hubsHtml.includes('data-pick-hub="anime"') && hubsHtml.includes('is-active'));
   assert.equal(computeContinueLabel({ mediaType: 'tv' }, { season: 2, episode: 4 }), 'S2:E4');
+});
+
+test('embed iframe enforces sandbox before src for all cloud providers including vidsrc-to and vidsrc-pro', () => {
+  for (const provider of ['vidlink', 'vidfast', 'vidsrc-pro', 'vidsrc-to', 'vidrift']) {
+    assert.equal(shouldSandboxProvider(provider, true), true, `${provider} must sandbox when Shield ON`);
+    const html = buildEmbedIframeHtml({
+      url: 'https://vidsrc.to/embed/movie/tt1434447',
+      title: 'Rocket Singh',
+      provider,
+      strictFrameMode: true,
+    });
+    const sandboxPos = html.indexOf(`sandbox="${EMBED_IFRAME_SANDBOX}"`);
+    const srcPos = html.indexOf('src="https://vidsrc.to/embed/movie/tt1434447"');
+    assert.ok(sandboxPos > 0 && srcPos > sandboxPos, `${provider} must emit sandbox strictly before src`);
+    assert.equal(html.includes('allow-popups'), false);
+    assert.equal(html.includes('allow-top-navigation'), false);
+  }
+
+  assert.equal(shouldSandboxProvider('vidrift-direct', true), false);
+  assert.equal(shouldSandboxProvider('vidsrc-to', false), false);
+
+  const proMeta = PLAYER_PROVIDERS.find((p) => p.id === 'vidsrc-pro');
+  assert.equal(proMeta?.sandboxed, true);
+
+  const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+  const appSource = fs.readFileSync(path.join(rootDir, 'src/app.js'), 'utf8');
+  assert.ok(appSource.includes('buildEmbedIframeHtml('));
+  assert.equal(appSource.includes("prov === 'vidrift-direct' || prov === 'vidsrc-pro'"), false);
 });

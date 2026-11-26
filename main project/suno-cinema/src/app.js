@@ -1,5 +1,8 @@
 import {
   PLAYER_PROVIDERS,
+  EMBED_IFRAME_SANDBOX,
+  shouldSandboxProvider,
+  buildEmbedIframeHtml,
   buildPlayerEmbedUrl,
   parseDirectTarget,
   parseAnyPlayerMessage,
@@ -1418,7 +1421,11 @@ async function launchStream(rawItem, { season, episode, resumeSeconds } = {}) {
   state.activeExternalSubId = 'off';
   state.hudOpenMenu = null;
   state.hudVisible = true;
+  if ((state.prefs.playerProvider || 'vidlink') !== 'vidrift-direct') {
+    antiRedirectGuard.setStrictFrameMode(true);
+  }
   antiRedirectGuard.setTheaterActive(true);
+  state.shield = antiRedirectGuard.getSnapshot();
   state.livePlayback = {
     currentTime: saved?.currentTime || 0,
     duration: saved?.duration || 0,
@@ -2330,11 +2337,12 @@ function renderClipsTab() {
             ${
               playingClip
                 ? `<iframe
-                    src="https://www.youtube-nocookie.com/embed/${encodeURIComponent(item.trailerId)}?autoplay=1&rel=0"
+                    sandbox="allow-scripts allow-same-origin allow-presentation"
                     title="${escapeHtml(item.title)}"
                     allow="autoplay; encrypted-media; fullscreen"
                     allowfullscreen
                     referrerpolicy="strict-origin-when-cross-origin"
+                    src="https://www.youtube-nocookie.com/embed/${encodeURIComponent(item.trailerId)}?autoplay=1&rel=0"
                   ></iframe>`
                 : `<img src="${escapeHtml(resolveArtUrl(item, 'wide'))}" alt="${escapeHtml(item.title)}" loading="lazy" referrerpolicy="no-referrer" ${attachFallbackImgAttr(
                     item,
@@ -3028,23 +3036,6 @@ function renderFloatingBottomNav() {
   </nav>`;
 }
 
-function applySandboxAttr(iframe) {
-  if (!iframe) return;
-  const activeSrc = getActiveResolvedSource();
-  const provider =
-    state.activeSourceOverride ||
-    (activeSrc?.type === 'embed' ? activeSrc.id : '') ||
-    state.prefs.playerProvider ||
-    'vidlink';
-  const useSandbox =
-    provider === 'vidrift-direct' || provider === 'vidsrc-pro' ? false : state.shield.strictFrameMode;
-  if (useSandbox) {
-    iframe.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms allow-presentation');
-  } else {
-    iframe.removeAttribute('sandbox');
-  }
-}
-
 function renderPlayerEpisodesDrawer(item) {
   if (!state.playerEpisodesOpen || !item || (item.mediaType !== 'tv' && item.mediaType !== 'anime')) {
     return '';
@@ -3299,7 +3290,7 @@ function syncPlayerMount({ forceReload = false } = {}) {
   }
 
   const stillResolving = Boolean(state.resolvingStream && !isHls && hlsNodes.length === 0 && !item.hlsStreamUrl && item.mediaType !== 'hls');
-  const isSandboxed = effectiveProvider !== 'vidrift-direct' && effectiveProvider !== 'vidsrc-pro' && state.shield.strictFrameMode;
+  const isSandboxed = shouldSandboxProvider(effectiveProvider, state.shield.strictFrameMode);
   const existingFrame = document.getElementById('vidrift-player');
   const existingVideo = document.getElementById('hls-video-player');
   const existingResolving = document.getElementById('n77-resolving-box');
@@ -3363,14 +3354,13 @@ function syncPlayerMount({ forceReload = false } = {}) {
             : isHls
             ? renderProHlsPlayerStage(item)
             : streamUrl
-            ? `<iframe
-                id="vidrift-player"
-                src="${escapeHtml(streamUrl)}"
-                title="${escapeHtml(item.title)}"
-                allow="autoplay; fullscreen; picture-in-picture; encrypted-media"
-                allowfullscreen
-                referrerpolicy="strict-origin-when-cross-origin"
-              ></iframe>
+            ? `${buildEmbedIframeHtml({
+                id: 'vidrift-player',
+                url: streamUrl,
+                title: item.title,
+                provider: effectiveProvider,
+                strictFrameMode: state.shield.strictFrameMode,
+              })}
               ${renderPlayerEpisodesDrawer(item)}`
             : `<div class="n77-resolving-box">
                 <p style="font-size:15px;font-weight:700;color:#fff;">Playback unavailable for this entry</p>
@@ -3393,7 +3383,6 @@ function syncPlayerMount({ forceReload = false } = {}) {
       const frame = document.getElementById('vidrift-player');
       if (frame) {
         frame.dataset.embedUrl = streamUrl;
-        applySandboxAttr(frame);
       }
     }
   } else if (!stillResolving) {
@@ -3404,10 +3393,19 @@ function syncPlayerMount({ forceReload = false } = {}) {
     }
     if (!isHls && existingFrame && streamUrl) {
       const prevSandbox = existingFrame.hasAttribute('sandbox');
-      applySandboxAttr(existingFrame);
       if (existingFrame.dataset.embedUrl !== streamUrl || prevSandbox !== isSandboxed) {
-        existingFrame.src = streamUrl;
-        existingFrame.dataset.embedUrl = streamUrl;
+        const nextFrame = document.createElement('iframe');
+        nextFrame.id = 'vidrift-player';
+        if (isSandboxed) {
+          nextFrame.setAttribute('sandbox', EMBED_IFRAME_SANDBOX);
+        }
+        nextFrame.title = item.title || '';
+        nextFrame.allow = 'autoplay; fullscreen; picture-in-picture; encrypted-media';
+        nextFrame.allowFullscreen = true;
+        nextFrame.referrerPolicy = 'strict-origin-when-cross-origin';
+        nextFrame.dataset.embedUrl = streamUrl;
+        nextFrame.src = streamUrl;
+        existingFrame.replaceWith(nextFrame);
       }
     } else if (isHls && existingVideo && existingVideo.dataset.embedUrl !== streamUrl) {
       existingVideo.dataset.embedUrl = streamUrl;
@@ -4352,7 +4350,11 @@ function bindEvents() {
       const next = !state.shield.strictFrameMode;
       antiRedirectGuard.setStrictFrameMode(next);
       state.shield = antiRedirectGuard.getSnapshot();
-      showToast(next ? 'No-Redirect Sandbox ON (blocks all popups)' : 'Sandbox OFF (unrestricted)');
+      showToast(
+        next
+          ? 'Redirect & Popup Shield ON (blocks all external popups & tabs)'
+          : 'Shield OFF — External server may open ad tabs. Tap Shield to re-lock.'
+      );
       render({ forceReload: true });
       return;
     }
@@ -4537,7 +4539,7 @@ function bindEvents() {
         if (matchIdx >= 0) state.activeSourceIndex = matchIdx;
       }
       state.prefs = savePlayerPrefs({ playerProvider: prov });
-      if (prov === 'vidrift-direct' || prov === 'vidsrc-pro') {
+      if (prov === 'vidrift-direct') {
         antiRedirectGuard.setStrictFrameMode(false);
       } else {
         antiRedirectGuard.setStrictFrameMode(true);
