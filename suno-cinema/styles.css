@@ -856,6 +856,137 @@ img {
   gap: 16px;
 }
 
+@media (min-width: 900px) {
+  .clips-feed {
+    padding: 8px 4% 40px;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+    gap: 20px;
+  }
+}
+
+.dk-card-scrim,
+.dk-detail-hero-scrim,
+.dk-hero-vignette {
+  pointer-events: none;
+}
+
+.dk-hero-cast-badge {
+  cursor: pointer;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  font-family: inherit;
+}
+
+.dk-hero-cast-badge:hover {
+  border-color: rgba(255, 255, 255, 0.34);
+  color: #fff;
+}
+
+.notif-popover-head,
+.sheet-head-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.notif-mark-read-btn {
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  color: rgba(255, 255, 255, 0.88);
+  border-radius: 999px;
+  padding: 5px 11px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.notif-mark-read-btn:hover {
+  background: rgba(255, 255, 255, 0.16);
+  color: #fff;
+}
+
+.dk-notif-row.is-seen,
+.notif-row.is-seen {
+  opacity: 0.62;
+}
+
+.search-filter-row,
+.search-history-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0 12px;
+}
+
+.search-history-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 999px;
+  padding: 4px 8px 4px 12px;
+}
+
+.search-history-term {
+  background: none;
+  border: none;
+  color: #fff;
+  font-size: 12px;
+  cursor: pointer;
+  padding: 0;
+}
+
+.search-history-term:hover {
+  text-decoration: underline;
+}
+
+.search-chip-forget {
+  background: none;
+  border: none;
+  color: rgba(255, 255, 255, 0.65);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 3px;
+}
+
+.search-chip-forget:hover {
+  color: #ff6b6b;
+}
+
+.downloads-queue-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 14px;
+}
+
+.downloads-item-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  padding: 8px;
+}
+
+.downloads-item-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.downloads-item-actions button {
+  flex: 1;
+  font-size: 12px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
 .clip-card {
   position: relative;
   border-radius: 14px;
@@ -1443,6 +1574,7 @@ img {
   .dk-hero-scrim {
     position: absolute;
     inset: 0;
+    pointer-events: none;
     background:
       linear-gradient(90deg, rgba(0, 0, 0, 0.88) 0%, rgba(0, 0, 0, 0.56) 44%, rgba(0, 0, 0, 0.08) 100%),
       linear-gradient(0deg, rgba(0, 0, 0, 0.92) 0%, rgba(0, 0, 0, 0.25) 36%, transparent 65%);
@@ -1613,10 +1745,48 @@ img {
     background: rgba(255, 255, 255, 0.24);
   }
 
+  .nf-shelf.is-dk-shelf .nf-shelf-head {
+    position: relative;
+    z-index: 45;
+    pointer-events: auto;
+  }
+
   .nf-shelf.is-dk-shelf .nf-row {
     gap: 10px;
-    padding: 26px 36px 136px;
-    margin: -26px 0 -124px;
+    padding: 22px 36px 96px;
+    margin: -22px 0 -84px;
+    pointer-events: none;
+  }
+
+  .nf-shelf.is-dk-shelf .dk-card,
+  .nf-shelf.is-dk-shelf .dk-top10-card {
+    pointer-events: auto;
+  }
+
+  .dk-meta-links {
+    display: inline-flex;
+    flex-wrap: wrap;
+    gap: 4px 6px;
+    vertical-align: baseline;
+  }
+
+  .dk-meta-chip {
+    background: none;
+    border: none;
+    padding: 0;
+    margin: 0;
+    color: rgba(255, 255, 255, 0.92);
+    font: inherit;
+    cursor: pointer;
+    text-decoration: underline;
+    text-decoration-color: rgba(255, 255, 255, 0.25);
+    text-underline-offset: 3px;
+    transition: color 0.15s ease, text-decoration-color 0.15s ease;
+  }
+
+  .dk-meta-chip:hover {
+    color: #fff;
+    text-decoration-color: var(--nf-red, #e50914);
   }
 
   .nf-shelf.is-dk-shelf .nf-row.is-dk-top10 {
@@ -1719,7 +1889,7 @@ img {
     opacity: 1;
     pointer-events: auto;
     transform: scale(1);
-    transition-delay: 0.2s;
+    transition-delay: 0s;
   }
 
   .dk-hover-media {
