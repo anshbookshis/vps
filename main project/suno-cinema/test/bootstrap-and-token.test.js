@@ -23,6 +23,11 @@ import {
   resolveJellyfinStream,
   buildHlsProxyUrl,
   classifyDirectStreamKind,
+  buildVidfastEmbedUrl,
+  buildVidsrcProEmbedUrl,
+  buildVidsrcToEmbedUrl,
+  buildPlayerEmbedUrl,
+  isDirectStreamUrl,
 } from '../src/utils/vidrift.js';
 import { loadPlayerPrefs, savePlayerPrefs } from '../src/utils/storage.js';
 import { renderSettingsSheet, renderStreamSourcesModal } from '../src/components/modals.js';
@@ -622,4 +627,142 @@ test('renderSettingsSheet renders Edge Addons and Debrid active badges when back
 
   assert.ok(html.includes('2 Edge Addons Active'));
   assert.ok(html.includes('Real-Debrid Active (Edge)'));
+});
+
+test('multi-server embed builders (VidFast, VidSrc Pro, VidSrc.to) build valid URLs and are rejected by isDirectStreamUrl', () => {
+  const movie = { mediaType: 'movie', tmdbId: '693134', imdbId: 'tt15239678', title: 'Dune: Part Two' };
+  const tv = { mediaType: 'tv', tmdbId: '1396', imdbId: 'tt0903747', title: 'Breaking Bad' };
+
+  const vfMovie = buildVidfastEmbedUrl(movie, { themeId: 'default', autoplay: true });
+  assert.ok(vfMovie.startsWith('https://vidfast.vc/movie/693134?'));
+  assert.equal(isDirectStreamUrl(vfMovie), false);
+
+  const vfTv = buildPlayerEmbedUrl(tv, { provider: 'vidfast', season: 2, episode: 5 });
+  assert.ok(vfTv.startsWith('https://vidfast.vc/tv/1396/2/5?'));
+
+  const vsPro = buildVidsrcProEmbedUrl(tv, { season: 2, episode: 5 });
+  assert.equal(vsPro, 'https://vidsrc.su/embed/tv/1396/2/5');
+  assert.equal(isDirectStreamUrl(vsPro), false);
+
+  const vsTo = buildVidsrcToEmbedUrl(movie);
+  assert.equal(vsTo, 'https://vidsrc.to/embed/movie/tt15239678');
+  assert.equal(isDirectStreamUrl(vsTo), false);
+});
+
+test('Worker /api/resolve/stream ignores benign addon 404s, resolves Torrentio RD+ redirect without leaking key, and emits multi-server fallbacks', async () => {
+  const origFetch = globalThis.fetch;
+  const secretKey = 'SECRET_RD_TOKEN_DO_NOT_LEAK';
+  const cleanCdnUrl = 'https://41-4.download.real-debrid.com/d/CLEAN123/Dune.Part.Two.2024.1080p.x264.mp4';
+
+  globalThis.fetch = async (url, opts = {}) => {
+    const href = String(url);
+    if (href.startsWith('https://peerflix.example/')) {
+      return new Response('Not found', { status: 404 });
+    }
+    if (href === 'https://torrentio.strem.fun/stream/movie/tt15239678.json') {
+      return new Response(JSON.stringify({ streams: [] }), { status: 200 });
+    }
+    if (href === `https://torrentio.strem.fun/realdebrid=${encodeURIComponent(secretKey)}/stream/movie/tt15239678.json`) {
+      return new Response(
+        JSON.stringify({
+          streams: [
+            {
+              name: '[RD+] Torrentio 1080p',
+              title: 'Dune.Part.Two.2024.1080p.BluRay.x264.AAC.mp4\n👤 320',
+              behaviorHints: { filename: 'Dune.Part.Two.2024.1080p.BluRay.x264.AAC.mp4' },
+              url: `https://torrentio.strem.fun/resolve/realdebrid/${secretKey}/6d4dc4322ceff41523a75c7b0ee3faf878cc6a03/null/0/Dune.Part.Two.2024.1080p.mp4`,
+            },
+          ],
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+    if (href.includes(`/resolve/realdebrid/${secretKey}/`)) {
+      assert.equal(opts.redirect, 'manual');
+      return new Response(null, { status: 302, headers: { Location: cleanCdnUrl } });
+    }
+    return origFetch(url, opts);
+  };
+
+  try {
+    const req = new Request(
+      'https://edge.workers.dev/api/resolve/stream?tmdbId=693134&imdbId=tt15239678&mediaType=movie'
+    );
+    const resp = await worker.fetch(req, {
+      DEBRID_PROVIDER: 'realdebrid',
+      REALDEBRID_API_KEY: secretKey,
+      STREMIO_ADDON_URLS: 'https://torrentio.strem.fun/manifest.json,https://peerflix.example/manifest.json',
+    });
+    assert.equal(resp.status, 200);
+    const data = await resp.json();
+    assert.equal(data.warnings, undefined, '404 addon responses must not produce error warnings');
+
+    const serialized = JSON.stringify(data);
+    assert.equal(serialized.includes(secretKey), false, 'Must never leak secret Debrid key to client response');
+
+    const rdNode = data.sources.find((s) => s.id === 'debrid-instant-cache');
+    assert.ok(rdNode);
+    assert.equal(rdNode.rawUrl, cleanCdnUrl);
+    assert.ok(data.sources.some((s) => s.id === 'debrid-instant-cache-direct' && s.url === cleanCdnUrl));
+    assert.ok(data.sources.some((s) => s.id === 'vidfast-shield'));
+    assert.ok(data.sources.some((s) => s.id === 'vidsrc-pro'));
+    assert.ok(data.sources.some((s) => s.id === 'vidsrc-to'));
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
+test('Worker /api/resolve/stream accepts client hashes param to resolve Debrid when Worker addon fetches fail', async () => {
+  const origFetch = globalThis.fetch;
+  const clientHash = '1234567890abcdef1234567890abcdef12345678';
+
+  globalThis.fetch = async (url, opts = {}) => {
+    const href = String(url);
+    if (href.startsWith('https://cf-rate-limited.example/')) {
+      return new Response('Rate limited', { status: 429 });
+    }
+    if (href.includes('/rest/1.0/torrents?limit=50')) {
+      return new Response(
+        JSON.stringify([
+          {
+            id: 'RD-CACHED-CLIENT',
+            hash: clientHash,
+            filename: 'Latest.Movie.2026.1080p.mp4',
+            status: 'downloaded',
+            links: ['https://real-debrid.com/d/CLIENT_HASH_LINK'],
+          },
+        ]),
+        { status: 200 }
+      );
+    }
+    if (href.includes('/unrestrict/link')) {
+      assert.ok(String(opts.body || '').includes(encodeURIComponent('https://real-debrid.com/d/CLIENT_HASH_LINK')));
+      return new Response(
+        JSON.stringify({
+          download: 'https://22-4.download.real-debrid.com/d/CLIENTOK/Latest.Movie.2026.1080p.mp4',
+          filename: 'Latest.Movie.2026.1080p.mp4',
+        }),
+        { status: 200 }
+      );
+    }
+    return origFetch(url, opts);
+  };
+
+  try {
+    const req = new Request(
+      `https://edge.workers.dev/api/resolve/stream?tmdbId=999111&imdbId=tt9991111&mediaType=movie&hashes=${clientHash}`
+    );
+    const resp = await worker.fetch(req, {
+      DEBRID_PROVIDER: 'realdebrid',
+      REALDEBRID_API_KEY: 'rd-key',
+      STREMIO_ADDON_URLS: 'https://cf-rate-limited.example/manifest.json',
+    });
+    assert.equal(resp.status, 200);
+    const data = await resp.json();
+    const rdNode = data.sources.find((s) => s.id === 'debrid-instant-cache');
+    assert.ok(rdNode, 'Client-supplied hash must still resolve via Real-Debrid when Worker addons 429');
+    assert.equal(rdNode.rawUrl, 'https://22-4.download.real-debrid.com/d/CLIENTOK/Latest.Movie.2026.1080p.mp4');
+  } finally {
+    globalThis.fetch = origFetch;
+  }
 });

@@ -2,6 +2,9 @@ import { fetchArchiveOrgDirectStream } from './client-api.js';
 
 export const VIDRIFT_ORIGIN = 'https://embed.vidrift.net';
 export const VIDLINK_ORIGIN = 'https://vidlink.pro';
+export const VIDFAST_ORIGIN = 'https://vidfast.vc';
+export const VIDSRC_PRO_ORIGIN = 'https://vidsrc.su';
+export const VIDSRC_TO_ORIGIN = 'https://vidsrc.to';
 
 export const PLAYER_PROVIDERS = [
   {
@@ -15,6 +18,24 @@ export const PLAYER_PROVIDERS = [
     label: 'VidLink (No-Redirect)',
     sandboxed: true,
     description: 'Clean ad-free player inside browser sandbox (blocks popups & redirects)',
+  },
+  {
+    id: 'vidfast',
+    label: 'VidFast HD',
+    sandboxed: true,
+    description: 'Fast multi-server HD player (broad coverage for new & regional titles)',
+  },
+  {
+    id: 'vidsrc-pro',
+    label: 'VidSrc Pro',
+    sandboxed: false,
+    description: 'Multi-mirror cloud embed server with wide 2025/2026 & regional support',
+  },
+  {
+    id: 'vidsrc-to',
+    label: 'VidSrc.to',
+    sandboxed: true,
+    description: 'Classic multi-mirror embed fallback for movies & series',
   },
   {
     id: 'vidrift',
@@ -474,6 +495,12 @@ export function isDirectStreamUrl(url) {
   if (
     trimmed.includes('embed.vidrift.net') ||
     trimmed.includes('vidlink.pro') ||
+    trimmed.includes('vidfast.vc') ||
+    trimmed.includes('vidfast.pro') ||
+    trimmed.includes('vidsrc.su') ||
+    trimmed.includes('vidsrc.to') ||
+    trimmed.includes('vidsrc.sh') ||
+    trimmed.includes('videasy.') ||
     trimmed.includes('/embed/') ||
     trimmed.endsWith('.html') ||
     trimmed.endsWith('.htm')
@@ -925,6 +952,61 @@ export async function fetchStreamSources(item, options = {}) {
       q.set('customResolverUrl', customResolverUrl);
     }
 
+    // Browser-side Torrentio candidate discovery avoids Cloudflare shared-IP 429 limits cleanly
+    if (
+      typeof window !== 'undefined' &&
+      apiBase &&
+      options.skipClientTorrentio !== true &&
+      (imdbId || tmdbId) &&
+      item.mediaType !== 'hls'
+    ) {
+      try {
+        const stType =
+          item.mediaType === 'tv' || item.mediaType === 'series' ? 'series' : item.mediaType === 'anime' && !imdbId ? 'anime' : 'movie';
+        const stId =
+          stType === 'series'
+            ? imdbId
+              ? `${imdbId}:${season}:${episode}`
+              : tmdbId
+              ? `tmdb:${tmdbId}:${season}:${episode}`
+              : ''
+            : stType === 'movie'
+            ? imdbId || (tmdbId ? `tmdb:${tmdbId}` : '')
+            : '';
+        if (stId) {
+          const tCtrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+          const tTimer = tCtrl ? setTimeout(() => tCtrl.abort(), 2800) : null;
+          const tResp = await fetch(
+            `https://torrentio.strem.fun/stream/${stType}/${encodeURIComponent(stId)}.json`,
+            { headers: { Accept: 'application/json' }, signal: tCtrl?.signal }
+          ).finally(() => {
+            if (tTimer) clearTimeout(tTimer);
+          });
+          if (tResp?.ok) {
+            const tJson = await tResp.json().catch(() => null);
+            const rawStreams = Array.isArray(tJson?.streams) ? tJson.streams : [];
+            const ranked = rawStreams
+              .filter((s) => s?.infoHash && /^[a-fA-F0-9]{40}$/.test(s.infoHash))
+              .map((s, idx) => {
+                const text = `${s.name || ''} ${s.title || ''} ${s.behaviorHints?.filename || ''}`;
+                let score = /2160|4k/i.test(text) ? 40 : /1080/i.test(text) ? 30 : /720/i.test(text) ? 20 : 10;
+                if (/\.(mp4|m4v)\b/i.test(text)) score += 25;
+                if (/\b(?:x264|h\.?264|avc|aac)\b/i.test(text)) score += 15;
+                if (/\b(?:hevc|x265|h\.?265|av1|dolby[\s.-]?vision|dts|truehd)\b/i.test(text)) score -= 15;
+                if (/\b(?:vvc|h\.?266|vvenc)\b/i.test(text)) score -= 120;
+                if (/\.(rar|zip|7z|iso)\b/i.test(text)) score -= 100;
+                return { hash: s.infoHash.toLowerCase(), score, idx };
+              })
+              .sort((a, b) => b.score - a.score || a.idx - b.idx);
+            const uniq = [...new Set(ranked.map((r) => r.hash))].slice(0, 8);
+            if (uniq.length > 0) q.set('hashes', uniq.join(','));
+          }
+        }
+      } catch {
+        // Proceed smoothly with Edge Proxy resolution even if browser Torrentio fetch is blocked/offline
+      }
+    }
+
     const headers = {};
     if (addonUrls.length > 0) {
       headers['X-Addon-Url'] = addonUrls[0];
@@ -940,7 +1022,7 @@ export async function fetchStreamSources(item, options = {}) {
 
     const resolveEndpoint = apiBase ? `${apiBase}/api/resolve/stream` : './api/resolve/stream';
     const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
-    const timer = controller ? setTimeout(() => controller.abort(), 5000) : null;
+    const timer = controller ? setTimeout(() => controller.abort(), 13000) : null;
     try {
       const resp = await fetch(`${resolveEndpoint}?${q.toString()}`, {
         headers,
@@ -1230,6 +1312,42 @@ export async function fetchStreamSources(item, options = {}) {
     });
   }
 
+  if (tmdbId || imdbId) {
+    list.push({
+      id: 'vidfast-shield',
+      name: 'VidFast HD (Cloud Server)',
+      type: 'embed',
+      url: buildVidfastEmbedUrl(item, { ...options, season, episode }),
+      quality: '1080p',
+      shielded: true,
+      sandboxed: true,
+      direct: false,
+      node: 'vidfast',
+    });
+    list.push({
+      id: 'vidsrc-pro',
+      name: 'VidSrc Pro (Cloud Server)',
+      type: 'embed',
+      url: buildVidsrcProEmbedUrl(item, { ...options, season, episode }),
+      quality: '1080p',
+      shielded: true,
+      sandboxed: false,
+      direct: false,
+      node: 'vidsrc-pro',
+    });
+    list.push({
+      id: 'vidsrc-to',
+      name: 'VidSrc.to (Cloud Server)',
+      type: 'embed',
+      url: buildVidsrcToEmbedUrl(item, { ...options, season, episode }),
+      quality: '1080p',
+      shielded: true,
+      sandboxed: true,
+      direct: false,
+      node: 'vidsrc-to',
+    });
+  }
+
   if (tmdbId || imdbId || anilistId) {
     list.push({
       id: 'vidrift-sandboxed',
@@ -1361,12 +1479,81 @@ export function buildVidlinkEmbedUrl(item, options = {}) {
 }
 
 /**
- * Unified embed URL builder supporting VidLink (No-Redirect) & VidRift providers.
+ * Build a VidFast HD embed URL supporting movies and TV series.
+ */
+export function buildVidfastEmbedUrl(item, options = {}) {
+  if (!item) throw new Error('A media item is required to build a VidFast URL.');
+  const mediaType = item.mediaType || 'movie';
+  const accent = String(
+    options.brandColor || resolveThemeAccentHex(options.themeId || 'default')
+  ).replace(/^#/, '');
+  const id = item.tmdbId || item.imdbId || item.id;
+  if (!id) return buildVidlinkEmbedUrl(item, options);
+
+  const season = Math.max(1, Number(options.season ?? item.season ?? 1));
+  const episode = Math.max(1, Number(options.episode ?? item.episode ?? 1));
+  const path =
+    mediaType === 'tv' || mediaType === 'series'
+      ? `/tv/${encodeURIComponent(String(id))}/${season}/${episode}`
+      : `/movie/${encodeURIComponent(String(id))}`;
+
+  const params = new URLSearchParams();
+  params.set('autoPlay', options.autoplay === false ? 'false' : 'true');
+  params.set('theme', accent);
+  if (mediaType === 'tv' || mediaType === 'series') params.set('nextButton', 'true');
+  return `${VIDFAST_ORIGIN}${path}?${params.toString()}`;
+}
+
+/**
+ * Build a VidSrc Pro (`vidsrc.su`) embed URL.
+ */
+export function buildVidsrcProEmbedUrl(item, options = {}) {
+  if (!item) throw new Error('A media item is required to build a VidSrc Pro URL.');
+  const mediaType = item.mediaType || 'movie';
+  const id = item.tmdbId || item.imdbId || item.id;
+  if (!id) return buildVidlinkEmbedUrl(item, options);
+  const season = Math.max(1, Number(options.season ?? item.season ?? 1));
+  const episode = Math.max(1, Number(options.episode ?? item.episode ?? 1));
+  const path =
+    mediaType === 'tv' || mediaType === 'series'
+      ? `/embed/tv/${encodeURIComponent(String(id))}/${season}/${episode}`
+      : `/embed/movie/${encodeURIComponent(String(id))}`;
+  return `${VIDSRC_PRO_ORIGIN}${path}`;
+}
+
+/**
+ * Build a VidSrc Classic (`vidsrc.to`) embed URL.
+ */
+export function buildVidsrcToEmbedUrl(item, options = {}) {
+  if (!item) throw new Error('A media item is required to build a VidSrc.to URL.');
+  const mediaType = item.mediaType || 'movie';
+  const id = item.imdbId || item.tmdbId || item.id;
+  if (!id) return buildVidlinkEmbedUrl(item, options);
+  const season = Math.max(1, Number(options.season ?? item.season ?? 1));
+  const episode = Math.max(1, Number(options.episode ?? item.episode ?? 1));
+  const path =
+    mediaType === 'tv' || mediaType === 'series'
+      ? `/embed/tv/${encodeURIComponent(String(id))}/${season}/${episode}`
+      : `/embed/movie/${encodeURIComponent(String(id))}`;
+  return `${VIDSRC_TO_ORIGIN}${path}`;
+}
+
+/**
+ * Unified embed URL builder supporting VidLink, VidFast, VidSrc Pro, VidSrc.to & VidRift providers.
  */
 export function buildPlayerEmbedUrl(item, options = {}) {
   const provider = options.provider || 'vidlink';
   if (provider === 'vidlink' || provider === 'hls-direct') {
     return buildVidlinkEmbedUrl(item, options);
+  }
+  if (provider === 'vidfast') {
+    return buildVidfastEmbedUrl(item, options);
+  }
+  if (provider === 'vidsrc-pro') {
+    return buildVidsrcProEmbedUrl(item, options);
+  }
+  if (provider === 'vidsrc-to') {
+    return buildVidsrcToEmbedUrl(item, options);
   }
   return buildVidriftEmbedUrl(item, options);
 }
