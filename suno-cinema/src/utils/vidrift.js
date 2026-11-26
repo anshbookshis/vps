@@ -398,7 +398,72 @@ export function normalizeResolveApiUrl(sourceUrl, hlsProxyUrl = '') {
 }
 
 /**
- * Checks whether a given URL is a direct media stream (HLS m3u8, MP4, or proxied HLS stream)
+ * Fetch backend capability matrix from /api/backend/status on the active Edge Proxy or local Node server.
+ *
+ * @param {string} [hlsProxyUrl='']
+ * @param {{ timeoutMs?: number }} [options]
+ * @returns {Promise<object | null>}
+ */
+export async function fetchBackendStatus(hlsProxyUrl = '', options = {}) {
+  const base = cleanProxyUrl(hlsProxyUrl);
+  if (!base && typeof window !== 'undefined' && !window.location?.protocol?.startsWith('http')) {
+    return null;
+  }
+  const endpoint = base ? `${base}/api/backend/status` : './api/backend/status';
+  try {
+    const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const timer = ctrl ? setTimeout(() => ctrl.abort(), options.timeoutMs || 4000) : null;
+    const resp = await fetch(endpoint, {
+      headers: { Accept: 'application/json' },
+      signal: ctrl?.signal,
+    }).finally(() => {
+      if (timer) clearTimeout(timer);
+    });
+    if (!resp.ok) return null;
+    return await resp.json();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Unwrap proxy ?url= parameter and classify direct media container vs HLS playlist.
+ * Prevents binary containers (.mkv, .mp4, .webm, .mov) from ever being passed to Hls.js.
+ *
+ * @param {string} streamUrl
+ * @param {object | null} [sourceMeta]
+ * @returns {'hls' | 'video'}
+ */
+export function classifyDirectStreamKind(streamUrl, sourceMeta = null) {
+  let inspectUrl = String(streamUrl || '').trim();
+  if (inspectUrl.includes('/api/proxy/hls') || /[?&]url=/i.test(inspectUrl)) {
+    try {
+      const u = new URL(inspectUrl, 'https://proxy.local');
+      const inner = u.searchParams.get('url');
+      if (inner) inspectUrl = inner;
+    } catch {
+      try {
+        inspectUrl = decodeURIComponent(inspectUrl);
+      } catch {}
+    }
+  }
+  let cleanPath = inspectUrl.toLowerCase();
+  try {
+    cleanPath = new URL(inspectUrl).pathname.toLowerCase();
+  } catch {}
+
+  if (cleanPath.endsWith('.m3u8') || cleanPath.endsWith('.m3u') || /\.m3u8(?:$|\?|#)/i.test(inspectUrl)) {
+    return 'hls';
+  }
+  if (/\.(mp4|m4v|mkv|webm|mov|avi|flv)(?:$|\?|#)/i.test(cleanPath) || /\.(mp4|m4v|mkv|webm|mov)(?:$|\?|#)/i.test(inspectUrl)) {
+    return 'video';
+  }
+  if (sourceMeta?.type === 'direct') return 'video';
+  return 'hls';
+}
+
+/**
+ * Checks whether a given URL is a direct media stream (HLS m3u8, MP4, MKV, or proxied HLS stream)
  * and not an HTML webpage or iframe embed player.
  * @param {string} url
  * @returns {boolean}
@@ -419,6 +484,9 @@ export function isDirectStreamUrl(url) {
   if (
     lower.includes('.m3u8') ||
     lower.includes('.mp4') ||
+    lower.includes('.mkv') ||
+    lower.includes('.m4v') ||
+    lower.includes('.mov') ||
     lower.includes('.m4s') ||
     lower.includes('.webm') ||
     lower.includes('/api/proxy/hls') ||

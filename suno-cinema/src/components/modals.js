@@ -5,7 +5,7 @@ import { getMediaKey } from '../utils/storage.js';
 import { svgIcon } from './icons.js';
 import { escapeHtml } from './cards.js';
 
-export function renderSettingsSheet({ appearance, prefs, shield, profile }) {
+export function renderSettingsSheet({ appearance, prefs, shield, profile, backendStatus = null }) {
   const s = shield || { blockedCount: 0, navigationLock: true, strictFrameMode: false };
   return `<div class="sheet-backdrop" data-close-modal="true">
     <div class="sheet-card" role="dialog" aria-modal="true" aria-label="Suno Cinema Settings">
@@ -99,13 +99,37 @@ export function renderSettingsSheet({ appearance, prefs, shield, profile }) {
             ${svgIcon('sparkles', 12)} Sources &amp; Addons Hub
           </button>
         </div>
+        ${
+          backendStatus && (backendStatus.stremio?.addonCount > 0 || backendStatus.debrid?.configured)
+            ? `<div class="sources-status-strip">
+                ${
+                  backendStatus.stremio?.addonCount > 0
+                    ? `<span class="sources-status-pill is-on">${backendStatus.stremio.addonCount} Edge Addon${
+                        backendStatus.stremio.addonCount === 1 ? '' : 's'
+                      } Active</span>`
+                    : ''
+                }
+                ${
+                  backendStatus.debrid?.configured
+                    ? `<span class="sources-status-pill is-on">${
+                        String(backendStatus.debrid.provider || '').toLowerCase() === 'torbox' ? 'TorBox' : 'Real-Debrid'
+                      } Active (Edge)</span>`
+                    : ''
+                }
+              </div>`
+            : ''
+        }
         <div style="display:flex;flex-direction:column;gap:5px;">
           <label class="dim" style="font-size:11px;" for="pref-hls-proxy">HLS Edge Proxy URL (Cloudflare Worker or Local Node)</label>
           <input id="pref-hls-proxy" class="field-input" type="url" placeholder="e.g. https://your-proxy.workers.dev or http://localhost:3000" value="${escapeHtml(prefs.hlsProxyUrl || '')}" />
         </div>
         <div style="display:flex;flex-direction:column;gap:5px;">
           <label class="dim" style="font-size:11px;" for="pref-stremio-addon">Optional Stremio Stream Addon URL</label>
-          <input id="pref-stremio-addon" class="field-input" type="url" placeholder="https://your-addon.example.com" value="${escapeHtml(prefs.stremioAddonUrl || '')}" />
+          <input id="pref-stremio-addon" class="field-input" type="url" placeholder="${
+            backendStatus?.stremio?.addonCount > 0
+              ? 'Edge addons active — paste extra manifest URL to extend'
+              : 'https://your-addon.example.com'
+          }" value="${escapeHtml(prefs.stremioAddonUrl || '')}" />
         </div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
           <div style="display:flex;flex-direction:column;gap:5px;">
@@ -117,7 +141,9 @@ export function renderSettingsSheet({ appearance, prefs, shield, profile }) {
           </div>
           <div style="display:flex;flex-direction:column;gap:5px;">
             <label class="dim" style="font-size:11px;" for="pref-debrid-key">Debrid API Key</label>
-            <input id="pref-debrid-key" class="field-input" type="password" placeholder="Optional instant-cache token" value="${escapeHtml(prefs.debridApiKey || '')}" />
+            <input id="pref-debrid-key" class="field-input" type="password" placeholder="${
+              backendStatus?.debrid?.configured ? 'Edge Debrid Active (optional override)' : 'Optional instant-cache token'
+            }" value="${escapeHtml(prefs.debridApiKey || '')}" />
           </div>
         </div>
       </div>
@@ -320,13 +346,27 @@ export function renderStreamSourcesModal({
   const currentDebridProvider = debridProviderInput || prefs?.debridProvider || 'realdebrid';
   const currentDebridKey = debridKeyInput !== null ? debridKeyInput : prefs?.debridApiKey || '';
 
+  const edgeAddons = Array.isArray(backendStatus?.stremio?.addons) ? backendStatus.stremio.addons : [];
+  const dedupedAddonKeys = new Set(
+    enabledAddons.map((a) => String(a.url || '').replace(/\/manifest\.json\/?$/i, '').replace(/\/+$/, '').toLowerCase())
+  );
+  for (const ea of edgeAddons) {
+    const k = String(ea?.url || '').replace(/\/manifest\.json\/?$/i, '').replace(/\/+$/, '').toLowerCase();
+    if (k) dedupedAddonKeys.add(k);
+  }
+  const totalActiveAddons = dedupedAddonKeys.size || enabledAddons.length || Number(backendStatus?.stremio?.addonCount || 0);
+  const edgeDebridConfigured = Boolean(backendStatus?.debrid?.configured);
+  const edgeDebridProvider = String(backendStatus?.debrid?.provider || 'realdebrid').toLowerCase();
+  const effectiveDebridActive = Boolean(currentDebridKey || edgeDebridConfigured);
+  const effectiveProxyActive = Boolean(currentProxyVal || backendStatus?.status === 'ready');
+
   const tabs = [
-    { id: 'addons', label: 'Stremio Addons', count: enabledAddons.length },
-    { id: 'debrid', label: 'Debrid & Magnet', activeDot: Boolean(currentDebridKey) },
+    { id: 'addons', label: 'Stremio Addons', count: totalActiveAddons },
+    { id: 'debrid', label: 'Debrid & Magnet', activeDot: effectiveDebridActive },
     {
       id: 'proxy',
       label: 'Edge Proxy & Resolver',
-      activeDot: Boolean(currentProxyVal || currentCustomVal || currentMirrorsVal || currentJellyfinUrl),
+      activeDot: Boolean(effectiveProxyActive || currentCustomVal || currentMirrorsVal || currentJellyfinUrl),
     },
     { id: 'direct', label: 'Direct Stream' },
   ];
@@ -421,6 +461,25 @@ export function renderStreamSourcesModal({
                 })
                 .join('')}
             </div>`
+          : edgeAddons.length > 0
+          ? `<div class="sources-addon-list">
+              ${edgeAddons
+                .map((addon) => {
+                  const cleanLabel = addon.name || 'Stremio Addon';
+                  return `<article class="sources-addon-card">
+                    <div class="sources-addon-top">
+                      <div class="sources-addon-title-wrap">
+                        <strong class="sources-addon-name">${escapeHtml(cleanLabel)}</strong>
+                        <span class="sources-badge is-ok">Edge Active</span>
+                      </div>
+                      <span class="sources-badge is-subtle">Auto-Managed</span>
+                    </div>
+                    <div class="sources-addon-url">${escapeHtml(addon.url)}</div>
+                    <p class="sources-addon-desc">Running automatically via your Cloudflare Edge Proxy in parallel for movies &amp; series.</p>
+                  </article>`;
+                })
+                .join('')}
+            </div>`
           : `<div class="sources-empty-box">
               <strong>No Stremio addons connected yet</strong>
               <p class="dim">Add a Stremio stream addon manifest URL above to unlock direct HTTP/HLS or Debrid-cached streams across movies &amp; series. Public-domain films also auto-resolve via Archive.org when available.</p>
@@ -428,16 +487,23 @@ export function renderStreamSourcesModal({
       }
     </div>`;
   } else if (safeTab === 'debrid') {
+    const debridBadgeText = currentDebridKey
+      ? 'Configured (Custom)'
+      : edgeDebridConfigured
+      ? `Edge Active (${edgeDebridProvider === 'torbox' ? 'TorBox' : 'Real-Debrid'})`
+      : 'Optional';
     panelHtml = `<div class="sources-panel" role="tabpanel" aria-label="Debrid and Magnet">
       <form id="sources-debrid-form" class="sources-card">
         <div class="sources-card-head">
           <strong>Instant-Cache Debrid Key</strong>
-          <span class="sources-badge ${currentDebridKey ? 'is-ok' : 'is-muted'}">${
-      currentDebridKey ? 'Configured' : 'Optional'
-    }</span>
+          <span class="sources-badge ${effectiveDebridActive ? 'is-ok' : 'is-muted'}">${escapeHtml(debridBadgeText)}</span>
         </div>
         <p class="dim sources-card-sub">
-          Pair Real-Debrid or TorBox with Stremio torrent addons to convert top 4K/1080p cached torrents into instant direct streams (requires local Node server or Cloudflare Edge Proxy).
+          ${
+            !currentDebridKey && edgeDebridConfigured
+              ? `Real-Debrid instant cache is already active and encrypted on your Cloudflare Edge Proxy. Only paste a token below if you want to override it in this browser.`
+              : `Pair Real-Debrid or TorBox with Stremio torrent addons to convert top 4K/1080p cached torrents into instant direct streams (requires local Node server or Cloudflare Edge Proxy).`
+          }
         </p>
         <div class="sources-grid-2">
           <div class="sources-field">
@@ -453,7 +519,7 @@ export function renderStreamSourcesModal({
               id="sources-debrid-key"
               class="field-input"
               type="password"
-              placeholder="Paste Real-Debrid or TorBox token"
+              placeholder="${!currentDebridKey && edgeDebridConfigured ? 'Using encrypted Edge Proxy token (optional override)' : 'Paste Real-Debrid or TorBox token'}"
               value="${escapeHtml(currentDebridKey)}"
               autocomplete="off"
             />
@@ -468,9 +534,9 @@ export function renderStreamSourcesModal({
           <span class="sources-badge is-type">Torrent → Stream</span>
         </div>
         ${
-          !currentDebridKey
+          !effectiveDebridActive
             ? `<div class="sources-alert is-warn">Save a Real-Debrid or TorBox API key above (with Node server or Edge Proxy) before launching magnet links.</div>`
-            : ''
+            : `<div class="sources-proxy-status is-ok">Debrid Instant Cache is ready — paste any magnet link or infoHash below to stream directly.</div>`
         }
         <div class="sources-field">
           <label class="dim" for="sources-magnet-input">Magnet URI or 40-char InfoHash</label>
@@ -604,9 +670,15 @@ export function renderStreamSourcesModal({
                 backendStatus.tmdb?.configured ? 'Configured' : 'Missing'
               }</span>
                   <span class="sources-badge ${backendStatus.debrid?.configured ? 'is-ok' : 'is-muted'}">Debrid: ${
-                backendStatus.debrid?.provider || 'None'
+                backendStatus.debrid?.configured
+                  ? edgeDebridProvider === 'torbox'
+                    ? 'TorBox Active'
+                    : 'Real-Debrid Active'
+                  : 'None'
               }</span>
-                  <span class="sources-badge is-ok">Stremio Addons: Active</span>
+                  <span class="sources-badge is-ok">Stremio Addons: ${
+                Number(backendStatus.stremio?.addonCount || totalActiveAddons || 0)
+              } Active</span>
                   <span class="sources-badge ${backendStatus.jellyfin?.configured ? 'is-ok' : 'is-muted'}">Jellyfin: ${
                 backendStatus.jellyfin?.configured ? 'Connected' : 'Unconfigured'
               }</span>
@@ -706,14 +778,24 @@ export function renderStreamSourcesModal({
       </div>
 
       <div class="sources-status-strip">
-        <span class="sources-status-pill ${enabledAddons.length > 0 ? 'is-on' : ''}">
-          ${enabledAddons.length} Addon${enabledAddons.length === 1 ? '' : 's'} Active
+        <span class="sources-status-pill ${totalActiveAddons > 0 ? 'is-on' : ''}">
+          ${totalActiveAddons} Addon${totalActiveAddons === 1 ? '' : 's'} Active${
+    enabledAddons.length === 0 && edgeAddons.length > 0 ? ' (Edge)' : ''
+  }
         </span>
-        <span class="sources-status-pill ${currentDebridKey ? 'is-on' : ''}">
-          ${currentDebridKey ? (currentDebridProvider === 'torbox' ? 'TorBox Connected' : 'Real-Debrid Connected') : 'Debrid Not Set'}
+        <span class="sources-status-pill ${effectiveDebridActive ? 'is-on' : ''}">
+          ${
+            currentDebridKey
+              ? currentDebridProvider === 'torbox'
+                ? 'TorBox Connected'
+                : 'Real-Debrid Connected'
+              : edgeDebridConfigured
+              ? `${edgeDebridProvider === 'torbox' ? 'TorBox' : 'Real-Debrid'} Active (Edge)`
+              : 'Debrid Not Set'
+          }
         </span>
-        <span class="sources-status-pill ${currentProxyVal ? 'is-on' : ''}">
-          ${currentProxyVal ? 'Edge Proxy Ready' : 'Same-Origin / Direct'}
+        <span class="sources-status-pill ${effectiveProxyActive ? 'is-on' : ''}">
+          ${effectiveProxyActive ? 'Edge Proxy Ready' : 'Same-Origin / Direct'}
         </span>
       </div>
 
