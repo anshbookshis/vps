@@ -954,7 +954,6 @@ export const CATALOG_ITEMS = [
     "overview": "K discovers a buried secret that threatens to plunge what remains of society into chaos.",
     "poster": "https://m.media-amazon.com/images/M/MV5BNzA1Njg4NzYxOV5BMl5BanBnXkFtZTgwODk5NjU3MzI@._V1_UX600_.jpg",
     "backdrop": "https://m.media-amazon.com/images/M/MV5BNzA1Njg4NzYxOV5BMl5BanBnXkFtZTgwODk5NjU3MzI@._V1_UX600_.jpg",
-    "hlsStreamUrl": "https://cph-p2p-msl.akamaized.net/hls/live/2000341/test/master.m3u8",
     "palette": [
       "#00f0ff",
       "#ff5e62",
@@ -1099,7 +1098,6 @@ export const CATALOG_ITEMS = [
     "overview": "A team of explorers travel through a wormhole in space in an attempt to ensure humanity's survival.",
     "poster": "https://m.media-amazon.com/images/M/MV5BYzdjMDAxZGItMjI2My00ODA1LTlkNzItOWFjMDU5ZDJlYWY3XkEyXkFqcGc@._V1_UX600_.jpg",
     "backdrop": "https://m.media-amazon.com/images/M/MV5BYzdjMDAxZGItMjI2My00ODA1LTlkNzItOWFjMDU5ZDJlYWY3XkEyXkFqcGc@._V1_UX600_.jpg",
-    "hlsStreamUrl": "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8",
     "palette": [
       "#38bdf8",
       "#f59e0b",
@@ -3082,7 +3080,6 @@ export const CATALOG_ITEMS = [
     "overview": "Enter a world in the distant future, where Bounty Hunters roam the solar system. Spike and Jet, bounty hunting partners, set out on journeys in an ever struggling effort to win bounty rewards to survive.\nWhile traveling, they meet up with other very interesting people. Could Faye, the beautiful and ",
     "poster": "https://s4.anilist.co/file/anilistcdn/media/anime/cover/large/bx1-GCsPm7waJ4kS.png",
     "backdrop": "https://s4.anilist.co/file/anilistcdn/media/anime/banner/1-OquNCNB6srGe.jpg",
-    "hlsStreamUrl": "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8",
     "palette": [
       "#f16b50",
       "#00f0ff",
@@ -3705,6 +3702,7 @@ export const CATALOG_ITEMS = [
   {
     "id": "movie:test-bbb",
     "tmdbId": "test-bbb",
+    "imdbId": "tt1254207",
     "mediaType": "movie",
     "title": "Big Buck Bunny (Direct HLS)",
     "year": "2008",
@@ -3716,15 +3714,18 @@ export const CATALOG_ITEMS = [
       "Short",
       "Comedy"
     ],
-    "overview": "Open source computer-animated comedy short film by the Blender Institute streaming via direct 1080p HLS.",
-    "poster": "https://upload.wikimedia.org/wikipedia/commons/thumb/c/c5/Big_buck_bunny_poster_big.jpg/600px-Big_buck_bunny_poster_big.jpg",
-    "backdrop": "https://upload.wikimedia.org/wikipedia/commons/thumb/c/c5/Big_buck_bunny_poster_big.jpg/1280px-Big_buck_bunny_poster_big.jpg",
+    "overview": "Open source computer-animated comedy short film by the Blender Institute streaming via direct 1080p CORS HLS.",
+    "poster": "https://images.metahub.space/poster/medium/tt1254207/img",
+    "backdrop": "https://images.metahub.space/background/medium/tt1254207/img",
     "palette": [
       "#1db954",
       "#00f0ff",
       "#0a1014"
     ],
     "hlsStreamUrl": "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8",
+    "hlsMirrors": [
+      "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8"
+    ],
     "sonic": {
       "moodId": "indie-tape",
       "bpm": 110,
@@ -3743,6 +3744,7 @@ export const CATALOG_ITEMS = [
   {
     "id": "movie:test-tos",
     "tmdbId": "test-tos",
+    "imdbId": "tt2285752",
     "mediaType": "movie",
     "title": "Tears of Steel (Direct HLS)",
     "year": "2012",
@@ -3753,15 +3755,20 @@ export const CATALOG_ITEMS = [
       "Sci-Fi",
       "Short"
     ],
-    "overview": "Open source science fiction short film exploring a dystopian future Amsterdam with VFX created using Blender, streaming via live Akamai HLS.",
-    "poster": "https://upload.wikimedia.org/wikipedia/commons/thumb/6/6f/Tears_of_Steel_poster.jpg/600px-Tears_of_Steel_poster.jpg",
-    "backdrop": "https://upload.wikimedia.org/wikipedia/commons/thumb/6/6f/Tears_of_Steel_poster.jpg/1280px-Tears_of_Steel_poster.jpg",
+    "overview": "Open source science fiction short film exploring a dystopian future Amsterdam with VFX created using Blender, streaming via multi-language HLS with mirror failover.",
+    "poster": "https://images.metahub.space/poster/medium/tt2285752/img",
+    "backdrop": "https://images.metahub.space/background/medium/tt2285752/img",
     "palette": [
       "#ff5e62",
       "#00f0ff",
       "#0b0c10"
     ],
-    "hlsStreamUrl": "https://cph-p2p-msl.akamaized.net/hls/live/2000341/test/master.m3u8",
+    "hlsStreamUrl": "https://demo.unified-streaming.com/k8s/features/stable/video/tears-of-steel/tears-of-steel-multi-lang.ism/.m3u8",
+    "hlsMirrors": [
+      "https://demo.unified-streaming.com/k8s/features/stable/video/tears-of-steel/tears-of-steel-multi-lang.ism/.m3u8",
+      "https://test-streams.mux.dev/tos_ismc/main.m3u8",
+      "https://cph-p2p-msl.akamaized.net/hls/live/2000341/test/master.m3u8"
+    ],
     "sonic": {
       "moodId": "imax-sub",
       "bpm": 92,
@@ -3774,6 +3781,89 @@ export const CATALOG_ITEMS = [
         "warmth": 0.45,
         "scale": 0.88,
         "tension": 0.82
+      }
+    }
+  },
+  {
+    "id": "movie:test-sintel",
+    "tmdbId": "test-sintel",
+    "imdbId": "tt1727587",
+    "mediaType": "movie",
+    "title": "Sintel (Direct HLS)",
+    "year": "2010",
+    "creator": "Colin Levy / Blender Foundation",
+    "runtime": "15m",
+    "rating": "8.4",
+    "genres": [
+      "Fantasy",
+      "Animation",
+      "Short"
+    ],
+    "overview": "Open-source fantasy animated short film by the Blender Institute following Sintel across mountains and ruins on a quest for a lost dragon.",
+    "poster": "https://images.metahub.space/poster/medium/tt1727587/img",
+    "backdrop": "https://images.metahub.space/background/medium/tt1727587/img",
+    "palette": [
+      "#f59e0b",
+      "#ff5e62",
+      "#0e0b0a"
+    ],
+    "hlsStreamUrl": "https://d2zihajmogu5jn.cloudfront.net/sintel/master.m3u8",
+    "hlsMirrors": [
+      "https://d2zihajmogu5jn.cloudfront.net/sintel/master.m3u8"
+    ],
+    "sonic": {
+      "moodId": "lofi-rain",
+      "bpm": 82,
+      "texture": "Mythic Orchestral & Cello",
+      "listenBefore": "Jan Morgenstern — Sintel Suite",
+      "cooldownCue": "Ember strings & windswept flute",
+      "vector": {
+        "pulse": 0.62,
+        "nocturne": 0.78,
+        "warmth": 0.74,
+        "scale": 0.86,
+        "tension": 0.76
+      }
+    }
+  },
+  {
+    "id": "movie:test-angel-one",
+    "tmdbId": "test-angel-one",
+    "mediaType": "movie",
+    "title": "Angel One (Multi-Audio HLS)",
+    "year": "2016",
+    "creator": "Shaka Open Cinema",
+    "runtime": "1m",
+    "rating": "8.1",
+    "genres": [
+      "Sci-Fi",
+      "Short",
+      "Animation"
+    ],
+    "overview": "Multi-language HLS showcase featuring 5 selectable audio tracks and embedded WebVTT subtitle tracks for testing ABR quality, Audio, and CC controls.",
+    "poster": "",
+    "backdrop": "",
+    "palette": [
+      "#00f0ff",
+      "#e50914",
+      "#090b12"
+    ],
+    "hlsStreamUrl": "https://storage.googleapis.com/shaka-demo-assets/angel-one-hls/hls.m3u8",
+    "hlsMirrors": [
+      "https://storage.googleapis.com/shaka-demo-assets/angel-one-hls/hls.m3u8"
+    ],
+    "sonic": {
+      "moodId": "midnight-synth",
+      "bpm": 100,
+      "texture": "Retro Starship Telemetry Synth",
+      "listenBefore": "M83 or Jerry Goldsmith",
+      "cooldownCue": "Bridge console ambient hum",
+      "vector": {
+        "pulse": 0.78,
+        "nocturne": 0.74,
+        "warmth": 0.48,
+        "scale": 0.82,
+        "tension": 0.7
       }
     }
   }

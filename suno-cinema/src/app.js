@@ -6,6 +6,13 @@ import {
   buildVidriftCommand,
   VIDRIFT_ORIGIN,
   isDirectStreamUrl,
+  fetchStreamSources,
+  cleanProxyUrl,
+  cleanAddonUrl,
+  isPlayableDirectSource,
+  getPlayableHlsNodes,
+  createFailoverState,
+  recordFailoverAttempt,
 } from './utils/vidrift.js';
 import { antiRedirectGuard } from './utils/anti-redirect.js';
 import {
@@ -71,6 +78,8 @@ import {
   resolveFullMetadata,
   searchAllMedia,
   fetchTvSeasonsData,
+  fetchFreeSubtitles,
+  loadSubtitleTrackAsVttUrl,
 } from './utils/client-api.js';
 
 const rootEl = document.getElementById('app');
@@ -135,6 +144,31 @@ const state = {
   activeSeason: 1,
   activeEpisode: 1,
   playerOpen: false,
+  resolvedSources: [],
+  activeSourceIndex: 0,
+  failoverState: null,
+  resolvingStream: false,
+  subtitlesList: [],
+  activeExternalSubId: 'off',
+  activeExternalSubBlobUrl: null,
+  hudOpenMenu: null,
+  hudVisible: true,
+  hlsTelemetry: {
+    height: 0,
+    width: 0,
+    bitrateMbps: 0,
+    bufferSec: 0,
+    levelIndex: -1,
+    levels: [],
+    audioTracks: [],
+    audioTrackIndex: -1,
+    subtitleTracks: [],
+    subtitleTrackIndex: -1,
+    speed: 1,
+    nodeName: '',
+    loading: false,
+    stalled: false,
+  },
   livePlayback: { currentTime: 0, duration: 0 },
   seasonsCache: new Map(),
   toast: '',
@@ -250,8 +284,34 @@ function getAllKnownPool() {
 }
 
 let activeHlsInstance = null;
+let hlsSessionSeq = 0;
+let activeLaunchSeq = 0;
+let stallWatchdogTimer = null;
+let telemetryTimer = null;
+let hudIdleTimer = null;
+let lastExternalSubId = '';
+
+function revokeActiveExternalSubBlob() {
+  if (state.activeExternalSubBlobUrl && typeof URL !== 'undefined' && typeof URL.revokeObjectURL === 'function') {
+    try {
+      URL.revokeObjectURL(state.activeExternalSubBlobUrl);
+    } catch {}
+  }
+  state.activeExternalSubBlobUrl = null;
+}
+
+function clearPlayerTimers() {
+  clearInterval(stallWatchdogTimer);
+  clearInterval(telemetryTimer);
+  clearTimeout(hudIdleTimer);
+  stallWatchdogTimer = null;
+  telemetryTimer = null;
+  hudIdleTimer = null;
+}
 
 function destroyHlsInstance() {
+  hlsSessionSeq += 1;
+  clearPlayerTimers();
   if (activeHlsInstance) {
     try {
       activeHlsInstance.destroy();
@@ -278,22 +338,425 @@ function loadHlsScriptOnce() {
   });
 }
 
-function fallbackToEmbedPlayer(item, message = 'Switched to VidLink shield player.') {
+function getActiveResolvedSource() {
+  if (!Array.isArray(state.resolvedSources) || !state.resolvedSources.length) return null;
+  return state.resolvedSources[state.activeSourceIndex] || state.resolvedSources[0] || null;
+}
+
+function computeBufferedSeconds(videoEl) {
+  if (!videoEl || !videoEl.buffered || videoEl.buffered.length === 0) return 0;
+  const cur = Number(videoEl.currentTime || 0);
+  for (let i = 0; i < videoEl.buffered.length; i += 1) {
+    const start = videoEl.buffered.start(i);
+    const end = videoEl.buffered.end(i);
+    if (cur >= start - 0.5 && cur <= end + 0.5) {
+      return Math.max(0, end - cur);
+    }
+  }
+  return Math.max(0, videoEl.buffered.end(videoEl.buffered.length - 1) - cur);
+}
+
+function wakePlayerHud(keepOpen = false) {
+  state.hudVisible = true;
+  const playerRoot = document.getElementById('n77-player');
+  if (playerRoot) playerRoot.classList.add('is-hud-visible');
+  clearTimeout(hudIdleTimer);
+  const videoEl = document.getElementById('hls-video-player');
+  if (keepOpen || !videoEl || videoEl.paused || state.hudOpenMenu) return;
+  hudIdleTimer = setTimeout(() => {
+    const v = document.getElementById('hls-video-player');
+    if (v && !v.paused && !state.hudOpenMenu) {
+      state.hudVisible = false;
+      document.getElementById('n77-player')?.classList.remove('is-hud-visible');
+    }
+  }, 3000);
+}
+
+function updateHudControlsVisuals() {
+  const videoEl = document.getElementById('hls-video-player');
+  if (!videoEl) return;
+
+  const isPaused = videoEl.paused;
+  const playIcon = svgIcon(isPaused ? 'play' : 'pause', 20);
+  const centerIcon = svgIcon(isPaused ? 'play' : 'pause', 32);
+  const barBtn = document.getElementById('n77-play-btn');
+  const centerBtn = document.getElementById('n77-center-play-btn');
+  if (barBtn) barBtn.innerHTML = playIcon;
+  if (centerBtn) centerBtn.innerHTML = centerIcon;
+
+  const playerRoot = document.getElementById('n77-player');
+  if (playerRoot) {
+    playerRoot.classList.toggle('is-paused', isPaused);
+    if (isPaused) wakePlayerHud(true);
+  }
+
+  const muteBtn = document.getElementById('n77-mute-btn');
+  const volSlider = document.getElementById('n77-vol-slider');
+  if (muteBtn) muteBtn.innerHTML = svgIcon(videoEl.muted || videoEl.volume === 0 ? 'volumeOff' : 'volumeOn', 19);
+  if (volSlider) volSlider.value = videoEl.muted ? '0' : String(videoEl.volume ?? 1);
+
+  const cur = Number(videoEl.currentTime || 0);
+  const dur = Number(videoEl.duration || 0);
+  const readout = document.getElementById('n77-time-readout');
+  if (readout) {
+    readout.textContent = dur > 0 && Number.isFinite(dur) ? `${formatTime(cur)} / ${formatTime(dur)}` : `${formatTime(cur)} / LIVE`;
+  }
+
+  const pct = dur > 0 && Number.isFinite(dur) ? Math.min(100, Math.max(0, (cur / dur) * 100)) : 0;
+  const progBar = document.getElementById('n77-timeline-progress');
+  if (progBar) progBar.style.width = `${pct.toFixed(2)}%`;
+
+  const bufAhead = computeBufferedSeconds(videoEl);
+  const bufEnd = cur + bufAhead;
+  const bufPct = dur > 0 && Number.isFinite(dur) ? Math.min(100, Math.max(0, (bufEnd / dur) * 100)) : 0;
+  const bufBar = document.getElementById('n77-timeline-buffered');
+  if (bufBar) bufBar.style.width = `${bufPct.toFixed(2)}%`;
+
+  const wrap = document.getElementById('n77-timeline-wrap');
+  if (wrap) wrap.setAttribute('aria-valuenow', String(Math.round(pct)));
+
+  updateTelemetryBadge(videoEl, bufAhead);
+}
+
+function updateTelemetryBadge(videoEl, precomputedBuf) {
+  const badge = document.getElementById('n77-telemetry-badge');
+  if (!badge) return;
+  const t = state.hlsTelemetry;
+  const buf = typeof precomputedBuf === 'number' ? precomputedBuf : computeBufferedSeconds(videoEl);
+  t.bufferSec = buf;
+
+  const h = t.height || videoEl?.videoHeight || 0;
+  const resText = h > 0 ? `${h}p` : 'HLS';
+  const mbpsText = t.bitrateMbps > 0 ? `${t.bitrateMbps.toFixed(1)} Mbps` : '';
+  const bufText = `${buf.toFixed(1)}s buf`;
+  const activeSrc = getActiveResolvedSource();
+  const nodeTag = activeSrc?.node || t.nodeName || 'Direct';
+
+  badge.textContent = [resText, mbpsText, bufText, nodeTag].filter(Boolean).join(' • ');
+  badge.classList.toggle('is-warn', Boolean(t.stalled || (videoEl && !videoEl.paused && buf < 2)));
+
+  const qLabel = document.getElementById('n77-quality-label');
+  if (qLabel) {
+    if (t.levelIndex === -1 || !activeHlsInstance) {
+      qLabel.textContent = h > 0 ? `Auto (${h}p)` : 'Auto';
+    } else {
+      const lvl = t.levels.find((l) => l.index === t.levelIndex);
+      qLabel.textContent = lvl ? `${lvl.height}p` : 'Auto';
+    }
+  }
+
+  const aLabel = document.getElementById('n77-audio-label');
+  if (aLabel) {
+    const tr = t.audioTracks.find((x) => x.id === t.audioTrackIndex);
+    aLabel.textContent = tr ? (tr.lang || tr.name || 'Audio').slice(0, 8) : 'Audio';
+  }
+
+  const ccLabel = document.getElementById('n77-cc-label');
+  const ccBtn = document.getElementById('n77-menu-subtitles');
+  const hasSubOn = t.subtitleTrackIndex >= 0 || state.activeExternalSubId !== 'off';
+  if (ccLabel) ccLabel.textContent = hasSubOn ? 'CC ON' : 'CC';
+  if (ccBtn) ccBtn.classList.toggle('is-active', hasSubOn);
+
+  const spLabel = document.getElementById('n77-speed-label');
+  if (spLabel) spLabel.textContent = `${t.speed}x`;
+
+  const mLabel = document.getElementById('n77-mirror-label');
+  if (mLabel) {
+    const shortName = activeSrc?.name ? activeSrc.name.split('(')[0].trim().slice(0, 14) : 'Node';
+    mLabel.textContent = shortName;
+  }
+}
+
+function setSpinnerState(visible, label = 'Buffering stream...') {
+  const el = document.getElementById('n77-spinner');
+  const lbl = document.getElementById('n77-spinner-label');
+  if (lbl) lbl.textContent = label;
+  if (el) el.hidden = !visible;
+}
+
+function flashSeekFeedback(side) {
+  const el = document.getElementById(side === 'left' ? 'n77-seek-fb-left' : 'n77-seek-fb-right');
+  if (!el) return;
+  el.classList.remove('is-flash');
+  void el.offsetWidth;
+  el.classList.add('is-flash');
+}
+
+function seekVideoBy(deltaSeconds) {
+  const videoEl = document.getElementById('hls-video-player');
+  if (!videoEl) return;
+  const dur = Number.isFinite(videoEl.duration) ? videoEl.duration : Infinity;
+  const next = Math.max(0, Math.min(dur, (videoEl.currentTime || 0) + deltaSeconds));
+  try {
+    videoEl.currentTime = next;
+  } catch {}
+  flashSeekFeedback(deltaSeconds < 0 ? 'left' : 'right');
+  wakePlayerHud();
+  updateHudControlsVisuals();
+}
+
+function toggleVideoPlayPause() {
+  const videoEl = document.getElementById('hls-video-player');
+  if (!videoEl) return;
+  if (videoEl.paused) {
+    videoEl.play().catch(() => {});
+  } else {
+    videoEl.pause();
+  }
+  wakePlayerHud();
+  updateHudControlsVisuals();
+}
+
+async function applyExternalSubtitleTrack(trackId) {
+  const videoEl = document.getElementById('hls-video-player');
+  if (!videoEl) return;
+
+  // Remove old external <track>
+  videoEl.querySelectorAll('track[data-suno-ext-sub="true"]').forEach((t) => t.remove());
+  revokeActiveExternalSubBlob();
+
+  if (trackId === 'off') {
+    state.activeExternalSubId = 'off';
+    if (activeHlsInstance) {
+      activeHlsInstance.subtitleTrack = -1;
+      activeHlsInstance.subtitleDisplay = false;
+    }
+    state.hlsTelemetry.subtitleTrackIndex = -1;
+    Array.from(videoEl.textTracks || []).forEach((tt) => {
+      tt.mode = 'disabled';
+    });
+    updateHudControlsVisuals();
+    return;
+  }
+
+  const track = state.subtitlesList.find((s) => s.id === trackId);
+  if (!track) return;
+
+  showToast(`Loading ${track.label}...`);
+  const vttData = await loadSubtitleTrackAsVttUrl(track, { hlsProxyUrl: state.prefs.hlsProxyUrl });
+  if (!vttData?.url) {
+    showToast('Unable to load subtitle track');
+    return;
+  }
+
+  if (activeHlsInstance) {
+    activeHlsInstance.subtitleTrack = -1;
+    activeHlsInstance.subtitleDisplay = false;
+  }
+  state.hlsTelemetry.subtitleTrackIndex = -1;
+  Array.from(videoEl.textTracks || []).forEach((tt) => {
+    tt.mode = 'disabled';
+  });
+
+  if (vttData.isBlob) state.activeExternalSubBlobUrl = vttData.url;
+  state.activeExternalSubId = track.id;
+  lastExternalSubId = track.id;
+
+  const trackEl = document.createElement('track');
+  trackEl.kind = 'subtitles';
+  trackEl.label = track.label;
+  trackEl.srclang = track.lang || 'en';
+  trackEl.src = vttData.url;
+  trackEl.default = true;
+  trackEl.setAttribute('data-suno-ext-sub', 'true');
+  videoEl.appendChild(trackEl);
+
+  if (trackEl.track) {
+    trackEl.track.mode = 'showing';
+  }
+  updateHudControlsVisuals();
+  showToast(`Subtitles: ${track.label}`);
+}
+
+function toggleClosedCaptionsShortcut() {
+  const videoEl = document.getElementById('hls-video-player');
+  if (!videoEl) return;
+  const t = state.hlsTelemetry;
+  const currentlyOn = t.subtitleTrackIndex >= 0 || state.activeExternalSubId !== 'off';
+  if (currentlyOn) {
+    applyExternalSubtitleTrack('off');
+    showToast('Subtitles OFF');
+    return;
+  }
+  if (t.subtitleTracks.length > 0 && activeHlsInstance) {
+    activeHlsInstance.subtitleTrack = 0;
+    activeHlsInstance.subtitleDisplay = true;
+    t.subtitleTrackIndex = 0;
+    updateHudControlsVisuals();
+    showToast(`Subtitles: ${t.subtitleTracks[0].name || t.subtitleTracks[0].lang || 'Track 1'}`);
+    return;
+  }
+  if (state.subtitlesList.length > 0) {
+    const preferred =
+      state.subtitlesList.find((s) => s.id === lastExternalSubId) || state.subtitlesList[0];
+    applyExternalSubtitleTrack(preferred.id);
+    return;
+  }
+  showToast('No subtitle tracks available for this stream');
+}
+
+function renderHudPopupMenu() {
+  const container = document.getElementById('n77-hud-popups');
+  if (!container) return;
+  const menu = state.hudOpenMenu;
+  if (!menu) {
+    container.innerHTML = '';
+    return;
+  }
+
+  const t = state.hlsTelemetry;
+  let title = '';
+  let bodyHtml = '';
+
+  if (menu === 'quality') {
+    title = 'Video Quality (ABR)';
+    const opts = [
+      `<button type="button" class="n77-menu-opt ${t.levelIndex === -1 ? 'is-active' : ''}" data-hls-level="-1">
+        <span>Auto (Adaptive)${t.height && t.levelIndex === -1 ? ` • ${t.height}p` : ''}</span>
+        <span>${t.levelIndex === -1 ? '✓' : ''}</span>
+      </button>`,
+      ...t.levels.map(
+        (lvl) => `<button type="button" class="n77-menu-opt ${t.levelIndex === lvl.index ? 'is-active' : ''}" data-hls-level="${lvl.index}">
+          <span>${lvl.height ? `${lvl.height}p` : `Level ${lvl.index + 1}`}${lvl.bitrate ? ` (${(lvl.bitrate / 1e6).toFixed(1)} Mbps)` : ''}</span>
+          <span>${t.levelIndex === lvl.index ? '✓' : ''}</span>
+        </button>`
+      ),
+    ];
+    bodyHtml = opts.join('');
+  } else if (menu === 'audio') {
+    title = 'Audio Track';
+    bodyHtml =
+      t.audioTracks.length > 0
+        ? t.audioTracks
+            .map(
+              (tr) => `<button type="button" class="n77-menu-opt ${t.audioTrackIndex === tr.id ? 'is-active' : ''}" data-hls-audio="${tr.id}">
+                <span>${escapeHtml(tr.name || tr.lang || `Audio ${tr.id + 1}`)}</span>
+                <span>${t.audioTrackIndex === tr.id ? '✓' : ''}</span>
+              </button>`
+            )
+            .join('')
+        : `<div class="dim" style="padding:8px 10px;font-size:12px;">Default stream audio</div>`;
+  } else if (menu === 'subtitles') {
+    title = 'Subtitles / CC (SRT→VTT)';
+    const offActive = t.subtitleTrackIndex < 0 && state.activeExternalSubId === 'off';
+    const items = [
+      `<button type="button" class="n77-menu-opt ${offActive ? 'is-active' : ''}" data-hls-sub-off="true">
+        <span>Off</span><span>${offActive ? '✓' : ''}</span>
+      </button>`,
+      ...t.subtitleTracks.map(
+        (st) => `<button type="button" class="n77-menu-opt ${t.subtitleTrackIndex === st.id ? 'is-active' : ''}" data-hls-sub="${st.id}">
+          <span>[HLS] ${escapeHtml(st.name || st.lang || `CC ${st.id + 1}`)}</span>
+          <span>${t.subtitleTrackIndex === st.id ? '✓' : ''}</span>
+        </button>`
+      ),
+      ...state.subtitlesList.map(
+        (ext) => `<button type="button" class="n77-menu-opt ${state.activeExternalSubId === ext.id ? 'is-active' : ''}" data-ext-sub="${escapeHtml(ext.id)}">
+          <span>[OS] ${escapeHtml(ext.label)}</span>
+          <span>${state.activeExternalSubId === ext.id ? '✓' : ''}</span>
+        </button>`
+      ),
+    ];
+    bodyHtml = items.join('');
+  } else if (menu === 'speed') {
+    title = 'Playback Speed';
+    bodyHtml = [0.5, 0.75, 1, 1.25, 1.5, 2]
+      .map(
+        (sp) => `<button type="button" class="n77-menu-opt ${t.speed === sp ? 'is-active' : ''}" data-hls-speed="${sp}">
+          <span>${sp === 1 ? 'Normal (1x)' : `${sp}x`}</span>
+          <span>${t.speed === sp ? '✓' : ''}</span>
+        </button>`
+      )
+      .join('');
+  } else if (menu === 'mirrors') {
+    title = 'Stream Mirrors & Nodes';
+    const failed = state.failoverState?.failedIndices || new Set();
+    bodyHtml =
+      state.resolvedSources.length > 0
+        ? state.resolvedSources
+            .map((src, idx) => {
+              const isAct = idx === state.activeSourceIndex;
+              const isFailed = failed.has(idx);
+              return `<button type="button" class="n77-menu-opt ${isAct ? 'is-active' : ''} ${isFailed ? 'is-failed' : ''}" data-pick-mirror="${idx}">
+                <span style="display:flex;flex-direction:column;align-items:flex-start;gap:2px;">
+                  <span>${escapeHtml(src.name || src.id)}</span>
+                  <span class="dim" style="font-size:10px;">${escapeHtml(src.quality || src.type)}${isFailed ? ' • Failed' : ''}</span>
+                </span>
+                <span>${isAct ? '✓' : ''}</span>
+              </button>`;
+            })
+            .join('')
+        : `<div class="dim" style="padding:8px 10px;font-size:12px;">No alternate mirrors resolved</div>`;
+  }
+
+  container.innerHTML = `<div class="n77-popup-card" role="menu">
+    <div class="n77-popup-head">
+      <span>${escapeHtml(title)}</span>
+      <button type="button" class="icon-btn" data-close-hud-menu="true" aria-label="Close menu" style="width:24px;height:24px;">
+        ${svgIcon('close', 14)}
+      </button>
+    </div>
+    <div class="n77-popup-list">${bodyHtml}</div>
+  </div>`;
+}
+
+function togglePlayerFullscreen() {
+  const target = document.getElementById('n77-player') || document.querySelector('.player-fullscreen');
+  if (!target || typeof document === 'undefined') return;
+  if (document.fullscreenElement) {
+    document.exitFullscreen?.().catch(() => {});
+  } else {
+    target.requestFullscreen?.().catch(() => {});
+  }
+}
+
+async function triggerHlsFailover(item, reason = 'Playback failed') {
+  if (!state.playerOpen || !item) return;
+  if (!state.failoverState && state.resolvedSources.length > 0) {
+    state.failoverState = createFailoverState(state.resolvedSources, state.activeSourceIndex);
+  }
+  const { next } = recordFailoverAttempt(state.failoverState, reason);
+  if (next && next.kind === 'hls') {
+    state.activeSourceIndex = next.index;
+    showToast(`Failover: ${next.source.name}`);
+    const videoEl = document.getElementById('hls-video-player');
+    if (videoEl) {
+      videoEl.dataset.embedUrl = next.source.url;
+      attachDirectVideoStream(videoEl, next.source.url, item, next.source);
+      renderHudPopupMenu();
+      updateHudControlsVisuals();
+      return;
+    }
+    syncPlayerMount({ forceReload: true });
+    return;
+  }
+
+  const embedUrl = next?.kind === 'embed' ? next.source.url : '';
+  fallbackToEmbedPlayer(
+    item,
+    'HLS mirrors unavailable or stalled. Switched to VidLink shield player.',
+    embedUrl
+  );
+}
+
+function fallbackToEmbedPlayer(item, message = 'Switched to VidLink shield player.', explicitUrl = '') {
   destroyHlsInstance();
+  revokeActiveExternalSubBlob();
   if (message) {
     showToast(message);
   }
 
-  const fallbackUrl = buildPlayerEmbedUrl(item, {
-    provider: 'vidlink',
-    themeId: state.appearance.theme,
-    autoplay: state.prefs.autoplay,
-    sub: state.prefs.sub,
-    dub: state.prefs.dub,
-    uiScale: state.prefs.uiScale,
-    season: state.activeSeason,
-    episode: state.activeEpisode,
-  });
+  const fallbackUrl =
+    explicitUrl ||
+    buildPlayerEmbedUrl(item, {
+      provider: 'vidlink',
+      themeId: state.appearance.theme,
+      autoplay: state.prefs.autoplay,
+      sub: state.prefs.sub,
+      dub: state.prefs.dub,
+      uiScale: state.prefs.uiScale,
+      season: state.activeSeason,
+      episode: state.activeEpisode,
+    });
 
   const frameBox = document.getElementById('player-frame-box');
   if (frameBox) {
@@ -344,25 +807,67 @@ function fallbackToEmbedPlayer(item, message = 'Switched to VidLink shield playe
   }
 }
 
-async function attachDirectVideoStream(videoEl, streamUrl, item) {
+async function attachDirectVideoStream(videoEl, streamUrl, item, sourceMeta = null) {
   if (!videoEl || !streamUrl) return;
 
   // Never feed non-stream or HTML embed URLs to Hls.js or video element
   if (!isDirectStreamUrl(streamUrl)) {
     console.warn('[Player] Rejecting non-stream URL for video player:', streamUrl);
-    fallbackToEmbedPlayer(item, 'Direct HLS stream unavailable for this title. Switched to VidLink shield player.');
+    triggerHlsFailover(item, 'Non-stream URL rejected');
     return;
   }
 
   destroyHlsInstance();
-
+  const sessionSeq = hlsSessionSeq;
   const key = getMediaKey(item);
   const saved = state.progressMap[key];
   let lastSavedSec = 0;
 
+  state.hlsTelemetry = {
+    height: 0,
+    width: 0,
+    bitrateMbps: 0,
+    bufferSec: 0,
+    levelIndex: -1,
+    levels: [],
+    audioTracks: [],
+    audioTrackIndex: -1,
+    subtitleTracks: [],
+    subtitleTrackIndex: -1,
+    speed: Number(videoEl.playbackRate || 1),
+    nodeName: sourceMeta?.node || 'Direct',
+    loading: true,
+    stalled: false,
+  };
+  setSpinnerState(true, `Connecting ${sourceMeta?.name || 'HLS stream'}...`);
+  wakePlayerHud(true);
+
+  let lastMediaTime = Number(videoEl.currentTime || 0);
+  let lastProgressAt = Date.now();
+  let bufferingSince = Date.now();
+  let didFailover = false;
+
+  const markPlayingHealthy = () => {
+    bufferingSince = 0;
+    lastProgressAt = Date.now();
+    state.hlsTelemetry.loading = false;
+    state.hlsTelemetry.stalled = false;
+    setSpinnerState(false);
+    updateHudControlsVisuals();
+  };
+
   videoEl.ontimeupdate = () => {
+    if (sessionSeq !== hlsSessionSeq) return;
     const cur = Number(videoEl.currentTime || 0);
     const dur = Number(videoEl.duration || 0);
+    if (Math.abs(cur - lastMediaTime) > 0.05) {
+      lastMediaTime = cur;
+      lastProgressAt = Date.now();
+      bufferingSince = 0;
+      state.hlsTelemetry.stalled = false;
+      state.hlsTelemetry.loading = false;
+      setSpinnerState(false);
+    }
     state.livePlayback = { currentTime: cur, duration: dur };
     if (Math.abs(cur - lastSavedSec) >= 5 && dur > 0) {
       lastSavedSec = cur;
@@ -373,35 +878,93 @@ async function attachDirectVideoStream(videoEl, streamUrl, item) {
         episode: state.activeEpisode,
       });
     }
+    updateHudControlsVisuals();
   };
+
+  videoEl.onplaying = markPlayingHealthy;
+  videoEl.oncanplay = () => {
+    if (sessionSeq !== hlsSessionSeq) return;
+    setSpinnerState(false);
+    updateHudControlsVisuals();
+  };
+  videoEl.onplay = () => wakePlayerHud();
+  videoEl.onpause = () => {
+    bufferingSince = 0;
+    wakePlayerHud(true);
+    updateHudControlsVisuals();
+  };
+  videoEl.onwaiting = () => {
+    if (sessionSeq !== hlsSessionSeq) return;
+    if (!bufferingSince) bufferingSince = Date.now();
+    state.hlsTelemetry.loading = true;
+    setSpinnerState(true, 'Buffering stream...');
+  };
+  videoEl.onstalled = () => {
+    if (sessionSeq !== hlsSessionSeq) return;
+    if (!bufferingSince) bufferingSince = Date.now();
+    state.hlsTelemetry.stalled = true;
+  };
+  videoEl.onvolumechange = () => updateHudControlsVisuals();
+  videoEl.onratechange = () => {
+    state.hlsTelemetry.speed = Number(videoEl.playbackRate || 1);
+    updateHudControlsVisuals();
+  };
+  videoEl.onprogress = () => updateHudControlsVisuals();
 
   videoEl.addEventListener(
     'loadedmetadata',
     () => {
+      if (sessionSeq !== hlsSessionSeq) return;
       if (saved?.currentTime > 15 && saved.currentTime < (videoEl.duration || Infinity)) {
         try {
           videoEl.currentTime = saved.currentTime;
         } catch {}
       }
+      updateHudControlsVisuals();
     },
     { once: true }
   );
 
   videoEl.onerror = () => {
-    console.error('[Player] Direct video element error. Falling back to VidLink shield player.');
-    fallbackToEmbedPlayer(item, 'Direct stream error. Switched to VidLink shield player.');
+    if (sessionSeq !== hlsSessionSeq || didFailover) return;
+    didFailover = true;
+    console.error('[Player] Direct video element error. Triggering failover.');
+    triggerHlsFailover(item, 'Direct video error');
   };
 
-  if (streamUrl.toLowerCase().includes('.mp4') || videoEl.canPlayType('application/vnd.apple.mpegurl')) {
+  // >6s Playback Stall Watchdog & 1s Telemetry updater
+  stallWatchdogTimer = setInterval(() => {
+    if (sessionSeq !== hlsSessionSeq || didFailover) return;
+    const now = Date.now();
+    const isPlayingIntent = !videoEl.paused && !videoEl.ended && !videoEl.seeking;
+    const stallRef = bufferingSince || lastProgressAt;
+    if (isPlayingIntent && videoEl.readyState < 3 && now - stallRef > 6000) {
+      didFailover = true;
+      console.warn('[HLS Watchdog] Playback stalled >6s. Failing over to next mirror...');
+      triggerHlsFailover(item, 'Playback stalled >6s');
+      return;
+    }
+    if (activeHlsInstance?.bandwidthEstimate) {
+      state.hlsTelemetry.bitrateMbps = activeHlsInstance.bandwidthEstimate / 1e6;
+    }
+    updateTelemetryBadge(videoEl);
+  }, 1000);
+
+  const lowerUrl = streamUrl.toLowerCase();
+  if (lowerUrl.includes('.mp4') && !lowerUrl.includes('.m3u8')) {
     videoEl.src = streamUrl;
     return;
   }
 
   const Hls = await loadHlsScriptOnce();
+  if (sessionSeq !== hlsSessionSeq) return;
+
   if (Hls && Hls.isSupported()) {
     const hls = new Hls({
       enableWorker: true,
-      lowLatencyMode: true,
+      lowLatencyMode: false,
+      backBufferLength: 60,
+      maxBufferLength: 30,
     });
     activeHlsInstance = hls;
 
@@ -409,35 +972,106 @@ async function attachDirectVideoStream(videoEl, streamUrl, item) {
     let mediaRetries = 0;
     const MAX_RETRIES = 2;
 
+    hls.on(Hls.Events.MANIFEST_PARSED, (_, data) => {
+      if (sessionSeq !== hlsSessionSeq) return;
+      const rawLevels = Array.isArray(data?.levels) ? data.levels : hls.levels || [];
+      const mappedLevels = rawLevels
+        .map((lvl, index) => ({
+          index,
+          height: Number(lvl.height || 0),
+          width: Number(lvl.width || 0),
+          bitrate: Number(lvl.bitrate || 0),
+        }))
+        .sort((a, b) => b.height - a.height || b.bitrate - a.bitrate);
+      state.hlsTelemetry.levels = mappedLevels;
+      state.hlsTelemetry.levelIndex = hls.currentLevel;
+      setSpinnerState(false);
+      updateHudControlsVisuals();
+      if (state.hudOpenMenu === 'quality') renderHudPopupMenu();
+    });
+
+    hls.on(Hls.Events.LEVEL_SWITCHED, (_, data) => {
+      if (sessionSeq !== hlsSessionSeq) return;
+      const lvl = hls.levels?.[data.level];
+      if (lvl) {
+        state.hlsTelemetry.height = Number(lvl.height || 0);
+        state.hlsTelemetry.width = Number(lvl.width || 0);
+        if (lvl.bitrate) state.hlsTelemetry.bitrateMbps = lvl.bitrate / 1e6;
+      }
+      state.hlsTelemetry.levelIndex = hls.autoLevelEnabled ? -1 : data.level;
+      updateHudControlsVisuals();
+    });
+
+    hls.on(Hls.Events.AUDIO_TRACKS_UPDATED, (_, data) => {
+      if (sessionSeq !== hlsSessionSeq) return;
+      const tracks = Array.isArray(data?.audioTracks) ? data.audioTracks : hls.audioTracks || [];
+      state.hlsTelemetry.audioTracks = tracks.map((tr, i) => ({
+        id: tr.id ?? i,
+        name: tr.name || tr.lang || `Audio ${i + 1}`,
+        lang: tr.lang || '',
+      }));
+      state.hlsTelemetry.audioTrackIndex = hls.audioTrack;
+      updateHudControlsVisuals();
+      if (state.hudOpenMenu === 'audio') renderHudPopupMenu();
+    });
+
+    hls.on(Hls.Events.AUDIO_TRACK_SWITCHED, (_, data) => {
+      if (sessionSeq !== hlsSessionSeq) return;
+      state.hlsTelemetry.audioTrackIndex = data.id;
+      updateHudControlsVisuals();
+    });
+
+    hls.on(Hls.Events.SUBTITLE_TRACKS_UPDATED, (_, data) => {
+      if (sessionSeq !== hlsSessionSeq) return;
+      const tracks = Array.isArray(data?.subtitleTracks) ? data.subtitleTracks : hls.subtitleTracks || [];
+      state.hlsTelemetry.subtitleTracks = tracks.map((st, i) => ({
+        id: st.id ?? i,
+        name: st.name || st.lang || `Subtitle ${i + 1}`,
+        lang: st.lang || '',
+      }));
+      state.hlsTelemetry.subtitleTrackIndex = hls.subtitleTrack;
+      updateHudControlsVisuals();
+      if (state.hudOpenMenu === 'subtitles') renderHudPopupMenu();
+    });
+
+    hls.on(Hls.Events.SUBTITLE_TRACK_SWITCH, (_, data) => {
+      if (sessionSeq !== hlsSessionSeq) return;
+      state.hlsTelemetry.subtitleTrackIndex = data.id;
+      updateHudControlsVisuals();
+    });
+
     hls.on(Hls.Events.ERROR, (event, data) => {
-      if (!data.fatal) return;
+      if (sessionSeq !== hlsSessionSeq || didFailover || !data.fatal) return;
 
       switch (data.type) {
         case Hls.ErrorTypes.NETWORK_ERROR:
           if (networkRetries < MAX_RETRIES) {
-            networkRetries++;
+            networkRetries += 1;
             console.warn(`[HLS] Network error retry ${networkRetries}/${MAX_RETRIES}...`);
             hls.startLoad();
           } else {
-            console.error('[HLS] Fatal network error after retries. Falling back to embed.');
-            fallbackToEmbedPlayer(item, 'HLS network error. Switched to VidLink shield player.');
+            didFailover = true;
+            console.error('[HLS] Fatal network error after retries. Failing over.');
+            triggerHlsFailover(item, 'HLS network error');
           }
           break;
 
         case Hls.ErrorTypes.MEDIA_ERROR:
           if (mediaRetries < MAX_RETRIES) {
-            mediaRetries++;
+            mediaRetries += 1;
             console.warn(`[HLS] Media error retry ${mediaRetries}/${MAX_RETRIES}...`);
             hls.recoverMediaError();
           } else {
-            console.error('[HLS] Fatal media error after retries. Falling back to embed.');
-            fallbackToEmbedPlayer(item, 'HLS media error. Switched to VidLink shield player.');
+            didFailover = true;
+            console.error('[HLS] Fatal media error after retries. Failing over.');
+            triggerHlsFailover(item, 'HLS media error');
           }
           break;
 
         default:
+          didFailover = true;
           console.error('[HLS] Unrecoverable fatal error:', data.type, data.details);
-          fallbackToEmbedPlayer(item, 'HLS playback error. Switched to VidLink shield player.');
+          triggerHlsFailover(item, data.details || 'Fatal HLS error');
           break;
       }
     });
@@ -447,7 +1081,8 @@ async function attachDirectVideoStream(videoEl, streamUrl, item) {
   } else if (videoEl.canPlayType('application/vnd.apple.mpegurl')) {
     videoEl.src = streamUrl;
   } else {
-    fallbackToEmbedPlayer(item, 'HLS playback is not supported in this browser. Switched to VidLink shield player.');
+    didFailover = true;
+    triggerHlsFailover(item, 'HLS unsupported in browser');
   }
 }
 
@@ -505,7 +1140,13 @@ async function selectStudioHub(hubId) {
 function getCurrentEmbedUrl() {
   if (!state.activeItem) return '';
   const item = state.activeItem;
+  const activeSrc = getActiveResolvedSource();
   const provider = state.prefs.playerProvider || 'vidlink';
+
+  if (activeSrc?.url && !state.activeSourceOverride) {
+    if (isPlayableDirectSource(activeSrc)) return activeSrc.url;
+    if (activeSrc.type === 'embed') return activeSrc.url;
+  }
 
   // 1. Direct HLS link via Quick Launch or mediaType === 'hls'
   if (item.mediaType === 'hls') {
@@ -554,11 +1195,15 @@ async function launchStream(rawItem, { season, episode, resumeSeconds } = {}) {
     return;
   }
 
+  const launchSeq = ++activeLaunchSeq;
   const key = getMediaKey(item);
   registerItems([item]);
   const saved = state.progressMap[key];
   const resolvedSeason = season ?? saved?.season ?? item.season ?? 1;
   const resolvedEpisode = episode ?? saved?.episode ?? item.episode ?? 1;
+
+  destroyHlsInstance();
+  revokeActiveExternalSubBlob();
 
   state.activeItem = getItemByKey(key) || item;
   state.activeSeason = resolvedSeason;
@@ -567,6 +1212,15 @@ async function launchStream(rawItem, { season, episode, resumeSeconds } = {}) {
   state.playerEpisodesOpen = false;
   state.modal = null;
   state._hlsFallbackNotifiedItem = null;
+  state.resolvedSources = [];
+  state.activeSourceIndex = 0;
+  state.activeSourceOverride = null;
+  state.failoverState = null;
+  state.resolvingStream = true;
+  state.subtitlesList = [];
+  state.activeExternalSubId = 'off';
+  state.hudOpenMenu = null;
+  state.hudVisible = true;
   antiRedirectGuard.setTheaterActive(true);
   state.livePlayback = {
     currentTime: saved?.currentTime || 0,
@@ -586,8 +1240,74 @@ async function launchStream(rawItem, { season, episode, resumeSeconds } = {}) {
 
   render();
 
+  const resolveOpts = {
+    season: resolvedSeason,
+    episode: resolvedEpisode,
+    hlsProxyUrl: state.prefs.hlsProxyUrl,
+    debridKey: state.prefs.debridApiKey,
+    debridProvider: state.prefs.debridProvider,
+    stremioAddonUrl: state.prefs.stremioAddonUrl,
+    themeId: state.appearance.theme,
+    autoplay: state.prefs.autoplay,
+    sub: state.prefs.sub,
+    dub: state.prefs.dub,
+    uiScale: state.prefs.uiScale,
+  };
+
+  // Resolve ordered multi-node mirror list + free CORS subtitles in parallel
+  const subsPromise = fetchFreeSubtitles(state.activeItem, {
+    season: resolvedSeason,
+    episode: resolvedEpisode,
+    preferredLang: state.prefs.sub,
+  })
+    .then((subs) => {
+      if (launchSeq !== activeLaunchSeq || !state.playerOpen) return;
+      state.subtitlesList = subs;
+      if (state.hudOpenMenu === 'subtitles') renderHudPopupMenu();
+    })
+    .catch(() => {});
+
+  const sourcesPromise = fetchStreamSources(state.activeItem, resolveOpts)
+    .then((sources) => {
+      if (launchSeq !== activeLaunchSeq || !state.playerOpen) return;
+      state.resolvingStream = false;
+      state.resolvedSources = Array.isArray(sources) ? sources : [];
+
+      const prov = state.prefs.playerProvider || 'vidlink';
+      const firstHlsIdx = state.resolvedSources.findIndex(isPlayableDirectSource);
+      const vidlinkIdx = state.resolvedSources.findIndex((s) => s.id === 'vidlink-shield');
+      const vidriftIdx = state.resolvedSources.findIndex((s) => s.id === 'vidrift-sandboxed');
+      const isShowcaseOrRaw =
+        state.activeItem.mediaType === 'hls' || String(state.activeItem.tmdbId || '').startsWith('test-');
+
+      let pickedIndex = 0;
+      if ((prov === 'vidrift' || prov === 'vidrift-direct') && !isShowcaseOrRaw) {
+        pickedIndex = vidriftIdx >= 0 ? vidriftIdx : 0;
+      } else if (firstHlsIdx >= 0) {
+        pickedIndex = firstHlsIdx;
+      } else {
+        if (prov === 'hls-direct') {
+          state._hlsFallbackNotifiedItem = getMediaKey(state.activeItem);
+          showToast('Direct HLS stream unavailable for this title. Switched to VidLink shield player.');
+        }
+        pickedIndex = vidlinkIdx >= 0 ? vidlinkIdx : 0;
+      }
+
+      state.activeSourceIndex = Math.max(0, pickedIndex);
+      state.failoverState = createFailoverState(state.resolvedSources, state.activeSourceIndex);
+      syncPlayerMount();
+    })
+    .catch(() => {
+      if (launchSeq !== activeLaunchSeq || !state.playerOpen) return;
+      state.resolvingStream = false;
+      syncPlayerMount();
+    });
+
+  await Promise.allSettled([sourcesPromise, subsPromise]);
+
+  if (launchSeq !== activeLaunchSeq || !state.playerOpen) return;
   const targetResume = resumeSeconds ?? (saved?.currentTime > 15 ? Math.floor(saved.currentTime) : 0);
-  if (targetResume > 0) {
+  if (targetResume > 0 && !isPlayableDirectSource(getActiveResolvedSource())) {
     setTimeout(() => {
       sendPlayerCommand('resume', { currentTime: targetResume });
       showToast(`Resumed at ${formatTime(targetResume)}`);
@@ -821,6 +1541,7 @@ function renderDesktopTopbar() {
 function renderDesktopHome({
   spotlightList,
   continueEntries,
+  openCinemaItems,
   trendingMovies,
   trendingSeries,
   genreShelfA,
@@ -902,6 +1623,21 @@ function renderDesktopHome({
             items: continueEntries.slice(0, 14),
             kind: 'dk-wide',
             splitIndices: new Set([1]),
+            myListSet,
+            likedSet,
+            progressMap,
+          })
+        : ''
+    }
+
+    ${
+      openCinemaItems?.length > 0
+        ? renderShelf({
+            id: 'dk-open-cinema',
+            title: 'Open Cinema • Instant Native HLS Showcase',
+            items: openCinemaItems,
+            kind: 'dk-wide',
+            recentIndices: new Set([0, 1, 2, 3]),
             myListSet,
             likedSet,
             progressMap,
@@ -1123,6 +1859,8 @@ function renderHomeTab() {
     : state.catalog.filter((x) => x.mediaType === 'anime')
   ).filter(matchesFilter);
 
+  const openCinemaItems = state.catalog.filter((x) => Boolean(x.hlsStreamUrl) && matchesFilter(x));
+
   const activeHubMeta = state.activeHub !== 'all' ? STUDIO_HUBS.find((h) => h.id === state.activeHub) : null;
   const activeHubItems = activeHubMeta
     ? (state.hubItems.length ? state.hubItems : getHubFilteredItems(state.activeHub, pool)).filter(matchesFilter)
@@ -1132,6 +1870,7 @@ function renderHomeTab() {
     return renderDesktopHome({
       spotlightList,
       continueEntries,
+      openCinemaItems,
       trendingMovies,
       trendingSeries,
       genreShelfA,
@@ -1211,6 +1950,17 @@ function renderHomeTab() {
             title: 'Continue Watching',
             items: continueEntries.slice(0, 12),
             kind: 'continue',
+          })
+        : ''
+    }
+
+    ${
+      openCinemaItems.length > 0
+        ? renderShelf({
+            id: 'mob-open-cinema',
+            title: 'Open Cinema • Native HLS Showcase',
+            items: openCinemaItems,
+            recentIndices: new Set([0, 1, 2, 3]),
           })
         : ''
     }
@@ -1981,6 +2731,81 @@ function renderPlayerEpisodesDrawer(item) {
   </aside>`;
 }
 
+function renderProHlsPlayerStage(item) {
+  return `<div class="n77-player is-hud-visible is-paused" id="n77-player" tabindex="0">
+    <video id="hls-video-player" playsinline autoplay crossorigin="anonymous"></video>
+    <div class="n77-tap-layer" id="n77-tap-layer">
+      <div class="n77-tap-zone n77-tap-left" data-tap-side="left" aria-hidden="true"></div>
+      <div class="n77-tap-zone n77-tap-center" data-tap-side="center" aria-hidden="true"></div>
+      <div class="n77-tap-zone n77-tap-right" data-tap-side="right" aria-hidden="true"></div>
+    </div>
+    <div class="n77-seek-feedback is-left" id="n77-seek-fb-left">↺ 10s</div>
+    <div class="n77-seek-feedback is-right" id="n77-seek-fb-right">10s ↻</div>
+    <div class="n77-spinner-overlay" id="n77-spinner">
+      <div class="n77-spinner"></div>
+      <span class="n77-spinner-label" id="n77-spinner-label">Connecting stream...</span>
+    </div>
+    <div class="n77-center-controls" id="n77-center-controls">
+      <button type="button" class="n77-center-btn n77-skip-btn" id="n77-back10" aria-label="Rewind 10 seconds" title="Rewind 10s (J / Left)">
+        <span class="n77-skip-num">-10</span>
+      </button>
+      <button type="button" class="n77-center-btn n77-play-btn" id="n77-center-play-btn" aria-label="Play or Pause" title="Play/Pause (Space / K)">
+        ${svgIcon('play', 32)}
+      </button>
+      <button type="button" class="n77-center-btn n77-skip-btn" id="n77-fwd10" aria-label="Forward 10 seconds" title="Forward 10s (L / Right)">
+        <span class="n77-skip-num">+10</span>
+      </button>
+    </div>
+    <div class="n77-hud" id="n77-hud">
+      <div class="n77-hud-telemetry-row">
+        <span class="n77-telemetry-badge" id="n77-telemetry-badge">HLS • Connecting...</span>
+        <div class="n77-hud-popups" id="n77-hud-popups"></div>
+      </div>
+      <div class="n77-timeline-wrap" id="n77-timeline-wrap" role="slider" aria-label="Seek timeline" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" tabindex="0">
+        <div class="n77-timeline-tooltip" id="n77-timeline-tooltip">0:00</div>
+        <div class="n77-timeline-track">
+          <div class="n77-timeline-buffered" id="n77-timeline-buffered"></div>
+          <div class="n77-timeline-progress" id="n77-timeline-progress">
+            <span class="n77-timeline-thumb"></span>
+          </div>
+        </div>
+      </div>
+      <div class="n77-controls-row">
+        <div class="n77-controls-left">
+          <button type="button" class="n77-ctrl-btn" id="n77-play-btn" aria-label="Play or Pause">${svgIcon('play', 20)}</button>
+          <button type="button" class="n77-ctrl-btn n77-hide-xs" id="n77-bar-back10" title="Rewind 10s">-10s</button>
+          <button type="button" class="n77-ctrl-btn n77-hide-xs" id="n77-bar-fwd10" title="Forward 10s">+10s</button>
+          <div class="n77-vol-group">
+            <button type="button" class="n77-ctrl-btn" id="n77-mute-btn" aria-label="Mute or Unmute (M)">${svgIcon('volumeOn', 19)}</button>
+            <input type="range" class="n77-vol-slider" id="n77-vol-slider" min="0" max="1" step="0.05" value="1" aria-label="Volume" />
+          </div>
+          <span class="n77-time-readout" id="n77-time-readout">0:00 / 0:00</span>
+        </div>
+        <div class="n77-controls-right">
+          <button type="button" class="n77-pill-btn" id="n77-menu-mirrors" data-hud-menu="mirrors" title="Switch Stream Mirror / Node">
+            <span id="n77-mirror-label">Node</span>
+          </button>
+          <button type="button" class="n77-pill-btn" id="n77-menu-quality" data-hud-menu="quality" title="ABR Video Quality">
+            <span id="n77-quality-label">Auto</span>
+          </button>
+          <button type="button" class="n77-pill-btn" id="n77-menu-audio" data-hud-menu="audio" title="Audio Track">
+            <span id="n77-audio-label">Audio</span>
+          </button>
+          <button type="button" class="n77-pill-btn" id="n77-menu-subtitles" data-hud-menu="subtitles" title="Subtitles / CC (C)">
+            <span id="n77-cc-label">CC</span>
+          </button>
+          <button type="button" class="n77-pill-btn" id="n77-menu-speed" data-hud-menu="speed" title="Playback Speed">
+            <span id="n77-speed-label">1x</span>
+          </button>
+          <button type="button" class="n77-ctrl-btn n77-hide-xs" id="n77-pip-btn" title="Picture in Picture" aria-label="Picture in Picture">PiP</button>
+          <button type="button" class="n77-ctrl-btn" id="n77-fullscreen-btn" title="Fullscreen (F)" aria-label="Fullscreen">⛶</button>
+        </div>
+      </div>
+    </div>
+    ${renderPlayerEpisodesDrawer(item)}
+  </div>`;
+}
+
 function syncPlayerMount({ forceReload = false } = {}) {
   const mount = document.getElementById('player-mount');
   if (!mount) return;
@@ -1992,30 +2817,64 @@ function syncPlayerMount({ forceReload = false } = {}) {
 
   const item = state.activeItem;
   const provider = state.prefs.playerProvider || 'vidlink';
-  const directStreamUrl =
-    (item.mediaType === 'hls' && item.hlsUrl) ||
-    item.hlsStreamUrl ||
-    (item.hlsUrl && isDirectStreamUrl(item.hlsUrl) ? item.hlsUrl : null);
-  const hasDirectStream = Boolean(directStreamUrl && isDirectStreamUrl(directStreamUrl));
+  const activeSrc = getActiveResolvedSource();
+  const hlsNodes = getPlayableHlsNodes(state.resolvedSources);
 
-  // Play natively ONLY if there is a verified direct stream and provider is hls-direct or mediaType is hls
-  const isHls = hasDirectStream && (provider === 'hls-direct' || item.mediaType === 'hls');
+  // Determine whether current view should render Pro HLS video vs sandboxed iframe vs resolving splash
+  let isHls = false;
+  let streamUrl = '';
+  let effectiveProvider = provider;
 
-  // If title has no direct HLS source and Native HLS was chosen, auto-fallback cleanly with toast notification
-  if (provider === 'hls-direct' && !hasDirectStream) {
-    const itemKey = getMediaKey(item);
-    if (state._hlsFallbackNotifiedItem !== itemKey) {
-      state._hlsFallbackNotifiedItem = itemKey;
-      showToast('Direct HLS stream unavailable for this title. Switched to VidLink shield player.');
+  if (state.activeSourceOverride === 'vidlink' || state.activeSourceOverride === 'vidrift' || state.activeSourceOverride === 'vidrift-direct') {
+    isHls = false;
+    effectiveProvider = state.activeSourceOverride;
+    streamUrl = buildPlayerEmbedUrl(item, {
+      provider: effectiveProvider,
+      themeId: state.appearance.theme,
+      autoplay: state.prefs.autoplay,
+      sub: state.prefs.sub,
+      dub: state.prefs.dub,
+      uiScale: state.prefs.uiScale,
+      season: state.activeSeason,
+      episode: state.activeEpisode,
+    });
+  } else if (activeSrc && isPlayableDirectSource(activeSrc)) {
+    isHls = true;
+    streamUrl = activeSrc.url;
+    effectiveProvider = 'hls-direct';
+  } else if (activeSrc && activeSrc.type === 'embed') {
+    isHls = false;
+    streamUrl = activeSrc.url;
+    effectiveProvider = activeSrc.id === 'vidrift-sandboxed' ? (provider === 'vidrift-direct' ? 'vidrift-direct' : 'vidrift') : 'vidlink';
+  } else {
+    const directStreamUrl =
+      (item.mediaType === 'hls' && item.hlsUrl) ||
+      item.hlsStreamUrl ||
+      (item.hlsUrl && isDirectStreamUrl(item.hlsUrl) ? item.hlsUrl : null);
+    const hasDirectStream = Boolean(directStreamUrl && isDirectStreamUrl(directStreamUrl));
+    const isShowcase = String(item.tmdbId || '').startsWith('test-');
+    isHls = hasDirectStream && (provider === 'hls-direct' || item.mediaType === 'hls' || isShowcase);
+
+    if (provider === 'hls-direct' && !hasDirectStream && !state.resolvingStream) {
+      const itemKey = getMediaKey(item);
+      if (state._hlsFallbackNotifiedItem !== itemKey) {
+        state._hlsFallbackNotifiedItem = itemKey;
+        showToast('Direct HLS stream unavailable for this title. Switched to VidLink shield player.');
+      }
     }
+
+    streamUrl = isHls ? directStreamUrl : getCurrentEmbedUrl();
+    effectiveProvider = isHls ? 'hls-direct' : provider === 'hls-direct' ? 'vidlink' : provider;
   }
 
-  const embedUrl = isHls ? directStreamUrl : getCurrentEmbedUrl();
-  const effectiveProvider = isHls ? 'hls-direct' : provider === 'hls-direct' ? 'vidlink' : provider;
+  const stillResolving = Boolean(state.resolvingStream && !isHls && hlsNodes.length === 0 && !item.hlsStreamUrl && item.mediaType !== 'hls');
   const isSandboxed = effectiveProvider !== 'vidrift-direct' && state.shield.strictFrameMode;
   const existingFrame = document.getElementById('vidrift-player');
   const existingVideo = document.getElementById('hls-video-player');
-  const modeMismatch = (isHls && !existingVideo) || (!isHls && !existingFrame);
+  const existingResolving = document.getElementById('n77-resolving-box');
+  const modeMismatch = stillResolving
+    ? !existingResolving
+    : (isHls && !existingVideo) || (!isHls && !existingFrame);
 
   if (modeMismatch || forceReload) {
     destroyHlsInstance();
@@ -2029,13 +2888,13 @@ function syncPlayerMount({ forceReload = false } = {}) {
             <div style="font-size:15px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(
               item.title
             )}</div>
-            <div class="dim" style="font-size:11px;">${
+            <div class="dim" id="player-stream-subtitle" style="font-size:11px;">${
               item.mediaType === 'tv'
                 ? `Season ${state.activeSeason} • Episode ${state.activeEpisode}`
                 : item.mediaType === 'anime'
                 ? `Episode ${state.activeEpisode}`
                 : isHls
-                ? 'Direct HLS / MP4 Stream'
+                ? escapeHtml(activeSrc?.name || 'Pro HLS Stream')
                 : 'HD Stream'
             }</div>
           </div>
@@ -2052,7 +2911,9 @@ function syncPlayerMount({ forceReload = false } = {}) {
           }
           ${
             isHls
-              ? `<span class="shield-pill">${svgIcon('shield', 13)}<span>Native HLS</span></span>`
+              ? `<span class="shield-pill" id="player-hls-pill">${svgIcon('shield', 13)}<span>Pro HLS${
+                  hlsNodes.length > 1 ? ` • ${hlsNodes.length} Nodes` : ''
+                }</span></span>`
               : `<button type="button" class="shield-pill ${isSandboxed ? '' : 'is-warn'}" id="toggle-strict-shield-btn">
                   ${svgIcon('shield', 13)}
                   <span>${isSandboxed ? 'No-Redirect ON' : 'Sandbox OFF'}</span>
@@ -2063,56 +2924,70 @@ function syncPlayerMount({ forceReload = false } = {}) {
 
       <div class="player-frame-box" id="player-frame-box">
         ${
-          isHls
-            ? `<video id="hls-video-player" controls playsinline autoplay></video>`
+          stillResolving
+            ? `<div class="n77-resolving-box" id="n77-resolving-box">
+                <div class="n77-spinner"></div>
+                <span class="n77-spinner-label">Resolving stream nodes &amp; mirrors...</span>
+              </div>`
+            : isHls
+            ? renderProHlsPlayerStage(item)
             : `<iframe
                 id="vidrift-player"
-                src="${escapeHtml(embedUrl)}"
+                src="${escapeHtml(streamUrl)}"
                 title="${escapeHtml(item.title)}"
                 allow="autoplay; fullscreen; picture-in-picture; encrypted-media"
                 allowfullscreen
                 referrerpolicy="strict-origin-when-cross-origin"
-              ></iframe>`
+              ></iframe>
+              ${renderPlayerEpisodesDrawer(item)}`
         }
-        ${renderPlayerEpisodesDrawer(item)}
       </div>
 
       <div class="player-bottom-strip" id="player-bottom-strip"></div>
     </section>`;
 
-    if (isHls) {
+    if (!stillResolving && isHls) {
       const videoEl = document.getElementById('hls-video-player');
-      attachDirectVideoStream(videoEl, embedUrl, item);
-      if (videoEl) videoEl.dataset.embedUrl = embedUrl;
-    } else {
+      attachDirectVideoStream(videoEl, streamUrl, item, activeSrc);
+      if (videoEl) videoEl.dataset.embedUrl = streamUrl;
+    } else if (!stillResolving) {
       const frame = document.getElementById('vidrift-player');
       if (frame) {
-        frame.dataset.embedUrl = embedUrl;
+        frame.dataset.embedUrl = streamUrl;
         applySandboxAttr(frame);
       }
     }
-  } else {
+  } else if (!stillResolving) {
     if (!isHls && existingFrame) {
       const prevSandbox = existingFrame.hasAttribute('sandbox');
       applySandboxAttr(existingFrame);
-      if (existingFrame.dataset.embedUrl !== embedUrl || prevSandbox !== isSandboxed) {
-        existingFrame.src = embedUrl;
-        existingFrame.dataset.embedUrl = embedUrl;
+      if (existingFrame.dataset.embedUrl !== streamUrl || prevSandbox !== isSandboxed) {
+        existingFrame.src = streamUrl;
+        existingFrame.dataset.embedUrl = streamUrl;
       }
-    } else if (isHls && existingVideo && existingVideo.dataset.embedUrl !== embedUrl) {
-      existingVideo.dataset.embedUrl = embedUrl;
-      attachDirectVideoStream(existingVideo, embedUrl, item);
+    } else if (isHls && existingVideo && existingVideo.dataset.embedUrl !== streamUrl) {
+      existingVideo.dataset.embedUrl = streamUrl;
+      attachDirectVideoStream(existingVideo, streamUrl, item, activeSrc);
     }
 
-    const box = document.getElementById('player-frame-box');
-    if (box) {
-      const prevDrawer = box.querySelector('.player-ep-drawer');
+    const hostBox = isHls ? document.getElementById('n77-player') : document.getElementById('player-frame-box');
+    if (hostBox) {
+      const prevDrawer = hostBox.querySelector('.player-ep-drawer');
       if (prevDrawer) prevDrawer.remove();
       const drawerHtml = renderPlayerEpisodesDrawer(item);
-      if (drawerHtml) box.insertAdjacentHTML('beforeend', drawerHtml);
+      if (drawerHtml) hostBox.insertAdjacentHTML('beforeend', drawerHtml);
     }
     const epToggle = document.getElementById('toggle-player-ep-drawer-btn');
     if (epToggle) epToggle.classList.toggle('is-active', Boolean(state.playerEpisodesOpen));
+
+    const hlsPillSpan = document.querySelector('#player-hls-pill span');
+    if (hlsPillSpan && isHls) {
+      hlsPillSpan.textContent = `Pro HLS${hlsNodes.length > 1 ? ` • ${hlsNodes.length} Nodes` : ''}`;
+    }
+    const subLabelEl = document.getElementById('player-stream-subtitle');
+    if (subLabelEl && isHls && item.mediaType !== 'tv' && item.mediaType !== 'anime') {
+      subLabelEl.textContent = activeSrc?.name || 'Pro HLS Stream';
+    }
   }
 
   const strip = document.getElementById('player-bottom-strip');
@@ -2120,8 +2995,8 @@ function syncPlayerMount({ forceReload = false } = {}) {
     const saved = state.progressMap[getMediaKey(item)];
     strip.innerHTML = `<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
       ${
-        isHls
-          ? `<span class="dim" style="font-size:12px;">Playing authorized HTTPS stream natively</span>`
+        isHls && state.resolvedSources.length > 0
+          ? `<span class="dim" style="font-size:11.5px;">Node ${state.activeSourceIndex + 1}/${state.resolvedSources.length}</span>`
           : ''
       }
       ${PLAYER_PROVIDERS.map(
@@ -2143,7 +3018,7 @@ function syncPlayerMount({ forceReload = false } = {}) {
         12
       )} Reload</button>
       ${
-        item.mediaType !== 'movie' && !isHls
+        item.mediaType !== 'movie' && item.mediaType !== 'hls'
           ? `<button type="button" class="outline-chip" id="next-ep-btn" style="height:30px;font-size:11px;">Next Ep ${svgIcon(
               'next',
               12
@@ -2330,10 +3205,12 @@ async function runSearch(query) {
 function buildDirectStreamItem(parsed, customTitle = '') {
   if (parsed.mediaType === 'hls') {
     return {
-      id: `hls:${parsed.hlsUrl}`,
+      id: `hls:${parsed.infoHash || parsed.hlsUrl}`,
       mediaType: 'hls',
       hlsUrl: parsed.hlsUrl,
-      title: customTitle || `Direct ${parsed.format.toUpperCase()} Stream`,
+      magnetUri: parsed.magnetUri,
+      infoHash: parsed.infoHash,
+      title: customTitle || (parsed.infoHash ? `Debrid Torrent #${parsed.infoHash.slice(0, 8)}` : `Direct ${parsed.format.toUpperCase()} Stream`),
     };
   }
   return {
@@ -2704,8 +3581,14 @@ function bindEvents() {
     // Player controls
     if (target.closest('#close-player-btn')) {
       destroyHlsInstance();
+      revokeActiveExternalSubBlob();
+      activeLaunchSeq += 1;
       state.playerOpen = false;
       state.playerEpisodesOpen = false;
+      state.resolvingStream = false;
+      state.resolvedSources = [];
+      state.activeSourceOverride = null;
+      state.hudOpenMenu = null;
       antiRedirectGuard.setTheaterActive(false);
       render();
       return;
@@ -2723,24 +3606,178 @@ function bindEvents() {
       render({ forceReload: true });
       return;
     }
+
+    // Net77 Pro HLS HUD interactions
+    if (target.closest('#n77-play-btn') || target.closest('#n77-center-play-btn')) {
+      toggleVideoPlayPause();
+      return;
+    }
+    if (target.closest('#n77-back10') || target.closest('#n77-bar-back10')) {
+      seekVideoBy(-10);
+      return;
+    }
+    if (target.closest('#n77-fwd10') || target.closest('#n77-bar-fwd10')) {
+      seekVideoBy(10);
+      return;
+    }
+    if (target.closest('#n77-mute-btn')) {
+      const videoEl = document.getElementById('hls-video-player');
+      if (videoEl) {
+        videoEl.muted = !videoEl.muted;
+        wakePlayerHud();
+        updateHudControlsVisuals();
+      }
+      return;
+    }
+    if (target.closest('#n77-pip-btn')) {
+      const videoEl = document.getElementById('hls-video-player');
+      if (videoEl && document.pictureInPictureEnabled) {
+        if (document.pictureInPictureElement) {
+          document.exitPictureInPicture?.().catch(() => {});
+        } else {
+          videoEl.requestPictureInPicture?.().catch(() => showToast('PiP unavailable'));
+        }
+      } else {
+        showToast('Picture-in-Picture unavailable in this browser');
+      }
+      return;
+    }
+    if (target.closest('#n77-fullscreen-btn')) {
+      togglePlayerFullscreen();
+      return;
+    }
+    if (target.closest('[data-close-hud-menu="true"]')) {
+      state.hudOpenMenu = null;
+      renderHudPopupMenu();
+      wakePlayerHud();
+      return;
+    }
+    const hudMenuBtn = target.closest('[data-hud-menu]');
+    if (hudMenuBtn) {
+      const nextMenu = hudMenuBtn.dataset.hudMenu;
+      state.hudOpenMenu = state.hudOpenMenu === nextMenu ? null : nextMenu;
+      renderHudPopupMenu();
+      wakePlayerHud(Boolean(state.hudOpenMenu));
+      return;
+    }
+    const levelBtn = target.closest('[data-hls-level]');
+    if (levelBtn) {
+      const lvl = Number(levelBtn.dataset.hlsLevel);
+      if (activeHlsInstance) {
+        activeHlsInstance.currentLevel = lvl;
+        state.hlsTelemetry.levelIndex = lvl;
+      }
+      state.hudOpenMenu = null;
+      renderHudPopupMenu();
+      updateHudControlsVisuals();
+      showToast(lvl === -1 ? 'Quality: Auto (ABR)' : `Quality locked: ${levelBtn.textContent.trim().split(' ')[0]}`);
+      return;
+    }
+    const audioBtn = target.closest('[data-hls-audio]');
+    if (audioBtn) {
+      const trackId = Number(audioBtn.dataset.hlsAudio);
+      if (activeHlsInstance) {
+        activeHlsInstance.audioTrack = trackId;
+        state.hlsTelemetry.audioTrackIndex = trackId;
+      }
+      state.hudOpenMenu = null;
+      renderHudPopupMenu();
+      updateHudControlsVisuals();
+      return;
+    }
+    if (target.closest('[data-hls-sub-off="true"]')) {
+      applyExternalSubtitleTrack('off');
+      state.hudOpenMenu = null;
+      renderHudPopupMenu();
+      return;
+    }
+    const hlsSubBtn = target.closest('[data-hls-sub]');
+    if (hlsSubBtn) {
+      const trackId = Number(hlsSubBtn.dataset.hlsSub);
+      const videoEl = document.getElementById('hls-video-player');
+      videoEl?.querySelectorAll('track[data-suno-ext-sub="true"]').forEach((t) => t.remove());
+      revokeActiveExternalSubBlob();
+      state.activeExternalSubId = 'off';
+      if (activeHlsInstance) {
+        activeHlsInstance.subtitleTrack = trackId;
+        activeHlsInstance.subtitleDisplay = true;
+        state.hlsTelemetry.subtitleTrackIndex = trackId;
+      }
+      state.hudOpenMenu = null;
+      renderHudPopupMenu();
+      updateHudControlsVisuals();
+      return;
+    }
+    const extSubBtn = target.closest('[data-ext-sub]');
+    if (extSubBtn) {
+      applyExternalSubtitleTrack(extSubBtn.dataset.extSub);
+      state.hudOpenMenu = null;
+      renderHudPopupMenu();
+      return;
+    }
+    const speedBtn = target.closest('[data-hls-speed]');
+    if (speedBtn) {
+      const sp = Number(speedBtn.dataset.hlsSpeed) || 1;
+      const videoEl = document.getElementById('hls-video-player');
+      if (videoEl) videoEl.playbackRate = sp;
+      state.hlsTelemetry.speed = sp;
+      state.hudOpenMenu = null;
+      renderHudPopupMenu();
+      updateHudControlsVisuals();
+      return;
+    }
+    const mirrorBtn = target.closest('[data-pick-mirror]');
+    if (mirrorBtn) {
+      const idx = Number(mirrorBtn.dataset.pickMirror);
+      const src = state.resolvedSources[idx];
+      if (src) {
+        state.activeSourceOverride = null;
+        state.activeSourceIndex = idx;
+        state.failoverState = createFailoverState(state.resolvedSources, idx);
+        state.hudOpenMenu = null;
+        renderHudPopupMenu();
+        if (isPlayableDirectSource(src)) {
+          showToast(`Switched mirror: ${src.name}`);
+          syncPlayerMount();
+        } else {
+          fallbackToEmbedPlayer(state.activeItem, `Switched to ${src.name}`, src.url);
+        }
+      }
+      return;
+    }
+
     const switchProvBtn = target.closest('[data-switch-provider]');
     if (switchProvBtn) {
       const prov = switchProvBtn.dataset.switchProvider;
       if (prov === 'hls-direct') {
         const item = state.activeItem;
+        const firstHlsIdx = state.resolvedSources.findIndex(isPlayableDirectSource);
         const directUrl =
+          (firstHlsIdx >= 0 && state.resolvedSources[firstHlsIdx]?.url) ||
           (item?.mediaType === 'hls' && item?.hlsUrl) ||
           item?.hlsStreamUrl ||
           (item?.hlsUrl && isDirectStreamUrl(item.hlsUrl) ? item.hlsUrl : null);
         const hasDirect = Boolean(directUrl && isDirectStreamUrl(directUrl));
         if (!hasDirect) {
           state.prefs = savePlayerPrefs({ playerProvider: 'vidlink' });
+          state.activeSourceOverride = 'vidlink';
           antiRedirectGuard.setStrictFrameMode(true);
           state.shield = antiRedirectGuard.getSnapshot();
           showToast('Direct HLS stream unavailable for this title. Switched to VidLink shield player.');
           render({ forceReload: true });
           return;
         }
+        state.activeSourceOverride = null;
+        if (firstHlsIdx >= 0) {
+          state.activeSourceIndex = firstHlsIdx;
+          state.failoverState = createFailoverState(state.resolvedSources, firstHlsIdx);
+        }
+      } else {
+        state.activeSourceOverride = prov;
+        const matchIdx = state.resolvedSources.findIndex((s) =>
+          prov === 'vidlink' ? s.id === 'vidlink-shield' : s.id === 'vidrift-sandboxed'
+        );
+        if (matchIdx >= 0) state.activeSourceIndex = matchIdx;
       }
       state.prefs = savePlayerPrefs({ playerProvider: prov });
       if (prov === 'vidrift-direct') {
@@ -2797,12 +3834,27 @@ function bindEvents() {
       const navLock = Boolean(document.getElementById('pref-navlock')?.checked);
       const strictSandbox = Boolean(document.getElementById('pref-strict-sandbox')?.checked);
       const playerProvider = document.getElementById('pref-provider')?.value || 'vidlink';
+      const hlsProxyUrl = cleanProxyUrl(document.getElementById('pref-hls-proxy')?.value || '');
+      const stremioAddonUrl = cleanAddonUrl(document.getElementById('pref-stremio-addon')?.value || '');
+      const debridProvider = document.getElementById('pref-debrid-provider')?.value || 'realdebrid';
+      const debridApiKey = (document.getElementById('pref-debrid-key')?.value || '').trim();
 
       state.profile = saveProfile({ name });
       antiRedirectGuard.setNavigationLock(navLock);
       antiRedirectGuard.setStrictFrameMode(strictSandbox);
       state.shield = antiRedirectGuard.getSnapshot();
-      state.prefs = savePlayerPrefs({ autoplay, dub, sub, tmdbApiKey, phoneFrameOnDesktop, playerProvider });
+      state.prefs = savePlayerPrefs({
+        autoplay,
+        dub,
+        sub,
+        tmdbApiKey,
+        phoneFrameOnDesktop,
+        playerProvider,
+        hlsProxyUrl,
+        stremioAddonUrl,
+        debridProvider,
+        debridApiKey,
+      });
       state.modal = null;
       showToast('Settings saved');
       render();
@@ -2849,6 +3901,17 @@ function bindEvents() {
 
   rootEl.addEventListener('input', (e) => {
     const t = e.target;
+    if (t.id === 'n77-vol-slider') {
+      const videoEl = document.getElementById('hls-video-player');
+      if (videoEl) {
+        const vol = Math.max(0, Math.min(1, Number(t.value)));
+        videoEl.volume = vol;
+        videoEl.muted = vol === 0;
+        wakePlayerHud();
+        updateHudControlsVisuals();
+      }
+      return;
+    }
     if (t.id === 'global-search-input' || t.id === 'dk-search-input') {
       const sourceId = t.id;
       const isDk = sourceId === 'dk-search-input';
@@ -2974,22 +4037,176 @@ function bindEvents() {
     true
   );
 
+  // Net77 Player HUD gesture, timeline scrubbing & keyboard shortcut handlers
+  let timelineDragging = false;
+  let lastTapAt = 0;
+  let lastTapSide = '';
+  let singleTapTimer = null;
+
+  const updateSeekFromPointer = (clientX, commitSeek = false) => {
+    const wrap = document.getElementById('n77-timeline-wrap');
+    const videoEl = document.getElementById('hls-video-player');
+    if (!wrap || !videoEl) return;
+    const rect = wrap.getBoundingClientRect();
+    if (!rect.width) return;
+    const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+    const dur = Number(videoEl.duration || 0);
+    const tooltip = document.getElementById('n77-timeline-tooltip');
+    if (tooltip) {
+      tooltip.style.left = `${(ratio * 100).toFixed(2)}%`;
+      tooltip.textContent = dur > 0 && Number.isFinite(dur) ? formatTime(ratio * dur) : '--:--';
+    }
+    if (commitSeek && dur > 0 && Number.isFinite(dur)) {
+      try {
+        videoEl.currentTime = ratio * dur;
+      } catch {}
+      updateHudControlsVisuals();
+    }
+  };
+
+  rootEl.addEventListener('pointerdown', (e) => {
+    const wrap = e.target?.closest?.('#n77-timeline-wrap');
+    if (wrap) {
+      timelineDragging = true;
+      wrap.classList.add('is-dragging');
+      try {
+        wrap.setPointerCapture?.(e.pointerId);
+      } catch {}
+      wakePlayerHud(true);
+      updateSeekFromPointer(e.clientX, true);
+      return;
+    }
+    if (e.target?.closest?.('#n77-player')) {
+      wakePlayerHud();
+    }
+  });
+
+  rootEl.addEventListener('pointermove', (e) => {
+    if (e.target?.closest?.('#n77-player')) {
+      wakePlayerHud();
+    }
+    if (timelineDragging || e.target?.closest?.('#n77-timeline-wrap')) {
+      updateSeekFromPointer(e.clientX, timelineDragging);
+    }
+  });
+
+  window.addEventListener('pointerup', (e) => {
+    if (timelineDragging) {
+      timelineDragging = false;
+      const wrap = document.getElementById('n77-timeline-wrap');
+      wrap?.classList.remove('is-dragging');
+      updateSeekFromPointer(e.clientX, true);
+      wakePlayerHud();
+    }
+  });
+
+  rootEl.addEventListener('click', (e) => {
+    const tapZone = e.target?.closest?.('.n77-tap-zone');
+    if (!tapZone) return;
+    if (state.hudOpenMenu) {
+      state.hudOpenMenu = null;
+      renderHudPopupMenu();
+      wakePlayerHud();
+      return;
+    }
+    const side = tapZone.dataset.tapSide;
+    const now = Date.now();
+    if (side !== 'center' && side === lastTapSide && now - lastTapAt < 320) {
+      clearTimeout(singleTapTimer);
+      lastTapAt = 0;
+      seekVideoBy(side === 'left' ? -10 : 10);
+      return;
+    }
+    lastTapAt = now;
+    lastTapSide = side;
+    if (side === 'center') {
+      toggleVideoPlayPause();
+    } else {
+      clearTimeout(singleTapTimer);
+      singleTapTimer = setTimeout(() => {
+        if (state.hudVisible) {
+          wakePlayerHud();
+        } else {
+          wakePlayerHud();
+        }
+      }, 240);
+    }
+  });
+
   window.addEventListener('keydown', (e) => {
-    if (e.key !== 'Escape') return;
-    if (state.playerOpen) {
-      state.playerOpen = false;
-      antiRedirectGuard.setTheaterActive(false);
-      render();
-    } else if (state.modal) {
-      state.modal = null;
-      render();
-    } else if (state.detailModalKey) {
-      state.detailModalKey = null;
-      state.detailTrailerPlaying = false;
-      render();
-    } else if (state.desktopSearchOpen) {
-      state.desktopSearchOpen = false;
-      render();
+    const tag = (e.target?.tagName || '').toLowerCase();
+    const isTyping = tag === 'input' || tag === 'textarea' || tag === 'select' || e.target?.isContentEditable;
+
+    if (e.key === 'Escape') {
+      if (state.playerOpen && state.hudOpenMenu) {
+        state.hudOpenMenu = null;
+        renderHudPopupMenu();
+        wakePlayerHud();
+      } else if (state.playerOpen && document.fullscreenElement) {
+        document.exitFullscreen?.().catch(() => {});
+      } else if (state.playerOpen) {
+        destroyHlsInstance();
+        revokeActiveExternalSubBlob();
+        activeLaunchSeq += 1;
+        state.playerOpen = false;
+        state.resolvingStream = false;
+        state.resolvedSources = [];
+        antiRedirectGuard.setTheaterActive(false);
+        render();
+      } else if (state.modal) {
+        state.modal = null;
+        render();
+      } else if (state.detailModalKey) {
+        state.detailModalKey = null;
+        state.detailTrailerPlaying = false;
+        render();
+      } else if (state.desktopSearchOpen) {
+        state.desktopSearchOpen = false;
+        render();
+      }
+      return;
+    }
+
+    if (!state.playerOpen || isTyping) return;
+    const videoEl = document.getElementById('hls-video-player');
+    if (!videoEl) return;
+
+    const k = e.key.toLowerCase();
+    if (e.key === ' ' || k === 'k') {
+      e.preventDefault();
+      toggleVideoPlayPause();
+    } else if (e.key === 'ArrowLeft' || k === 'j') {
+      e.preventDefault();
+      seekVideoBy(-10);
+    } else if (e.key === 'ArrowRight' || k === 'l') {
+      e.preventDefault();
+      seekVideoBy(10);
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      videoEl.muted = false;
+      videoEl.volume = Math.min(1, Number((videoEl.volume + 0.1).toFixed(2)));
+      wakePlayerHud();
+      updateHudControlsVisuals();
+      showToast(`Volume ${Math.round(videoEl.volume * 100)}%`);
+    } else if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      videoEl.volume = Math.max(0, Number((videoEl.volume - 0.1).toFixed(2)));
+      if (videoEl.volume === 0) videoEl.muted = true;
+      wakePlayerHud();
+      updateHudControlsVisuals();
+      showToast(`Volume ${Math.round(videoEl.volume * 100)}%`);
+    } else if (k === 'm') {
+      e.preventDefault();
+      videoEl.muted = !videoEl.muted;
+      wakePlayerHud();
+      updateHudControlsVisuals();
+      showToast(videoEl.muted ? 'Muted' : 'Unmuted');
+    } else if (k === 'f') {
+      e.preventDefault();
+      togglePlayerFullscreen();
+    } else if (k === 'c') {
+      e.preventDefault();
+      toggleClosedCaptionsShortcut();
     }
   });
 }
