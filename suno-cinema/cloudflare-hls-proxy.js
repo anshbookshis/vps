@@ -1637,12 +1637,16 @@ async function handleResolveStream(request, reqUrl, env = {}) {
     reqUrl.searchParams.get('debridToken') ||
     request.headers.get('x-debrid-key') ||
     env.DEBRID_API_KEY ||
+    env.REALDEBRID_API_KEY ||
+    env.TORBOX_API_KEY ||
     ''
   ).trim();
+  const inferredEnvProvider =
+    env.DEBRID_PROVIDER || (env.TORBOX_API_KEY && !env.REALDEBRID_API_KEY ? 'torbox' : 'realdebrid');
   const debridProvider = (
     reqUrl.searchParams.get('debridProvider') ||
     request.headers.get('x-debrid-provider') ||
-    env.DEBRID_PROVIDER ||
+    inferredEnvProvider ||
     'realdebrid'
   )
     .trim()
@@ -1921,6 +1925,7 @@ export default {
         streamResolverEnabled: true,
         addonManifestResolverEnabled: true,
         multiAddonEnabled: true,
+        tmdbConfigured: Boolean(env.TMDB_API_KEY),
         debridConfigured: Boolean(env.DEBRID_API_KEY || env.REALDEBRID_API_KEY || env.TORBOX_API_KEY),
         addonConfigured: Boolean(env.STREMIO_ADDON_URLS || env.STREMIO_ADDON_URL),
         customResolverConfigured: Boolean(env.CUSTOM_RESOLVER_URL),
@@ -2007,6 +2012,59 @@ export default {
         },
         tokenVerification: { enabled: tokenVerification },
       });
+    }
+
+    if (pathname === '/api/search') {
+      const q = (reqUrl.searchParams.get('q') || '').trim();
+      const type = reqUrl.searchParams.get('type') || 'all';
+      const tmdbKey = (request.headers.get('x-tmdb-key') || env.TMDB_API_KEY || '').trim();
+      if (!q || q.length < 2 || !tmdbKey) {
+        return jsonResponse({ items: [], sources: [] });
+      }
+      try {
+        const isV4 = tmdbKey.length > 45;
+        const headers = isV4 ? { Authorization: `Bearer ${tmdbKey}`, Accept: 'application/json' } : { Accept: 'application/json' };
+        const keyParam = isV4 ? '' : `&api_key=${encodeURIComponent(tmdbKey)}`;
+        const endpoint =
+          type === 'movie'
+            ? `https://api.themoviedb.org/3/search/movie?query=${encodeURIComponent(q)}&include_adult=false${keyParam}`
+            : type === 'tv'
+            ? `https://api.themoviedb.org/3/search/tv?query=${encodeURIComponent(q)}&include_adult=false${keyParam}`
+            : `https://api.themoviedb.org/3/search/multi?query=${encodeURIComponent(q)}&include_adult=false${keyParam}`;
+        const resp = await fetchWithRetry(endpoint, { headers }, { timeoutMs: 6000, maxRetries: 1 });
+        if (!resp.ok) return jsonResponse({ items: [], sources: [] });
+        const data = await resp.json();
+        const items = (data?.results || [])
+          .filter((r) => {
+            const mt = r.media_type || (type === 'tv' ? 'tv' : 'movie');
+            return mt === 'movie' || mt === 'tv';
+          })
+          .slice(0, 14)
+          .map((r) => {
+            const mediaType = r.media_type === 'tv' || type === 'tv' ? 'tv' : 'movie';
+            return {
+              id: `${mediaType}:${r.id}`,
+              tmdbId: String(r.id),
+              mediaType,
+              title: r.title || r.name || 'Untitled',
+              year: (r.release_date || r.first_air_date || '').slice(0, 4),
+              creator: mediaType === 'tv' ? 'TMDB Series' : 'TMDB Feature',
+              runtime: mediaType === 'tv' ? 'Series' : 'Feature',
+              totalSeasons: mediaType === 'tv' ? 3 : undefined,
+              totalEpisodes: mediaType === 'tv' ? 10 : undefined,
+              rating: r.vote_average ? r.vote_average.toFixed(1) : '7.5',
+              genres: [mediaType === 'tv' ? 'Series' : 'Cinema'],
+              overview: r.overview || '',
+              poster: r.poster_path ? `https://image.tmdb.org/t/p/w500${r.poster_path}` : '',
+              backdrop: r.backdrop_path ? `https://image.tmdb.org/t/p/w1280${r.backdrop_path}` : '',
+              palette: ['#ff0033', '#27272a', '#09090b'],
+              source: 'tmdb-edge',
+            };
+          });
+        return jsonResponse({ items, sources: items.length ? ['tmdb'] : [] });
+      } catch {
+        return jsonResponse({ items: [], sources: [] });
+      }
     }
 
     if (pathname === '/api/proxy/subtitles') {
