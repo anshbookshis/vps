@@ -180,8 +180,11 @@ test('static project hygiene: CSS braces balanced, relative ./ paths in index.ht
   assert.equal(openBraces, closeBraces, 'styles.css braces must be balanced');
 
   const html = fs.readFileSync(path.join(ROOT_DIR, 'index.html'), 'utf8');
-  assert.ok(html.includes('href="./styles.css"'));
-  assert.ok(html.includes('src="./src/app.js"'));
+  assert.match(html, /href="\.\/styles\.css(?:\?[^"]*)?"/);
+  assert.match(html, /src="\.\/src\/app\.js(?:\?[^"]*)?"/);
+  assert.ok(html.includes('<script type="importmap">'));
+  assert.ok(html.includes('./src/utils/vidrift.js?v='));
+  assert.ok(html.includes('./src/utils/anti-redirect.js?v='));
   assert.ok(html.includes('Suno Cinema'));
   assert.equal(/net77|netflix/i.test(html), false);
 });

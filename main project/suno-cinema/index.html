@@ -26,10 +26,30 @@
         } catch (e) {}
       })();
     </script>
-    <link rel="stylesheet" href="./styles.css" />
+    <link rel="stylesheet" href="./styles.css?v=20261126d" />
   </head>
   <body>
     <div id="app"></div>
-    <script type="module" src="./src/app.js"></script>
+    <script type="importmap">
+      {
+        "imports": {
+          "./src/app.js": "./src/app.js?v=20261126d",
+          "./src/components/canvas-halo.js": "./src/components/canvas-halo.js?v=20261126d",
+          "./src/components/cards.js": "./src/components/cards.js?v=20261126d",
+          "./src/components/icons.js": "./src/components/icons.js?v=20261126d",
+          "./src/components/modals.js": "./src/components/modals.js?v=20261126d",
+          "./src/components/showcase.js": "./src/components/showcase.js?v=20261126d",
+          "./src/data/catalog.js": "./src/data/catalog.js?v=20261126d",
+          "./src/utils/anti-redirect.js": "./src/utils/anti-redirect.js?v=20261126d",
+          "./src/utils/audio-curtain.js": "./src/utils/audio-curtain.js?v=20261126d",
+          "./src/utils/client-api.js": "./src/utils/client-api.js?v=20261126d",
+          "./src/utils/poster-art.js": "./src/utils/poster-art.js?v=20261126d",
+          "./src/utils/sonic-engine.js": "./src/utils/sonic-engine.js?v=20261126d",
+          "./src/utils/storage.js": "./src/utils/storage.js?v=20261126d",
+          "./src/utils/vidrift.js": "./src/utils/vidrift.js?v=20261126d"
+        }
+      }
+    </script>
+    <script type="module" src="./src/app.js?v=20261126d"></script>
   </body>
 </html>

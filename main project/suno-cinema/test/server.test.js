@@ -138,8 +138,8 @@ test('Suno Cinema HTTP server serves UI assets, catalog API, search, TV seasons,
     assert.equal(htmlResp.status, 200);
     const html = await htmlResp.text();
     assert.ok(html.includes('Suno Cinema'));
-    assert.ok(html.includes('src="./src/app.js"'));
-    assert.ok(html.includes('href="./styles.css"'));
+    assert.match(html, /src="\.\/src\/app\.js(?:\?[^"]*)?"/);
+    assert.match(html, /href="\.\/styles\.css(?:\?[^"]*)?"/);
 
     const cssResp = await fetch(`${base}/styles.css`);
     assert.equal(cssResp.status, 200);
