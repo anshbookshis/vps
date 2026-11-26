@@ -92,6 +92,35 @@ export function renderSettingsSheet({ appearance, prefs, shield, profile }) {
         <input id="pref-tmdb-key" class="field-input" type="password" placeholder="Optional" value="${escapeHtml(prefs.tmdbApiKey || '')}" />
       </div>
 
+      <div style="display:flex;flex-direction:column;gap:10px;padding:12px;border-radius:10px;background:#101013;border:1px solid rgba(255,255,255,0.1);">
+        <div style="display:flex;align-items:center;justify-content:space-between;">
+          <span style="font-size:13px;font-weight:700;">Pro HLS Edge Proxy, Addon &amp; Debrid</span>
+          <span class="dim" style="font-size:11px;">Static / Local Node</span>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:5px;">
+          <label class="dim" style="font-size:11px;" for="pref-hls-proxy">HLS Edge Proxy URL (Cloudflare Worker or Local Node)</label>
+          <input id="pref-hls-proxy" class="field-input" type="url" placeholder="e.g. https://your-proxy.workers.dev or http://localhost:3000" value="${escapeHtml(prefs.hlsProxyUrl || '')}" />
+        </div>
+        <div style="display:flex;flex-direction:column;gap:5px;">
+          <label class="dim" style="font-size:11px;" for="pref-stremio-addon">Optional Stremio Stream Addon URL</label>
+          <input id="pref-stremio-addon" class="field-input" type="url" placeholder="https://your-addon.example.com" value="${escapeHtml(prefs.stremioAddonUrl || '')}" />
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+          <div style="display:flex;flex-direction:column;gap:5px;">
+            <label class="dim" style="font-size:11px;" for="pref-debrid-provider">Debrid Provider</label>
+            <select id="pref-debrid-provider" class="field-select">
+              <option value="realdebrid" ${(prefs.debridProvider || 'realdebrid') === 'realdebrid' ? 'selected' : ''}>Real-Debrid</option>
+              <option value="torbox" ${prefs.debridProvider === 'torbox' ? 'selected' : ''}>TorBox</option>
+              <option value="alldebrid" ${prefs.debridProvider === 'alldebrid' ? 'selected' : ''}>AllDebrid</option>
+            </select>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:5px;">
+            <label class="dim" style="font-size:11px;" for="pref-debrid-key">Debrid API Key</label>
+            <input id="pref-debrid-key" class="field-input" type="password" placeholder="Optional instant-cache token" value="${escapeHtml(prefs.debridApiKey || '')}" />
+          </div>
+        </div>
+      </div>
+
       <button type="button" class="btn-white" id="save-settings-btn" style="width:100%;">Save &amp; Apply</button>
     </div>
   </div>`;
