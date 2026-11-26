@@ -387,6 +387,9 @@ function resolveSegmentMimeType(targetUrl, upstreamContentType = '') {
   if (cleanPath.endsWith('.m4s') || cleanPath.endsWith('.mp4') || cleanPath.endsWith('.m4v') || cleanPath.endsWith('.cmfv')) {
     return 'video/mp4';
   }
+  if (cleanPath.endsWith('.mkv')) return 'video/x-matroska';
+  if (cleanPath.endsWith('.webm')) return 'video/webm';
+  if (cleanPath.endsWith('.mov')) return 'video/quicktime';
   if (cleanPath.endsWith('.m4a') || cleanPath.endsWith('.cmfa')) return 'audio/mp4';
   if (cleanPath.endsWith('.aac')) return 'audio/aac';
   if (cleanPath.endsWith('.mp3')) return 'audio/mpeg';
@@ -397,7 +400,8 @@ function resolveSegmentMimeType(targetUrl, upstreamContentType = '') {
     ctLower &&
     !ctLower.startsWith('image/') &&
     !ctLower.startsWith('font/') &&
-    ctLower !== 'application/octet-stream'
+    ctLower !== 'application/octet-stream' &&
+    ctLower !== 'application/force-download'
   ) {
     return upstreamContentType;
   }
@@ -476,20 +480,22 @@ async function handleHlsProxy(request, reqUrl, env = {}, ctx = null) {
 
   let upstreamResp;
   try {
-    upstreamResp = await fetchWithRetry(targetUrl, {
+    const fetchOpts = {
       method: request.method,
       headers: upstreamHeaders,
       redirect: 'follow',
       signal: request.signal,
-    });
+    };
+    if (!rangeHeader) {
+      fetchOpts.cf = { cacheTtl: -1, cacheEverything: false };
+    }
+    upstreamResp = await fetchWithRetry(targetUrl, fetchOpts);
 
     if (request.method === 'HEAD' && upstreamResp.status === 405) {
       await upstreamResp.body?.cancel?.().catch(() => {});
       upstreamResp = await fetchWithRetry(targetUrl, {
+        ...fetchOpts,
         method: 'GET',
-        headers: upstreamHeaders,
-        redirect: 'follow',
-        signal: request.signal,
       });
     }
   } catch (err) {
@@ -574,8 +580,9 @@ async function handleHlsProxy(request, reqUrl, env = {}, ctx = null) {
   const outHeaders = new Headers({
     'Content-Type': resolveSegmentMimeType(finalUrl, upstreamCt),
     'Accept-Ranges': acceptRanges,
-    'Cache-Control': status === 206 ? 'no-cache' : 'public, max-age=3600',
+    'Cache-Control': status === 206 || rangeHeader ? 'no-store' : 'public, max-age=3600',
     'X-Suno-Cache': 'MISS',
+    'X-Suno-Upstream-Status': String(upstreamResp.status),
     ...CORS_HEADERS,
   });
   if (upstreamContentRange) outHeaders.set('Content-Range', upstreamContentRange);
@@ -589,6 +596,15 @@ async function handleHlsProxy(request, reqUrl, env = {}, ctx = null) {
   // Stream 206 partial content directly without modifying byte offsets
   if (status === 206) {
     return new Response(upstreamResp.body, { status: 206, headers: outHeaders });
+  }
+
+  // Direct passthrough for standard binary video containers so Cloudflare preserves Content-Length
+  const isKnownBinaryMedia =
+    /\.(mp4|m4v|webm|mov|mkv|avi)$/i.test(cleanPath) ||
+    ctLower.startsWith('video/') ||
+    ctLower === 'application/force-download';
+  if (isKnownBinaryMedia && !ctLower.startsWith('text/plain')) {
+    return new Response(upstreamResp.body, { status: 200, headers: outHeaders });
   }
 
   // For 200 responses, peek initial bytes only to handle text/plain M3U8 or disguised image/font prefixes
@@ -755,7 +771,7 @@ async function handleSubtitleProxy(request, reqUrl) {
 
 const MAX_ADDONS = 12;
 const MAX_DIRECT_ADDON_STREAMS = 12;
-const MAX_DEBRID_CANDIDATES = 6;
+const MAX_DEBRID_CANDIDATES = 10;
 
 function extractInfoHash(magnet, rawHash = '') {
   const cleanHash = String(rawHash || '').trim();
@@ -927,6 +943,33 @@ function isDirectMediaUrl(rawUrl) {
   return lower.includes('.m3u8') || /\.(mp4|m4s|webm|m4v|mov)(\?|#|$)/i.test(lower);
 }
 
+function isArchiveOrNonMediaUrl(rawUrl) {
+  return /\.(rar|zip|7z|iso|tar|gz|nfo|txt|srt|ass)(?:$|\?|#)/i.test(String(rawUrl || '').trim());
+}
+
+function scoreTorrentFileForPlayback(f) {
+  const p = String(f?.path || f?.name || '').toLowerCase();
+  if (/\.(rar|zip|7z|iso|tar|nfo|txt|srt|ass|sub|idx)(?:$|\?)/i.test(p)) return -1;
+  const isSample = /\bsample\b/i.test(p) && (f?.bytes || 0) < 120 * 1024 * 1024;
+  if (isSample) return 0;
+  if (/\.(mp4|m4v)(?:$|\?)/i.test(p)) return 2e15 + (f?.bytes || 0);
+  if (/\.(webm|mov|mkv|avi)(?:$|\?)/i.test(p)) return 1e15 + (f?.bytes || 0);
+  return f?.bytes || 0;
+}
+
+function computeBrowserCompatibilityBonus(metaText, filename) {
+  const combined = `${filename || ''} ${metaText || ''}`;
+  let bonus = 0;
+  if (/\.(rar|zip|7z|iso|tar)\b/i.test(combined)) return -100;
+  if (/\.(mp4|m4v)\b/i.test(combined)) bonus += 25;
+  if (/\b(?:x264|h\.?264|avc|aac)\b/i.test(combined)) bonus += 15;
+  if (/\b(?:4320p|8k)\b/i.test(combined)) bonus -= 40;
+  if (/\b(?:hevc|x265|h\.?265|av1|dolby[\s.-]?vision|dovi|dts(?:-hd)?|truehd|ac3|eac3)\b/i.test(combined)) {
+    bonus -= 15;
+  }
+  return bonus;
+}
+
 async function resolveRealDebridStream(apiKey, magnetUri, preferredFileIdx) {
   const headers = { Authorization: `Bearer ${apiKey}` };
   const addResp = await fetchWithRetry(
@@ -949,26 +992,62 @@ async function resolveRealDebridStream(apiKey, magnetUri, preferredFileIdx) {
       headers,
     }).catch(() => {});
 
-  await fetchWithRetry(
-    `https://api.real-debrid.com/rest/1.0/torrents/selectFiles/${encodeURIComponent(torrentId)}`,
-    {
-      method: 'POST',
-      headers: { ...headers, 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({ files: 'all' }).toString(),
-    },
-    { timeoutMs: 6000, maxRetries: 1 }
-  ).catch(() => null);
-
-  const infoResp = await fetchWithRetry(
+  // Check file list before selection so multi-file torrents select only 1 video file (avoids .rar bundling)
+  let filesParam = 'all';
+  const preInfoResp = await fetchWithRetry(
     `https://api.real-debrid.com/rest/1.0/torrents/info/${encodeURIComponent(torrentId)}`,
     { headers },
     { timeoutMs: 6000, maxRetries: 1 }
-  );
-  if (!infoResp.ok) {
-    await cleanupTorrent();
-    return null;
+  ).catch(() => null);
+
+  let info = preInfoResp?.ok ? await preInfoResp.json().catch(() => null) : null;
+  if (info?.status === 'waiting_files_selection' && Array.isArray(info.files) && info.files.length > 0) {
+    const preferred = Number.isInteger(preferredFileIdx) ? info.files[preferredFileIdx] : null;
+    if (preferred && preferred.id !== undefined && scoreTorrentFileForPlayback(preferred) >= 1e15) {
+      filesParam = String(preferred.id);
+    } else {
+      let bestFile = null;
+      let bestScore = 0;
+      for (const f of info.files) {
+        const s = scoreTorrentFileForPlayback(f);
+        if (s > bestScore) {
+          bestScore = s;
+          bestFile = f;
+        }
+      }
+      if (bestFile && bestFile.id !== undefined && bestScore >= 1e15) {
+        filesParam = String(bestFile.id);
+      } else {
+        await cleanupTorrent();
+        return null;
+      }
+    }
+    info = null;
   }
-  const info = await infoResp.json();
+
+  if (!info || info.status !== 'downloaded' || !Array.isArray(info.links) || !info.links[0]) {
+    await fetchWithRetry(
+      `https://api.real-debrid.com/rest/1.0/torrents/selectFiles/${encodeURIComponent(torrentId)}`,
+      {
+        method: 'POST',
+        headers: { ...headers, 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ files: filesParam }).toString(),
+      },
+      { timeoutMs: 6000, maxRetries: 1 }
+    ).catch(() => null);
+
+    const infoResp = await fetchWithRetry(
+      `https://api.real-debrid.com/rest/1.0/torrents/info/${encodeURIComponent(torrentId)}`,
+      { headers },
+      { timeoutMs: 6000, maxRetries: 1 }
+    );
+    if (!infoResp.ok) {
+      await cleanupTorrent();
+      return null;
+    }
+    info = await infoResp.json();
+  }
+
   if (info?.status !== 'downloaded' || !Array.isArray(info.links) || !info.links[0]) {
     await cleanupTorrent();
     return null;
@@ -978,7 +1057,7 @@ async function resolveRealDebridStream(apiKey, magnetUri, preferredFileIdx) {
   if (info.links.length > 1 && Array.isArray(info.files)) {
     const selectedFiles = info.files.filter((f) => f.selected === 1);
     const preferred = Number.isInteger(preferredFileIdx) ? info.files[preferredFileIdx] : null;
-    if (preferred && preferred.selected === 1) {
+    if (preferred && preferred.selected === 1 && scoreTorrentFileForPlayback(preferred) >= 1e15) {
       const selIdx = selectedFiles.indexOf(preferred);
       if (selIdx >= 0 && info.links[selIdx]) {
         chosenLink = info.links[selIdx];
@@ -988,8 +1067,7 @@ async function resolveRealDebridStream(apiKey, magnetUri, preferredFileIdx) {
       let bestScore = -1;
       selectedFiles.forEach((f, idx) => {
         if (!info.links[idx]) return;
-        const isVideo = /\.(mp4|mkv|webm|m4v|avi|mov)$/i.test(f.path || '');
-        const score = (isVideo ? 1e15 : 0) + (f.bytes || 0);
+        const score = scoreTorrentFileForPlayback(f);
         if (score > bestScore) {
           bestScore = score;
           bestIdx = idx;
@@ -1013,7 +1091,12 @@ async function resolveRealDebridStream(apiKey, magnetUri, preferredFileIdx) {
     return null;
   }
   const unrestrict = await unrestrictResp.json();
-  if (unrestrict?.download && /^https?:\/\//i.test(unrestrict.download)) {
+  if (
+    unrestrict?.download &&
+    /^https?:\/\//i.test(unrestrict.download) &&
+    !isArchiveOrNonMediaUrl(unrestrict.download) &&
+    !isArchiveOrNonMediaUrl(unrestrict.filename)
+  ) {
     return unrestrict.download;
   }
   await cleanupTorrent();
@@ -1158,7 +1241,63 @@ export async function resolveDebridCandidates({ provider = 'realdebrid', apiKey,
     return null;
   }
 
+  const MAX_RD_PROBES = 7;
+  const existingByHash = new Map();
+  try {
+    const listResp = await fetchWithRetry(
+      'https://api.real-debrid.com/rest/1.0/torrents?limit=50',
+      { headers: { Authorization: `Bearer ${apiKey}` } },
+      { timeoutMs: 4000, maxRetries: 0 }
+    );
+    if (listResp?.ok) {
+      const listData = await listResp.json().catch(() => null);
+      if (Array.isArray(listData)) {
+        for (const t of listData) {
+          const h = String(t?.hash || '').toLowerCase();
+          if (!h || t?.status !== 'downloaded' || !Array.isArray(t?.links) || !t.links.length) continue;
+          if (isArchiveOrNonMediaUrl(t.filename)) continue;
+          if (!existingByHash.has(h)) existingByHash.set(h, t);
+        }
+      }
+    }
+  } catch {
+    // Proceed cleanly if active torrents list lookup is unavailable
+  }
+
   for (const candidate of orderedCandidates) {
+    const existing = candidate.infoHash ? existingByHash.get(candidate.infoHash.toLowerCase()) : null;
+    if (!existing) continue;
+    try {
+      const link = existing.links[0];
+      const unrestrictResp = await fetchWithRetry(
+        'https://api.real-debrid.com/rest/1.0/unrestrict/link',
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            'Content-Type': 'application/x-www-form-urlencoded',
+          },
+          body: new URLSearchParams({ link }).toString(),
+        },
+        { timeoutMs: 6000, maxRetries: 1 }
+      );
+      if (unrestrictResp?.ok) {
+        const unrestrict = await unrestrictResp.json().catch(() => null);
+        if (
+          unrestrict?.download &&
+          /^https?:\/\//i.test(unrestrict.download) &&
+          !isArchiveOrNonMediaUrl(unrestrict.download) &&
+          !isArchiveOrNonMediaUrl(unrestrict.filename)
+        ) {
+          return { url: unrestrict.download, candidate };
+        }
+      }
+    } catch {
+      // Fall through to fresh resolution if reuse unrestrict fails
+    }
+  }
+
+  for (const candidate of orderedCandidates.slice(0, MAX_RD_PROBES)) {
     const magnetUri = buildMagnetUri(candidate);
     if (!magnetUri) continue;
     try {
@@ -1203,6 +1342,18 @@ function buildAddonStreamEndpoint({ addonUrl, tmdbId, imdbId, anilistId, malId, 
   }
 }
 
+export function isRateLimitOrFakeStream(stream, rawLabel = '') {
+  const url = String(stream?.url || '').toLowerCase();
+  const label = `${rawLabel} ${stream?.name || ''} ${stream?.title || ''} ${stream?.description || ''}`.toLowerCase();
+  if (/public-rate-limit-exceeded|rate[-_]?limit[-_]?exceeded|elfhosted\.com\/assets\//i.test(url)) {
+    return true;
+  }
+  if (/🐢|rate[- ]?limit\s*exceeded|too many requests|public instance.*limit/i.test(label)) {
+    return true;
+  }
+  return false;
+}
+
 function collectStreamsAndCandidates(streams, { origin, addonName = '', maxDirect = 6, seenUrls, candidateMap }) {
   const directStreams = [];
   let added = 0;
@@ -1214,6 +1365,9 @@ function collectStreamsAndCandidates(streams, { origin, addonName = '', maxDirec
       .split('\n')[0]
       .trim()
       .slice(0, 80);
+    if (isRateLimitOrFakeStream(stream, rawLabel)) {
+      continue;
+    }
     const qualityMeta = [
       stream?.name,
       stream?.title,
@@ -1260,7 +1414,7 @@ function collectStreamsAndCandidates(streams, { origin, addonName = '', maxDirec
     const infoHash = extractInfoHash(magnetInStream, stream?.infoHash || '');
     if (infoHash && !candidateMap.has(infoHash)) {
       const filename = stream?.behaviorHints?.filename || '';
-      const mp4Bonus = /\.mp4$/i.test(filename) ? 0.5 : 0;
+      const browserBonus = computeBrowserCompatibilityBonus(qualityMeta, filename);
       const seederBonus = extractSeederTiebreaker(`${stream?.title || ''} ${stream?.description || ''}`);
       candidateMap.set(infoHash, {
         infoHash,
@@ -1268,7 +1422,7 @@ function collectStreamsAndCandidates(streams, { origin, addonName = '', maxDirec
         fileIdx: Number.isInteger(stream?.fileIdx) ? stream.fileIdx : undefined,
         title: rawLabel || filename || 'Torrent Stream',
         quality,
-        qualityScore: baseScore + mp4Bonus + seederBonus,
+        qualityScore: baseScore + browserBonus + seederBonus,
         addonName: addonName || undefined,
         order: candidateMap.size,
       });
@@ -1327,7 +1481,7 @@ function extractCustomResolverJsonSources(data, origin, originBase, seenUrls, ca
   const out = [];
   if (Array.isArray(data?.sources)) {
     for (const s of data.sources.slice(0, 6)) {
-      if (!s?.url || !/^https?:\/\//i.test(s.url) || seenUrls.has(s.url)) continue;
+      if (!s?.url || !/^https?:\/\//i.test(s.url) || seenUrls.has(s.url) || isRateLimitOrFakeStream({ url: s.url, name: s.name }, s.name)) continue;
       seenUrls.add(s.url);
       const isDirectVideo = /\.(mp4|webm|m4v|mov)(\?|#|$)/i.test(s.url);
       const idx = out.length;
@@ -1829,6 +1983,21 @@ async function handleResolveStream(request, reqUrl, env = {}) {
         direct: true,
         node: 'debrid',
       });
+      if (!isHls && /^https:\/\//i.test(playable)) {
+        sources.push({
+          id: 'debrid-instant-cache-direct',
+          name: `Instant Cached Direct (${debridProvider.toUpperCase()})`,
+          type: 'direct',
+          url: playable,
+          rawUrl: playable,
+          provider: debridProvider,
+          quality: resolvedQuality,
+          infoHash: winning?.infoHash || undefined,
+          shielded: true,
+          direct: true,
+          node: 'debrid',
+        });
+      }
     }
   }
 
@@ -1986,22 +2155,39 @@ export default {
       const debridConfigured = Boolean(
         env.DEBRID_API_KEY || env.REALDEBRID_API_KEY || env.TORBOX_API_KEY
       );
-      const debridProvider = env.TORBOX_API_KEY
+      const debridProvider = env.TORBOX_API_KEY && !env.REALDEBRID_API_KEY
         ? 'torbox'
         : env.REALDEBRID_API_KEY || env.DEBRID_API_KEY
         ? 'realdebrid'
-        : 'none';
+        : env.DEBRID_PROVIDER || 'none';
       const tokenVerification = Boolean(
         env.REQUIRE_PLAY_TOKEN === 'true' || env.REQUIRE_PLAY_TOKEN === '1'
       );
+      const envAddons = parseAddonUrls([env.STREMIO_ADDON_URLS || '', env.STREMIO_ADDON_URL || '']).map((a) => {
+        let hostname = a.url;
+        try {
+          hostname = new URL(a.url).hostname;
+        } catch {}
+        return {
+          url: a.url,
+          name: a.name || hostname,
+          enabled: true,
+          serverManaged: true,
+        };
+      });
       return jsonResponse({
         status: 'ready',
         version: '1.0.0',
         runtime: 'cloudflare-worker',
         timestamp: Date.now(),
         tmdb: { configured: Boolean(env.TMDB_API_KEY) },
-        debrid: { configured: debridConfigured, provider: debridProvider },
-        stremio: { configured: true, maxAddons: 12 },
+        debrid: { configured: debridConfigured, provider: debridProvider, serverManaged: debridConfigured },
+        stremio: {
+          configured: true,
+          addonCount: envAddons.length,
+          addons: envAddons,
+          maxAddons: 12,
+        },
         jellyfin: {
           configured: Boolean(env.JELLYFIN_URL),
           url: env.JELLYFIN_URL ? env.JELLYFIN_URL.replace(/\/+$/, '') : '',

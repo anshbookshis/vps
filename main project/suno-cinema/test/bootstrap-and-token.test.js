@@ -6,12 +6,15 @@ import {
   verifyPlayToken,
   parseByteRange,
   createHlsSegmentCache,
+  resolveDebridCandidates,
+  isRateLimitOrFakeStream,
   rewriteHlsManifest as serverRewriteHlsManifest,
   createSunoCinemaServer,
 } from '../server.js';
 import worker, {
   signPlayTokenWorker,
   verifyPlayTokenWorker,
+  isRateLimitOrFakeStream as workerIsRateLimitOrFakeStream,
   rewriteHlsManifest as workerRewriteHlsManifest,
 } from '../cloudflare-hls-proxy.js';
 import {
@@ -19,8 +22,10 @@ import {
   fetchPlayToken,
   resolveJellyfinStream,
   buildHlsProxyUrl,
+  classifyDirectStreamKind,
 } from '../src/utils/vidrift.js';
 import { loadPlayerPrefs, savePlayerPrefs } from '../src/utils/storage.js';
+import { renderSettingsSheet, renderStreamSourcesModal } from '../src/components/modals.js';
 
 test('signPlayToken and verifyPlayToken (Node server): HMAC-SHA256 signing, path scoping, and tamper resistance', () => {
   const streamUrl = 'https://vod.example.com/hls/movies/master.m3u8';
@@ -376,4 +381,245 @@ test('Cloudflare Worker /api/search handles TMDB env key cleanly', async () => {
   } finally {
     globalThis.fetch = origFetch;
   }
+});
+
+test('classifyDirectStreamKind prevents passing .mkv/.mp4 containers into Hls.js', () => {
+  assert.strictEqual(
+    classifyDirectStreamKind(
+      'https://edge.workers.dev/api/proxy/hls?url=https%3A%2F%2Frd.example%2Fd%2FBreaking%2520Bad%2520S01E01.mkv'
+    ),
+    'video'
+  );
+  assert.strictEqual(
+    classifyDirectStreamKind(
+      'https://edge.workers.dev/api/proxy/hls?url=https%3A%2F%2Frd.example%2Fd%2FInception.1080p.mp4',
+      { type: 'direct' }
+    ),
+    'video'
+  );
+  assert.strictEqual(
+    classifyDirectStreamKind(
+      'https://edge.workers.dev/api/proxy/hls?url=https%3A%2F%2Fcdn.example%2Fmaster.m3u8'
+    ),
+    'hls'
+  );
+});
+
+test('resolveDebridCandidates selects single video file on waiting_files_selection and rejects .rar archives', async () => {
+  const origFetch = globalThis.fetch;
+  const selectedBodies = [];
+  const deletedIds = [];
+
+  globalThis.fetch = async (url, opts = {}) => {
+    const href = String(url);
+    if (href.includes('/torrents/addMagnet')) {
+      const body = String(opts.body || '');
+      return new Response(JSON.stringify({ id: body.includes('aaaa') ? 'rd-rar' : 'rd-mp4' }), { status: 201 });
+    }
+    if (href.includes('/torrents/info/rd-rar')) {
+      return new Response(
+        JSON.stringify({
+          status: 'downloaded',
+          links: ['https://rd.example/pack'],
+          files: [{ id: 1, selected: 1, path: '/Movie.rar', bytes: 1_000_000 }],
+        }),
+        { status: 200 }
+      );
+    }
+    if (href.includes('/torrents/info/rd-mp4')) {
+      if (selectedBodies.some((b) => b.id === 'rd-mp4')) {
+        return new Response(
+          JSON.stringify({
+            status: 'downloaded',
+            links: ['https://rd.example/mp4-direct'],
+            files: [{ id: 2, selected: 1, path: '/Interstellar.1080p.mp4', bytes: 2_500_000_000 }],
+          }),
+          { status: 200 }
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          status: 'waiting_files_selection',
+          files: [
+            { id: 1, path: '/Subtitles/en.srt', bytes: 50_000 },
+            { id: 2, path: '/Interstellar.1080p.mp4', bytes: 2_500_000_000 },
+          ],
+        }),
+        { status: 200 }
+      );
+    }
+    if (href.includes('/torrents/selectFiles/')) {
+      const id = href.split('/').pop();
+      selectedBodies.push({ id, body: String(opts.body || '') });
+      return new Response(null, { status: 204 });
+    }
+    if (href.includes('/torrents/delete/')) {
+      deletedIds.push(href.split('/').pop());
+      return new Response(null, { status: 204 });
+    }
+    if (href.includes('/unrestrict/link')) {
+      const body = String(opts.body || '');
+      if (body.includes('pack')) {
+        return new Response(JSON.stringify({ download: 'https://cdn.rd/Movie.rar', filename: 'Movie.rar' }), {
+          status: 200,
+        });
+      }
+      return new Response(
+        JSON.stringify({ download: 'https://cdn.rd/Interstellar.1080p.mp4', filename: 'Interstellar.1080p.mp4' }),
+        { status: 200 }
+      );
+    }
+    return origFetch(url, opts);
+  };
+
+  try {
+    const res = await resolveDebridCandidates({
+      provider: 'realdebrid',
+      apiKey: 'rd-test',
+      candidates: [
+        { infoHash: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', title: 'Rar Candidate' },
+        { infoHash: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', title: 'MP4 Candidate' },
+      ],
+    });
+    assert.ok(res);
+    assert.strictEqual(res.url, 'https://cdn.rd/Interstellar.1080p.mp4');
+    assert.ok(deletedIds.includes('rd-rar'), 'Must reject and clean up .rar download');
+    assert.ok(
+      selectedBodies.some((x) => x.id === 'rd-mp4' && x.body === 'files=2'),
+      'Must select only single video file ID 2 instead of files=all'
+    );
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
+test('renderStreamSourcesModal displays Edge-managed Stremio addons and Real-Debrid status when backendStatus is live', () => {
+  const html = renderStreamSourcesModal({
+    activeTab: 'addons',
+    prefs: { hlsProxyUrl: 'https://suno-cinema-edge-proxy.contactanshyadav.workers.dev' },
+    addons: [],
+    backendStatus: {
+      status: 'ready',
+      tmdb: { configured: true },
+      debrid: { configured: true, provider: 'realdebrid', serverManaged: true },
+      stremio: {
+        configured: true,
+        addonCount: 3,
+        addons: [
+          { name: 'torrentio.strem.fun', url: 'https://torrentio.strem.fun', enabled: true },
+          { name: 'comet.elfhosted.com', url: 'https://comet.elfhosted.com', enabled: true },
+          { name: 'mediafusion.elfhosted.com', url: 'https://mediafusion.elfhosted.com', enabled: true },
+        ],
+      },
+    },
+  });
+
+  assert.ok(html.includes('3 Addons Active (Edge)'));
+  assert.ok(html.includes('Real-Debrid Active (Edge)'));
+  assert.ok(html.includes('Edge Proxy Ready'));
+  assert.ok(html.includes('torrentio.strem.fun'));
+  assert.equal(html.includes('0 Addons Active'), false);
+  assert.equal(html.includes('Debrid Not Set'), false);
+});
+
+test('isRateLimitOrFakeStream rejects ElfHosted rate-limit stubs while keeping real media streams', () => {
+  for (const fn of [isRateLimitOrFakeStream, workerIsRateLimitOrFakeStream]) {
+    assert.equal(
+      fn(
+        {
+          name: '[🐢] MediaFusion',
+          title: 'MediaFusion public rate-limit exceeded 🐢',
+          url: 'https://elfhosted.com/assets/public-rate-limit-exceeded.mp4',
+        },
+        '[🐢] MediaFusion — MediaFusion public rate-limit exceeded 🐢'
+      ),
+      true
+    );
+    assert.equal(
+      fn(
+        {
+          name: 'Direct CDN 1080p',
+          url: 'https://cdn.example.com/movie/master.m3u8',
+        },
+        'Direct CDN 1080p'
+      ),
+      false
+    );
+  }
+});
+
+test('resolveDebridCandidates reuses matching downloaded torrent without calling addMagnet', async () => {
+  const cachedHash = 'f1e2d3c4b5a697887766554433221100ffeeddcc';
+  const origFetch = globalThis.fetch;
+  let addMagnetCalls = 0;
+  let unrestrictCalls = 0;
+
+  globalThis.fetch = async (url, opts = {}) => {
+    const href = String(url);
+    if (href.includes('/rest/1.0/torrents?limit=50')) {
+      return new Response(
+        JSON.stringify([
+          {
+            id: 'EXISTING-RD-1',
+            hash: cachedHash,
+            filename: 'Fight.Club.1999.1080p.BluRay.x264.mp4',
+            status: 'downloaded',
+            links: ['https://real-debrid.com/d/EXISTING_LINK_1'],
+          },
+        ]),
+        { status: 200 }
+      );
+    }
+    if (href.includes('/torrents/addMagnet')) {
+      addMagnetCalls += 1;
+      return new Response(JSON.stringify({ id: 'SHOULD_NOT_HAPPEN' }), { status: 201 });
+    }
+    if (href.includes('/unrestrict/link')) {
+      unrestrictCalls += 1;
+      assert.ok(String(opts.body || '').includes(encodeURIComponent('https://real-debrid.com/d/EXISTING_LINK_1')));
+      return new Response(
+        JSON.stringify({
+          download: 'https://20-4.download.real-debrid.com/d/REUSED/Fight.Club.1999.1080p.mp4',
+          filename: 'Fight.Club.1999.1080p.mp4',
+        }),
+        { status: 200 }
+      );
+    }
+    return new Response('{}', { status: 404 });
+  };
+
+  try {
+    const res = await resolveDebridCandidates({
+      provider: 'realdebrid',
+      apiKey: 'rd-test-key',
+      candidates: [
+        { infoHash: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', quality: '4K UHD', title: 'Missing 4K' },
+        { infoHash: cachedHash, quality: '1080p', title: 'Fight Club 1080p MP4' },
+      ],
+    });
+    assert.ok(res);
+    assert.equal(res.candidate.infoHash, cachedHash);
+    assert.equal(res.url, 'https://20-4.download.real-debrid.com/d/REUSED/Fight.Club.1999.1080p.mp4');
+    assert.equal(addMagnetCalls, 0, 'Must reuse existing downloaded RD torrent instead of calling addMagnet');
+    assert.equal(unrestrictCalls, 1);
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
+test('renderSettingsSheet renders Edge Addons and Debrid active badges when backendStatus is configured', () => {
+  const html = renderSettingsSheet({
+    appearance: { theme: 'suno-red' },
+    prefs: { sub: 'en', hlsProxyUrl: 'https://suno-cinema-edge-proxy.contactanshyadav.workers.dev' },
+    shield: { blockedCount: 2, navigationLock: true, strictFrameMode: false },
+    profile: { name: 'Ansh' },
+    backendStatus: {
+      status: 'ready',
+      stremio: { addonCount: 2 },
+      debrid: { configured: true, provider: 'realdebrid' },
+    },
+  });
+
+  assert.ok(html.includes('2 Edge Addons Active'));
+  assert.ok(html.includes('Real-Debrid Active (Edge)'));
 });

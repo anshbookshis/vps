@@ -6,6 +6,8 @@ import {
   buildVidriftCommand,
   VIDRIFT_ORIGIN,
   isDirectStreamUrl,
+  classifyDirectStreamKind,
+  fetchBackendStatus,
   fetchStreamSources,
   cleanProxyUrl,
   cleanAddonUrl,
@@ -373,7 +375,20 @@ function getActiveResolvedSource() {
 function getEnabledAddonsCount() {
   const addons = Array.isArray(state.prefs?.stremioAddons) ? state.prefs.stremioAddons : [];
   const enabled = addons.filter((a) => a && a.enabled !== false);
-  if (enabled.length > 0) return enabled.length;
+  const edgeAddons = Array.isArray(state.sourcesBackendStatus?.stremio?.addons)
+    ? state.sourcesBackendStatus.stremio.addons
+    : [];
+  const seen = new Set(
+    enabled.map((a) => String(a.url || '').replace(/\/manifest\.json\/?$/i, '').replace(/\/+$/, '').toLowerCase())
+  );
+  for (const ea of edgeAddons) {
+    const k = String(ea?.url || '').replace(/\/manifest\.json\/?$/i, '').replace(/\/+$/, '').toLowerCase();
+    if (k) seen.add(k);
+  }
+  if (seen.size > 0) return seen.size;
+  if (state.sourcesBackendStatus?.stremio?.addonCount > 0) {
+    return Number(state.sourcesBackendStatus.stremio.addonCount);
+  }
   return state.prefs?.stremioAddonUrl ? 1 : 0;
 }
 
@@ -381,6 +396,7 @@ function hasAnyConfiguredSource() {
   return Boolean(
     getEnabledAddonsCount() > 0 ||
       state.prefs?.debridApiKey ||
+      state.sourcesBackendStatus?.debrid?.configured ||
       state.prefs?.hlsProxyUrl ||
       state.prefs?.customResolverUrl
   );
@@ -1064,16 +1080,16 @@ async function attachDirectVideoStream(videoEl, streamUrl, item, sourceMeta = nu
     triggerHlsFailover(item, 'Direct video error');
   };
 
-  // >6s Playback Stall Watchdog & 1s Telemetry updater
+  // >8s Playback Stall Watchdog & 1s Telemetry updater
   stallWatchdogTimer = setInterval(() => {
     if (sessionSeq !== hlsSessionSeq || didFailover) return;
     const now = Date.now();
     const isPlayingIntent = !videoEl.paused && !videoEl.ended && !videoEl.seeking;
     const stallRef = bufferingSince || lastProgressAt;
-    if (isPlayingIntent && videoEl.readyState < 3 && now - stallRef > 6000) {
+    if (isPlayingIntent && videoEl.readyState < 3 && now - stallRef > 8000) {
       didFailover = true;
-      console.warn('[HLS Watchdog] Playback stalled >6s. Failing over to next mirror...');
-      triggerHlsFailover(item, 'Playback stalled >6s');
+      console.warn('[HLS Watchdog] Playback stalled >8s. Failing over to next mirror...');
+      triggerHlsFailover(item, 'Playback stalled >8s');
       return;
     }
     if (activeHlsInstance?.bandwidthEstimate) {
@@ -1082,11 +1098,30 @@ async function attachDirectVideoStream(videoEl, streamUrl, item, sourceMeta = nu
     updateTelemetryBadge(videoEl);
   }, 1000);
 
-  const lowerUrl = streamUrl.toLowerCase();
-  if (lowerUrl.includes('.mp4') && !lowerUrl.includes('.m3u8')) {
+  const streamKind = classifyDirectStreamKind(streamUrl, sourceMeta);
+  if (streamKind === 'video') {
+    if (streamUrl.includes('/api/proxy/')) {
+      videoEl.setAttribute('crossorigin', 'anonymous');
+    } else {
+      videoEl.removeAttribute('crossorigin');
+    }
     videoEl.src = streamUrl;
+    videoEl.load?.();
+    const playAttempt = videoEl.play?.();
+    if (playAttempt && typeof playAttempt.catch === 'function') {
+      playAttempt.catch((err) => {
+        if (sessionSeq !== hlsSessionSeq) return;
+        if (err?.name === 'NotAllowedError') {
+          setSpinnerState(false);
+          wakePlayerHud(true);
+          updateHudControlsVisuals();
+        }
+      });
+    }
     return;
   }
+
+  videoEl.setAttribute('crossorigin', 'anonymous');
 
   const Hls = await loadHlsScriptOnce();
   if (sessionSeq !== hlsSessionSeq) return;
@@ -1120,6 +1155,16 @@ async function attachDirectVideoStream(videoEl, streamUrl, item, sourceMeta = nu
       setSpinnerState(false);
       updateHudControlsVisuals();
       if (state.hudOpenMenu === 'quality') renderHudPopupMenu();
+      const hlsPlay = videoEl.play?.();
+      if (hlsPlay && typeof hlsPlay.catch === 'function') {
+        hlsPlay.catch((err) => {
+          if (sessionSeq !== hlsSessionSeq) return;
+          if (err?.name === 'NotAllowedError') {
+            wakePlayerHud(true);
+            updateHudControlsVisuals();
+          }
+        });
+      }
     });
 
     hls.on(Hls.Events.LEVEL_SWITCHED, (_, data) => {
@@ -1457,7 +1502,12 @@ async function launchStream(rawItem, { season, episode, resumeSeconds } = {}) {
         pickedIndex = firstHlsIdx;
       } else {
         if ((state.activeItem.magnetUri || state.activeItem.infoHash) && firstHlsIdx < 0) {
-          showToast('Magnet/InfoHash requires a Debrid API key with Node server or Edge Proxy.');
+          const hasDebrid = Boolean(state.prefs?.debridApiKey || state.sourcesBackendStatus?.debrid?.configured);
+          showToast(
+            hasDebrid
+              ? 'No cached Real-Debrid stream found for this magnet yet; switched to fallback player.'
+              : 'Magnet/InfoHash requires a Debrid API key with Node server or Edge Proxy.'
+          );
         } else if (prov === 'hls-direct') {
           state._hlsFallbackNotifiedItem = getMediaKey(state.activeItem);
           showToast('Direct HLS stream unavailable for this title. Switched to VidLink shield player.');
@@ -3365,6 +3415,7 @@ function render(options = {}) {
       prefs: state.prefs,
       shield: state.shield,
       profile: state.profile,
+      backendStatus: state.sourcesBackendStatus,
     });
   } else if (state.modal === 'categories') {
     modalMount.innerHTML = renderCategoriesSheet(state.discoverGenre, { desktop: dk });
@@ -3487,6 +3538,15 @@ function snapshotSourcesDraft() {
   if (dirTypeEl) state.sourcesDraft.directType = dirTypeEl.value;
 }
 
+async function syncBackendStatus() {
+  const bData = await fetchBackendStatus(state.prefs?.hlsProxyUrl || '').catch(() => null);
+  if (bData) {
+    state.sourcesBackendStatus = bData;
+    render();
+  }
+  return bData;
+}
+
 function openSourcesModal(tab = 'addons') {
   state.sourcesTab = ['addons', 'debrid', 'proxy', 'direct'].includes(tab) ? tab : 'addons';
   state.sourcesAddonError = '';
@@ -3508,6 +3568,7 @@ function openSourcesModal(tab = 'addons') {
   };
   state.modal = 'sources';
   render();
+  syncBackendStatus();
 }
 
 function closeActiveModal({ refreshPlayerIfDirty = true } = {}) {
@@ -4898,10 +4959,12 @@ async function init() {
       .then((res) => {
         if (res?.status === 'ok' && res.activeOrigin) {
           state.prefs = savePlayerPrefs({ hlsProxyUrl: res.activeOrigin });
-          if (state.modal === 'sources') render();
+          syncBackendStatus();
         }
       })
       .catch(() => {});
+  } else {
+    syncBackendStatus();
   }
 
   antiRedirectGuard.install();

@@ -5,7 +5,7 @@ compatibility_date = "2024-01-01"
 [vars]
 REQUIRE_PLAY_TOKEN = "false"
 DEBRID_PROVIDER = "realdebrid"
-STREMIO_ADDON_URLS = "https://torrentio.strem.fun/manifest.json,https://comet.elfhosted.com/manifest.json,https://mediafusion.elfhosted.com/manifest.json"
+STREMIO_ADDON_URLS = "https://torrentio.strem.fun/manifest.json,https://peerflix.mov/manifest.json"
 SUNO_BOOTSTRAP_MIRRORS = "https://suno-cinema-edge-proxy.contactanshyadav.workers.dev"
 SUNO_VOD_ORIGIN = ""
 JELLYFIN_URL = ""
